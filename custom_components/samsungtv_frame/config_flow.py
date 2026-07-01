@@ -40,7 +40,10 @@ async def validate_and_pair(hass, host: str) -> dict[str, Any]:
         art.close()
         return token
 
-    token = await hass.async_add_executor_job(_pair)
+    try:
+        token = await hass.async_add_executor_job(_pair)
+    except Exception as err:  # noqa: BLE001
+        raise CannotConnect from err
     return {
         CONF_MAC: device.get("wifiMac"),
         CONF_TOKEN: token,

@@ -43,3 +43,19 @@ async def test_user_flow_not_a_frame(hass):
         )
     assert result["type"] == FlowResultType.FORM
     assert result["errors"] == {"base": "not_a_frame"}
+
+
+async def test_user_flow_cannot_connect(hass):
+    from custom_components.samsungtv_frame.config_flow import CannotConnect
+    with patch(
+        "custom_components.samsungtv_frame.config_flow.validate_and_pair",
+        new=AsyncMock(side_effect=CannotConnect),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "user"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"host": "1.2.3.4"}
+        )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "cannot_connect"}
