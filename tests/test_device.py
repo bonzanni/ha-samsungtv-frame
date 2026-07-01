@@ -41,6 +41,23 @@ async def test_turn_on_sends_magic_packet(hass, device):
     assert smp.call_args.args[0] == "A0:D0:5B:86:CE:B7"
 
 
+async def test_listener_uses_separate_connection(hass, device):
+    # The listener must use _art_listener, not _art, so that a prior
+    # get_artmode() call (which opens _art's websocket) doesn't prevent
+    # start_listening from running.
+    assert device._art is not device._art_listener
+
+    mock_art = MagicMock()
+    mock_listener = MagicMock()
+    device._art = mock_art
+    device._art_listener = mock_listener
+
+    await device.async_start_art_listener(lambda e, d: None)
+
+    mock_listener.start_listening.assert_called_once()
+    mock_art.start_listening.assert_not_called()
+
+
 async def test_turn_off_holds_power_key(hass, device):
     remote = MagicMock()
     remote.send_commands = AsyncMock()

@@ -83,6 +83,25 @@ async def test_art_event_unknown_subevent_no_push(hass, mock_device):
         push.assert_not_called()
 
 
+async def test_off_resets_art_mode(hass, mock_device):
+    # First poll: TV is on and in art mode.
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    coord = _make(hass, mock_device)
+    first = await coord._async_update_data()
+    assert first.tv_mode is TvMode.ART_MODE
+    assert first.art_mode is True
+
+    # Now simulate TV going unreachable (e.g. powered off).
+    mock_device.async_device_info.return_value = None
+    # First unreachable poll is held at last-stable by debounce.
+    await coord._async_update_data()
+    # Second unreachable poll crosses the OFF_DEBOUNCE_COUNT threshold.
+    final = await coord._async_update_data()
+    assert final.tv_mode is TvMode.OFF
+    assert final.art_mode is False
+
+
 async def test_art_event_go_to_standby_holds(hass, mock_device):
     coord = _make(hass, mock_device)
     coord.data = FrameData(

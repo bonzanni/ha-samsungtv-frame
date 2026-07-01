@@ -35,6 +35,12 @@ class FrameDevice:
         self._art = SamsungTVArt(
             host, token=token, port=PORT_WS, name=CLIENT_NAME, timeout=8
         )
+        # Dedicated second instance for start_listening — samsungtvws raises
+        # ConnectionFailure if start_listening is called on a connection that
+        # is already open (e.g. after get_artmode opened it during first refresh).
+        self._art_listener = SamsungTVArt(
+            host, token=token, port=PORT_WS, name=CLIENT_NAME, timeout=8
+        )
 
     async def async_device_info(self) -> dict[str, Any] | None:
         if self._rest is None:
@@ -72,11 +78,18 @@ class FrameDevice:
     async def async_start_art_listener(
         self, callback: Callable[[str, Any], None]
     ) -> None:
-        await self._hass.async_add_executor_job(self._art.start_listening, callback)
+        await self._hass.async_add_executor_job(self._art_listener.start_listening, callback)
 
     async def async_stop(self) -> None:
         try:
             await self._remote.close()
         except Exception:  # noqa: BLE001
             pass
-        await self._hass.async_add_executor_job(self._art.close)
+        try:
+            await self._hass.async_add_executor_job(self._art.close)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await self._hass.async_add_executor_job(self._art_listener.close)
+        except Exception:  # noqa: BLE001
+            pass

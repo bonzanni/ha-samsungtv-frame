@@ -57,10 +57,14 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             if mode is TvMode.UNKNOWN:
                 mode = self._last_stable()
 
+        # When the TV is off we know art mode cannot be active, even if the
+        # last cached value says otherwise.  Keep self._art_mode unchanged so
+        # the cached state is still valid once the TV comes back.
+        art_mode_out = False if mode is TvMode.OFF else self._art_mode
         return FrameData(
             reachable=reachable,
             power_state=power_state,
-            art_mode=self._art_mode,
+            art_mode=art_mode_out,
             tv_mode=mode,
             current_art=current_art,
         )
