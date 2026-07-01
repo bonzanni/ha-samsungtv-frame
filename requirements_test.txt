@@ -1,0 +1,3 @@
+pytest-homeassistant-custom-component
+samsungtvws[async,encrypted]==3.0.5
+wakeonlan==3.3.0
