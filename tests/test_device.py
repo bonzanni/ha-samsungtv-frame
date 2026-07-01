@@ -2,6 +2,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from samsungtvws.remote import SendRemoteKey
 
 from custom_components.samsungtv_frame.device import FrameDevice
 
@@ -46,3 +47,11 @@ async def test_turn_off_holds_power_key(hass, device):
     with patch.object(device, "_remote", remote):
         await device.async_turn_off()
     remote.send_commands.assert_awaited_once()
+    cmd = remote.send_commands.call_args.args[0]
+    # Verify the command is a 3-second hold of KEY_POWER
+    assert isinstance(cmd, list) and len(cmd) == 3
+    assert cmd[0].params["DataOfCmd"] == "KEY_POWER"
+    assert cmd[0].params["Cmd"] == "Press"
+    assert cmd[1].delay == 3
+    assert cmd[2].params["DataOfCmd"] == "KEY_POWER"
+    assert cmd[2].params["Cmd"] == "Release"
