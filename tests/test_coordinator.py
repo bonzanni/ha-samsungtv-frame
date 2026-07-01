@@ -81,3 +81,17 @@ async def test_art_event_unknown_subevent_no_push(hass, mock_device):
     with patch.object(coord, "async_set_updated_data") as push:
         coord.handle_art_event("d2d_service_message", {"event": "some_other_event"})
         push.assert_not_called()
+
+
+async def test_art_event_go_to_standby_holds(hass, mock_device):
+    coord = _make(hass, mock_device)
+    coord.data = FrameData(
+        reachable=True,
+        power_state="on",
+        art_mode=True,
+        tv_mode=TvMode.ART_MODE,
+        current_art=None,
+    )
+    with patch.object(coord, "async_set_updated_data") as push:
+        coord.handle_art_event("d2d_service_message", {"event": "go_to_standby"})
+        push.assert_not_called()

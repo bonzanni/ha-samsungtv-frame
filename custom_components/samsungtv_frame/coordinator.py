@@ -72,8 +72,6 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         if sub in ("art_mode_changed", "artmode_status"):
             value = data.get("value") or data.get("status")
             self._art_mode = value == "on"
-        elif sub == "go_to_standby":
-            self._art_mode = False
         else:
             return
         mode = derive_tv_mode(True, self._art_mode, "on")
