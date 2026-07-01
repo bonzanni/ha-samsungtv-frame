@@ -1,0 +1,11 @@
+rules:
+  config-flow: done
+  runtime-data: done
+  has-entity-name: done
+  entity-unique-id: done
+  unique-config-entry: done
+  test-before-configure: done
+  appropriate-polling: done
+  reauthentication-flow: todo   # P1b
+  reconfiguration-flow: todo    # P1b
+  parallel-updates: done

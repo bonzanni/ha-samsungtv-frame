@@ -113,8 +113,10 @@ triggers:
 
 ### 4.3 Coordinator & connection lifecycle (Approach A)
 - **Persistent art websocket** with callbacks: `art_mode_changed`/`artmode_status` → set
-  `art_mode` + `async_set_updated_data`; `go_to_standby` → `art_mode=False`; `wakeup` →
-  re-query `get_artmode()`.
+  `art_mode` + `async_set_updated_data`. `go_to_standby` is **held** (no push) — its destination
+  (watching vs off) is ambiguous, so the next heartbeat resolves it; pushing WATCHING here would
+  risk a false art→watching trigger when the TV is powering off. `wakeup` → re-query
+  `get_artmode()` (P1b).
 - **Reachability + REST heartbeat** (~10s, configurable): confirms OFF (socket dead **and**
   unreachable) and wake-from-off; refreshes `power_state`/source/volume.
 - **Connection manager:** connect → listen → on disconnect, exponential-backoff reconnect.

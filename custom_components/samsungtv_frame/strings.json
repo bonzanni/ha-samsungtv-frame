@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Samsung Frame TV",
+        "description": "Enter the TV's IP address. Accept the 'Allow' prompt on the TV when it appears.",
+        "data": {"host": "IP address"}
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach the TV. Check the IP and that it is powered on.",
+      "not_a_frame": "This Samsung TV does not report Frame support."
+    },
+    "abort": {
+      "already_configured": "This TV is already configured."
+    }
+  },
+  "entity": {
+    "binary_sensor": {"art_mode": {"name": "Art mode"}},
+    "sensor": {"tv_mode": {"name": "TV mode",
+      "state": {"off": "Off", "watching": "Watching", "art_mode": "Art mode"}}}
+  }
+}
