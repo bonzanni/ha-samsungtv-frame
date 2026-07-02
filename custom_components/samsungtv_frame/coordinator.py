@@ -1,7 +1,7 @@
 """Data update coordinator for a Samsung Frame TV."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -31,6 +31,10 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         self.device = device
         self._unreachable_count = 0
         self._art_mode: bool | None = None
+        self._was_reachable = True
+        # Set by __init__.py once the initial art listener + bridge callback
+        # exist, so a power-cycle recovery can restart the SAME listener.
+        self.restart_listener: Callable[[], Awaitable[None]] | None = None
 
     def _last_stable(self) -> TvMode:
         if self.data is not None and self.data.tv_mode is not TvMode.UNKNOWN:
@@ -42,6 +46,11 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         reachable = info is not None
         power_state = info.get("PowerState") if info else None
         current_art: str | None = None
+
+        was_reachable = self._was_reachable
+        self._was_reachable = reachable
+        if reachable and not was_reachable and self.restart_listener is not None:
+            self.hass.async_create_task(self._restart_listener_safe())
 
         if reachable:
             self._unreachable_count = 0
@@ -68,6 +77,17 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             tv_mode=mode,
             current_art=current_art,
         )
+
+    async def _restart_listener_safe(self) -> None:
+        """Restart the art push listener, swallowing failures.
+
+        Called as a fire-and-forget task off the unreachable->reachable edge;
+        a failure here must never break the polling loop.
+        """
+        try:
+            await self.restart_listener()
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("Failed to restart art listener: %s", err)
 
     @callback
     def handle_art_event(self, event: str, data: Any) -> None:

@@ -4,3 +4,4 @@ __pycache__/
 .tv_token
 probe.py
 probe_*.py
+.claude/

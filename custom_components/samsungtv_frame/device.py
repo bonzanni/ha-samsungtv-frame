@@ -38,8 +38,13 @@ class FrameDevice:
         # Dedicated second instance for start_listening — samsungtvws raises
         # ConnectionFailure if start_listening is called on a connection that
         # is already open (e.g. after get_artmode opened it during first refresh).
+        # timeout=None => blocking recv(): the TV goes silent for long stretches
+        # (e.g. idle art mode) and a finite timeout raises WebSocketTimeoutException
+        # inside the library's listener thread, which is uncaught and kills the
+        # thread permanently. A real socket error (e.g. TV power-cycle) still
+        # ends the thread, which async_restart_art_listener recovers from.
         self._art_listener = SamsungTVArt(
-            host, token=token, port=PORT_WS, name=CLIENT_NAME, timeout=8
+            host, token=token, port=PORT_WS, name=CLIENT_NAME, timeout=None
         )
 
     async def async_device_info(self) -> dict[str, Any] | None:
@@ -60,11 +65,29 @@ class FrameDevice:
             value = await self._hass.async_add_executor_job(self._art.get_artmode)
         except Exception as err:  # noqa: BLE001
             LOGGER.debug("get_artmode failed: %s", err)
+            await self._async_reset_art_connection()
             return None
         return value == "on"
 
     async def async_set_artmode(self, on: bool) -> None:
-        await self._hass.async_add_executor_job(self._art.set_artmode, on)
+        try:
+            await self._hass.async_add_executor_job(self._art.set_artmode, on)
+        except Exception:
+            await self._async_reset_art_connection()
+            raise
+
+    async def _async_reset_art_connection(self) -> None:
+        """Close the (likely dead) art websocket so the next call reopens fresh.
+
+        The samsungtvws library reuses ``self.connection`` on the sync
+        ``SamsungTVArt`` client and never invalidates it on failure, so a stale
+        connection (e.g. after the TV power-cycles) would otherwise fail
+        forever. Closing it here forces a fresh connection on the next call.
+        """
+        try:
+            await self._hass.async_add_executor_job(self._art.close)
+        except Exception:  # noqa: BLE001
+            pass
 
     async def async_turn_on(self) -> None:
         await self._hass.async_add_executor_job(
@@ -79,6 +102,29 @@ class FrameDevice:
         self, callback: Callable[[str, Any], None]
     ) -> None:
         await self._hass.async_add_executor_job(self._art_listener.start_listening, callback)
+
+    async def async_restart_art_listener(
+        self, callback: Callable[[str, Any], None]
+    ) -> None:
+        """Rebuild the art push listener from scratch and restart it.
+
+        Called when the coordinator sees the TV go unreachable -> reachable
+        again (e.g. after a power cycle). The listener thread may have died
+        (uncaught socket error) and a crashed instance holds stale connection
+        state, so we replace it with a fresh ``SamsungTVArt`` before restarting.
+        """
+
+        def _restart() -> None:
+            try:
+                self._art_listener.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._art_listener = SamsungTVArt(
+                self._host, token=self._token, port=PORT_WS, name=CLIENT_NAME, timeout=None
+            )
+            self._art_listener.start_listening(callback)
+
+        await self._hass.async_add_executor_job(_restart)
 
     async def async_stop(self) -> None:
         try:

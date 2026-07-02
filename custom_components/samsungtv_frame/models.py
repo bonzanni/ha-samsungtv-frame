@@ -20,8 +20,11 @@ def derive_tv_mode(
     """Derive the tri-state from the three raw signals.
 
     Order matters: unreachable => OFF; art websocket is the source of truth for
-    art mode (never gated on PowerState); art-off + powered => WATCHING; anything
-    else is transitional/UNKNOWN and is held as last-stable by the coordinator.
+    art mode (never gated on PowerState); art-off + powered => WATCHING; a
+    reachable TV reporting PowerState "standby" is dark (this Frame model keeps
+    its NIC up for several minutes after power-off, answering REST as
+    "standby" while reachable) => OFF; anything else is transitional/UNKNOWN
+    and is held as last-stable by the coordinator.
     """
     if not reachable:
         return TvMode.OFF
@@ -29,6 +32,8 @@ def derive_tv_mode(
         return TvMode.ART_MODE
     if art_mode is False and power_state == "on":
         return TvMode.WATCHING
+    if power_state == "standby":
+        return TvMode.OFF
     return TvMode.UNKNOWN
 
 

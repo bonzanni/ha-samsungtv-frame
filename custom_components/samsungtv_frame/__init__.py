@@ -23,10 +23,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> boo
     entry.runtime_data = coordinator
 
     # Start push art listener (best-effort; poll heartbeat is the fallback).
+    bridge_callback = make_art_bridge(hass, coordinator)
     try:
-        await device.async_start_art_listener(make_art_bridge(hass, coordinator))
+        await device.async_start_art_listener(bridge_callback)
     except Exception:  # noqa: BLE001 - listener is an enhancement, not required
         pass
+
+    # Same callback is reused so a post-power-cycle restart wires up the
+    # identical bridge (see coordinator._async_update_data edge detection).
+    async def _restart_listener() -> None:
+        await device.async_restart_art_listener(bridge_callback)
+
+    coordinator.restart_listener = _restart_listener
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

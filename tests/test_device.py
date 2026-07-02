@@ -58,6 +58,41 @@ async def test_listener_uses_separate_connection(hass, device):
     mock_art.start_listening.assert_not_called()
 
 
+async def test_get_artmode_failure_resets_connection(hass, device):
+    art = MagicMock()
+    art.get_artmode.side_effect = OSError("dead socket")
+    with patch.object(device, "_art", art):
+        result = await device.async_get_artmode()
+    assert result is None
+    art.close.assert_called_once()
+
+
+async def test_set_artmode_failure_resets_connection_and_reraises(hass, device):
+    art = MagicMock()
+    art.set_artmode.side_effect = OSError("dead socket")
+    with patch.object(device, "_art", art):
+        with pytest.raises(OSError):
+            await device.async_set_artmode(True)
+    art.close.assert_called_once()
+
+
+async def test_listener_socket_has_no_timeout(hass, device):
+    assert device._art_listener.timeout is None
+
+
+async def test_restart_art_listener_creates_fresh_instance(hass, device):
+    old = device._art_listener
+    with patch(
+        "custom_components.samsungtv_frame.device.SamsungTVArt"
+    ) as mock_cls:
+        mock_new = MagicMock()
+        mock_cls.return_value = mock_new
+        await device.async_restart_art_listener(lambda e, d: None)
+    assert device._art_listener is not old
+    assert device._art_listener is mock_new
+    mock_new.start_listening.assert_called_once()
+
+
 async def test_turn_off_holds_power_key(hass, device):
     remote = MagicMock()
     remote.send_commands = AsyncMock()

@@ -102,6 +102,36 @@ async def test_off_resets_art_mode(hass, mock_device):
     assert final.art_mode is False
 
 
+async def test_reachable_edge_triggers_listener_restart(hass, mock_device):
+    coord = _make(hass, mock_device)
+    coord.restart_listener = AsyncMock()
+
+    # First poll: unreachable.
+    mock_device.async_device_info.return_value = None
+    await coord._async_update_data()
+
+    # Second poll: reachable again -> crosses the unreachable->reachable edge.
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    await coord._async_update_data()
+    await hass.async_block_till_done()
+
+    coord.restart_listener.assert_awaited_once()
+
+
+async def test_reachable_to_reachable_does_not_restart_listener(hass, mock_device):
+    coord = _make(hass, mock_device)
+    coord.restart_listener = AsyncMock()
+
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    await coord._async_update_data()
+    await coord._async_update_data()
+    await hass.async_block_till_done()
+
+    coord.restart_listener.assert_not_awaited()
+
+
 async def test_art_event_go_to_standby_holds(hass, mock_device):
     coord = _make(hass, mock_device)
     coord.data = FrameData(
