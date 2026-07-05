@@ -5,7 +5,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from .art_listener import make_art_bridge
-from .const import CONF_HOST, CONF_MAC, CONF_TOKEN, PLATFORMS
+from .const import CONF_HOST, CONF_MAC, CONF_TOKEN, DOMAIN, PLATFORMS
 from .coordinator import FrameConfigEntry, FrameCoordinator
 from .device import FrameDevice
 
@@ -23,11 +23,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> boo
     entry.runtime_data = coordinator
 
     # Start push art listener (best-effort; poll heartbeat is the fallback).
+    # The listener socket deliberately has no timeout (see FrameDevice), so
+    # connecting while the TV is off blocks on the OS TCP connect timeout
+    # (~2 min); never await it during setup. When the TV is unreachable,
+    # skip it entirely — the coordinator restarts the listener on the next
+    # unreachable -> reachable edge.
     bridge_callback = make_art_bridge(hass, coordinator)
-    try:
-        await device.async_start_art_listener(bridge_callback)
-    except Exception:  # noqa: BLE001 - listener is an enhancement, not required
-        pass
+
+    async def _start_listener() -> None:
+        try:
+            await device.async_start_art_listener(bridge_callback)
+        except Exception:  # noqa: BLE001 - listener is an enhancement, not required
+            pass
 
     # Same callback is reused so a post-power-cycle restart wires up the
     # identical bridge (see coordinator._async_update_data edge detection).
@@ -35,6 +42,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> boo
         await device.async_restart_art_listener(bridge_callback)
 
     coordinator.restart_listener = _restart_listener
+
+    if coordinator.data.reachable:
+        entry.async_create_background_task(
+            hass, _start_listener(), f"{DOMAIN}-art-listener-start"
+        )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
