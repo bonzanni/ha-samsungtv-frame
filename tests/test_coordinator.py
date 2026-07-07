@@ -12,14 +12,17 @@ def _make(hass, device) -> FrameCoordinator:
     entry.entry_id = "abc"
     entry.options = {}
 
-    # Close coroutines handed to the mocked background-task API so they don't
-    # emit "never awaited" warnings; tests drive them directly instead.
-    def _swallow_task(_hass, coro, _name, eager_start=True):
-        if hasattr(coro, "close"):
-            coro.close()
+    # Run real coroutines handed to the mocked background-task API on the
+    # test loop (so e.g. listener restarts actually execute); anything else
+    # (a patched-out method returning a MagicMock/None) is just swallowed.
+    def _bg_task(_hass, coro, _name, eager_start=True):
+        import asyncio
+
+        if asyncio.iscoroutine(coro):
+            return hass.async_create_task(coro)
         return MagicMock()
 
-    entry.async_create_background_task.side_effect = _swallow_task
+    entry.async_create_background_task.side_effect = _bg_task
     return FrameCoordinator(hass, entry, device)
 
 
@@ -264,6 +267,82 @@ async def test_running_app_not_swept_in_art_mode(hass, mock_device):
     data = await coord._async_update_data()
     mock_device.async_app_status.assert_not_awaited()
     assert data.running_app is None
+
+
+async def test_push_art_on_during_standby_shutdown_stays_off(hass, mock_device):
+    """The dying art socket can push 'on' events during shutdown; with the
+    learned trait and PowerState standby, OFF must win on the push path too."""
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    coord = _make(hass, mock_device)
+    await coord._async_update_data()  # learn art+power-on trait
+
+    # Shutdown begins: poll sees standby => OFF.
+    mock_device.async_device_info.return_value = {"PowerState": "standby"}
+    coord.data = await coord._async_update_data()
+    assert coord.data.tv_mode is TvMode.OFF
+
+    with patch.object(coord, "async_set_updated_data") as push:
+        coord.handle_art_event(
+            "d2d_service_message", {"event": "art_mode_changed", "value": "on"}
+        )
+        pushed = push.call_args.args[0]
+    assert pushed.tv_mode is TvMode.OFF
+
+
+async def test_dead_listener_thread_triggers_restart(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.listener_alive = False
+    coord = _make(hass, mock_device)
+    coord.restart_listener = AsyncMock()
+    await coord._async_update_data()
+    await hass.async_block_till_done()
+    coord.restart_listener.assert_awaited_once()
+
+
+async def test_listener_restart_deduped_while_in_flight(hass, mock_device):
+    coord = _make(hass, mock_device)
+    coord.restart_listener = AsyncMock()
+    coord._listener_task = MagicMock()
+    coord._listener_task.done.return_value = False
+    coord._async_kick_listener_restart()
+    coord.config_entry.async_create_background_task.assert_not_called()
+
+
+async def test_persistent_art_failure_becomes_unknown(hass, mock_device):
+    """After N consecutive failed art queries the last-stable hold must end."""
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    coord = _make(hass, mock_device)
+    coord.data = await coord._async_update_data()
+    assert coord.data.tv_mode is TvMode.ART_MODE
+
+    from custom_components.samsungtv_frame.const import ART_FAIL_UNKNOWN_COUNT
+
+    mock_device.async_get_artmode.return_value = None  # art channel dead
+    for _ in range(ART_FAIL_UNKNOWN_COUNT - 1):
+        coord.data = await coord._async_update_data()
+        assert coord.data.tv_mode is TvMode.ART_MODE  # held while transient
+    coord.data = await coord._async_update_data()
+    assert coord.data.tv_mode is TvMode.UNKNOWN  # bounded: surfaces as unknown
+
+
+async def test_app_fetch_retries_after_failure(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.async_app_list.return_value = None  # booting TV: fetch fails
+    coord = _make(hass, mock_device)
+    await coord._async_update_data()
+    await hass.async_block_till_done()
+    assert coord.app_map is None
+
+    mock_device.async_app_list.return_value = [
+        {"name": "Netflix", "appId": "X", "app_type": 2}
+    ]
+    await coord._async_update_data()  # retried on a later poll
+    await hass.async_block_till_done()
+    assert coord.app_map == {"Netflix": {"name": "Netflix", "appId": "X", "app_type": 2}}
 
 
 async def test_volume_polled_when_powered_on(hass, mock_device):

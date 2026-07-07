@@ -7,5 +7,5 @@ rules:
   test-before-configure: done
   appropriate-polling: done
   reauthentication-flow: todo   # P1b
-  reconfiguration-flow: todo    # P1b
+  reconfiguration-flow: done
   parallel-updates: done

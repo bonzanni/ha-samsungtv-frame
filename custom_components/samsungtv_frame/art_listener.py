@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from homeassistant.core import HomeAssistant
 
+from .const import LOGGER
 from .coordinator import FrameCoordinator
 
 
@@ -30,12 +31,15 @@ def make_art_bridge(
             return
         raw = data.get("data")
         if not isinstance(raw, str):
+            LOGGER.debug("Ignoring art frame without string payload: %r", data)
             return
         try:
             payload = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
+            LOGGER.debug("Ignoring undecodable art payload: %r", raw)
             return
         if not isinstance(payload, dict):
+            LOGGER.debug("Ignoring non-dict art payload: %r", payload)
             return
         hass.loop.call_soon_threadsafe(coordinator.handle_art_event, event, payload)
 

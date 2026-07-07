@@ -94,6 +94,17 @@ async def test_set_artmode_failure_resets_connection_and_reraises(hass, device):
     with patch.object(device, "_art", art):
         with pytest.raises(OSError):
             await device.async_set_artmode(True)
+    # One reset after the initial failure, one after the failed retry.
+    assert art.close.call_count == 2
+    assert art.set_artmode.call_count == 2
+
+
+async def test_set_artmode_retries_once_on_stale_connection(hass, device):
+    art = MagicMock()
+    art.set_artmode.side_effect = [OSError("stale"), None]
+    with patch.object(device, "_art", art):
+        await device.async_set_artmode(True)
+    assert art.set_artmode.call_count == 2
     art.close.assert_called_once()
 
 
@@ -118,6 +129,18 @@ async def test_update_token_used_for_fresh_listener(hass, device):
     ) as mock_cls:
         await device.async_restart_art_listener(lambda e, d: None)
     assert mock_cls.call_args.kwargs["token"] == "fresh-token"
+
+
+async def test_listener_not_restarted_after_stop(hass, device):
+    """An in-flight restart finishing after unload must not resurrect a
+    listener nothing will ever close."""
+    await device.async_stop()
+    with patch(
+        "custom_components.samsungtv_frame.device.SamsungTVArt"
+    ) as mock_cls:
+        await device.async_restart_art_listener(lambda e, d: None)
+        await device.async_start_art_listener(lambda e, d: None)
+    mock_cls.assert_not_called()
 
 
 async def test_restart_art_listener_creates_fresh_instance(hass, device):

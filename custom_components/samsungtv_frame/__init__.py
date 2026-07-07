@@ -4,7 +4,7 @@ from __future__ import annotations
 from homeassistant.core import HomeAssistant
 
 from .art_listener import make_art_bridge
-from .const import CONF_HOST, CONF_MAC, CONF_TOKEN, DOMAIN, PLATFORMS
+from .const import CONF_HOST, CONF_MAC, CONF_TOKEN, DOMAIN, LOGGER, PLATFORMS
 from .coordinator import FrameConfigEntry, FrameCoordinator
 from .device import FrameDevice
 
@@ -32,8 +32,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> boo
     async def _start_listener() -> None:
         try:
             await device.async_start_art_listener(bridge_callback)
-        except Exception:  # noqa: BLE001 - listener is an enhancement, not required
-            pass
+        except Exception as err:  # noqa: BLE001 - listener is an enhancement, not required
+            LOGGER.warning(
+                "Art event listener failed to start (%s); falling back to "
+                "polling until it can be restarted",
+                err,
+            )
 
     # Same callback is reused so a post-power-cycle restart wires up the
     # identical bridge (see coordinator._async_update_data edge detection).

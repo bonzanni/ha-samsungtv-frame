@@ -62,7 +62,7 @@ async def validate_and_pair(hass, host: str) -> dict[str, Any]:
     except Exception as err:  # noqa: BLE001
         raise CannotConnect from err
     return {
-        CONF_MAC: device.get("wifiMac"),
+        CONF_MAC: format_mac(device.get("wifiMac", "")),
         CONF_TOKEN: token,
         CONF_MODEL: device.get("modelName"),
     }

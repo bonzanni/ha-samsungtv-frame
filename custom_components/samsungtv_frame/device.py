@@ -48,6 +48,14 @@ class FrameDevice:
         # it (heartbeat poll vs entity services would otherwise interleave
         # frames on one websocket).
         self._art_lock = asyncio.Lock()
+        # Serializes create/start/close of the listener instance: concurrent
+        # restarts (reachable-edge storms on a flapping TV) would otherwise
+        # race on self._art_listener and leak orphaned sockets + recv threads.
+        self._listener_lock = asyncio.Lock()
+        # Once stopped (entry unload), no listener may be (re)started — an
+        # in-flight restart task finishing after unload would otherwise
+        # resurrect a connection nothing will ever close.
+        self._stopped = False
         # UPnP DMR device (RenderingControl) — created lazily, dropped on
         # failure so a TV power cycle just triggers a fresh description fetch.
         self._upnp_device: UpnpDevice | None = None
@@ -159,6 +167,24 @@ class FrameDevice:
         async with self._art_lock:
             return await self._hass.async_add_executor_job(func, *args)
 
+    async def _async_art_command(self, func: Callable[..., Any], *args: Any) -> Any:
+        """Art command with reset + one retry on a stale connection.
+
+        The sync client caches its connection and never invalidates it on
+        failure, so the first command after a TV power cycle fails spuriously;
+        a retry on a fresh connection usually succeeds.
+        """
+        try:
+            return await self._async_art_call(func, *args)
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("art command failed, retrying on a fresh connection: %s", err)
+            await self._async_reset_art_connection()
+            try:
+                return await self._async_art_call(func, *args)
+            except Exception:
+                await self._async_reset_art_connection()
+                raise
+
     async def async_get_artmode(self, attempts: int = 2) -> bool | None:
         # Two attempts by default: the first call after a TV power cycle hits
         # the stale cached connection and fails; the reset makes the retry
@@ -176,11 +202,7 @@ class FrameDevice:
         return None
 
     async def async_set_artmode(self, on: bool) -> None:
-        try:
-            await self._async_art_call(self._art.set_artmode, on)
-        except Exception:
-            await self._async_reset_art_connection()
-            raise
+        await self._async_art_command(self._art.set_artmode, on)
 
     async def async_get_current_art(self) -> str | None:
         """Content id of the artwork currently selected, or None."""
@@ -205,10 +227,10 @@ class FrameDevice:
             return None
 
     async def async_set_art_brightness(self, value: int) -> None:
-        await self._async_art_call(self._art.set_brightness, value)
+        await self._async_art_command(self._art.set_brightness, value)
 
     async def async_select_art(self, content_id: str, show: bool) -> None:
-        await self._async_art_call(self._art.select_image, content_id, None, show)
+        await self._async_art_command(self._art.select_image, content_id, None, show)
 
     async def async_upload_art(
         self, data: bytes, file_type: str, matte: str
@@ -220,11 +242,16 @@ class FrameDevice:
                 data, matte=matte, portrait_matte=matte, file_type=file_type
             )
 
-        async with self._art_lock:
-            return await self._hass.async_add_executor_job(_upload)
+        # No auto-retry: a retry after a partially-completed upload could
+        # duplicate the artwork. Reset the connection so the next call heals.
+        try:
+            return await self._async_art_call(_upload)
+        except Exception:
+            await self._async_reset_art_connection()
+            raise
 
     async def async_delete_art(self, content_id: str) -> None:
-        await self._async_art_call(self._art.delete, content_id)
+        await self._async_art_command(self._art.delete, content_id)
 
     async def async_get_art_thumbnail(self, content_id: str) -> bytes | None:
         """JPEG thumbnail bytes for an artwork, or None."""
@@ -236,13 +263,15 @@ class FrameDevice:
         return bytes(data) if data else None
 
     async def async_change_matte(self, content_id: str, matte_id: str) -> None:
-        await self._async_art_call(self._art.change_matte, content_id, matte_id)
+        await self._async_art_command(self._art.change_matte, content_id, matte_id)
 
     async def async_set_photo_filter(self, content_id: str, filter_id: str) -> None:
-        await self._async_art_call(self._art.set_photo_filter, content_id, filter_id)
+        await self._async_art_command(
+            self._art.set_photo_filter, content_id, filter_id
+        )
 
     async def async_set_favourite(self, content_id: str, favourite: bool) -> None:
-        await self._async_art_call(
+        await self._async_art_command(
             self._art.set_favourite, content_id, "on" if favourite else "off"
         )
 
@@ -258,7 +287,7 @@ class FrameDevice:
             return None
 
     async def async_set_color_temperature(self, value: int) -> None:
-        await self._async_art_call(self._art.set_color_temperature, value)
+        await self._async_art_command(self._art.set_color_temperature, value)
 
     async def async_set_slideshow(
         self, duration: int, shuffle: bool, category_id: str
@@ -279,8 +308,7 @@ class FrameDevice:
                     duration=duration, type=shuffle, category_id=category_id
                 )
 
-        async with self._art_lock:
-            await self._hass.async_add_executor_job(_set)
+        await self._async_art_command(_set)
 
     async def _async_reset_art_connection(self) -> None:
         """Close the (likely dead) art websocket so the next call reopens fresh.
@@ -289,9 +317,12 @@ class FrameDevice:
         ``SamsungTVArt`` client and never invalidates it on failure, so a stale
         connection (e.g. after the TV power-cycles) would otherwise fail
         forever. Closing it here forces a fresh connection on the next call.
+        Runs under the art lock — closing while another caller is mid-request
+        on the same socket must not interleave.
         """
         try:
-            await self._hass.async_add_executor_job(self._art.close)
+            async with self._art_lock:
+                await self._hass.async_add_executor_job(self._art.close)
         except Exception:  # noqa: BLE001
             pass
 
@@ -342,10 +373,26 @@ class FrameDevice:
                 pass
             await self._remote.send_commands(commands)
 
+    @property
+    def listener_alive(self) -> bool:
+        """Whether the push listener's recv thread is currently running.
+
+        Reaches into the library's ``_recv_loop`` thread: the thread dies on
+        any uncaught socket error, and that is the only reliable liveness
+        signal (the cached connection object can still claim to be open).
+        """
+        thread = getattr(self._art_listener, "_recv_loop", None)
+        return thread is not None and thread.is_alive()
+
     async def async_start_art_listener(
         self, callback: Callable[[str, Any], None]
     ) -> None:
-        await self._hass.async_add_executor_job(self._art_listener.start_listening, callback)
+        async with self._listener_lock:
+            if self._stopped:
+                return
+            await self._hass.async_add_executor_job(
+                self._art_listener.start_listening, callback
+            )
 
     async def async_restart_art_listener(
         self, callback: Callable[[str, Any], None]
@@ -353,9 +400,11 @@ class FrameDevice:
         """Rebuild the art push listener from scratch and restart it.
 
         Called when the coordinator sees the TV go unreachable -> reachable
-        again (e.g. after a power cycle). The listener thread may have died
-        (uncaught socket error) and a crashed instance holds stale connection
-        state, so we replace it with a fresh ``SamsungTVArt`` before restarting.
+        again (e.g. after a power cycle) or finds the recv thread dead. A
+        crashed instance holds stale connection state, so we replace it with
+        a fresh ``SamsungTVArt`` before restarting. Serialized so overlapping
+        restarts cannot orphan a started listener, and refused after stop so
+        an in-flight restart cannot outlive the config entry.
         """
 
         def _restart() -> None:
@@ -368,7 +417,10 @@ class FrameDevice:
             )
             self._art_listener.start_listening(callback)
 
-        await self._hass.async_add_executor_job(_restart)
+        async with self._listener_lock:
+            if self._stopped:
+                return
+            await self._hass.async_add_executor_job(_restart)
 
     async def async_stop(self) -> None:
         try:
@@ -379,7 +431,11 @@ class FrameDevice:
             await self._hass.async_add_executor_job(self._art.close)
         except Exception:  # noqa: BLE001
             pass
-        try:
-            await self._hass.async_add_executor_job(self._art_listener.close)
-        except Exception:  # noqa: BLE001
-            pass
+        # Waits for any in-flight listener (re)start, then closes the final
+        # instance; the flag stops any later restart from resurrecting it.
+        async with self._listener_lock:
+            self._stopped = True
+            try:
+                await self._hass.async_add_executor_job(self._art_listener.close)
+            except Exception:  # noqa: BLE001
+                pass
