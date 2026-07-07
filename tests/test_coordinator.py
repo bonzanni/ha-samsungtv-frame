@@ -10,6 +10,16 @@ from custom_components.samsungtv_frame.models import FrameData, TvMode
 def _make(hass, device) -> FrameCoordinator:
     entry = MagicMock(spec=ConfigEntry)
     entry.entry_id = "abc"
+    entry.options = {}
+
+    # Close coroutines handed to the mocked background-task API so they don't
+    # emit "never awaited" warnings; tests drive them directly instead.
+    def _swallow_task(_hass, coro, _name, eager_start=True):
+        if hasattr(coro, "close"):
+            coro.close()
+        return MagicMock()
+
+    entry.async_create_background_task.side_effect = _swallow_task
     return FrameCoordinator(hass, entry, device)
 
 
@@ -156,6 +166,14 @@ async def test_standby_holds_art_when_trait_not_learned(hass, mock_device):
     coord = _make(hass, mock_device)
     data = await coord._async_update_data()
     assert data.tv_mode is TvMode.ART_MODE
+
+
+async def test_heartbeat_option_sets_update_interval(hass, mock_device):
+    entry = MagicMock(spec=ConfigEntry)
+    entry.entry_id = "abc"
+    entry.options = {"heartbeat_seconds": 30}
+    coord = FrameCoordinator(hass, entry, mock_device)
+    assert coord.update_interval.total_seconds() == 30
 
 
 async def test_poll_captures_newly_issued_token(hass, mock_device):

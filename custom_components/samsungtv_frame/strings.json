@@ -5,6 +5,11 @@
         "title": "Samsung Frame TV",
         "description": "Enter the TV's IP address. Accept the 'Allow' prompt on the TV when it appears.",
         "data": {"host": "IP address"}
+      },
+      "reconfigure": {
+        "title": "Reconfigure Samsung Frame TV",
+        "description": "Update the TV's IP address.",
+        "data": {"host": "IP address"}
       }
     },
     "error": {
@@ -12,12 +17,41 @@
       "not_a_frame": "This Samsung TV does not report Frame support."
     },
     "abort": {
-      "already_configured": "This TV is already configured."
+      "already_configured": "This TV is already configured.",
+      "unique_id_mismatch": "The device at this address is a different TV.",
+      "reconfigure_successful": "Reconfiguration was successful."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Samsung Frame TV options",
+        "data": {"heartbeat_seconds": "Polling heartbeat (seconds)"},
+        "data_description": {
+          "heartbeat_seconds": "How often the TV is polled for power state. Push events arrive instantly regardless."
+        }
+      }
     }
   },
   "entity": {
     "binary_sensor": {"art_mode": {"name": "Art mode"}},
     "sensor": {"tv_mode": {"name": "TV mode",
       "state": {"off": "Off", "watching": "Watching", "art_mode": "Art mode"}}}
+  },
+  "services": {
+    "send_key": {
+      "name": "Send key",
+      "description": "Sends a remote-control key to the TV (e.g. KEY_HOME, KEY_MENU, KEY_UP).",
+      "fields": {
+        "key": {"name": "Key", "description": "The Samsung key code to send."}
+      }
+    },
+    "set_art_mode": {
+      "name": "Set art mode",
+      "description": "Switches the TV into or out of art mode (TV must be on).",
+      "fields": {
+        "enabled": {"name": "Enabled", "description": "True to show art, false to switch to watching."}
+      }
+    }
   }
 }

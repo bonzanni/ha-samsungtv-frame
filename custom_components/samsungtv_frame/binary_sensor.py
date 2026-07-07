@@ -5,7 +5,8 @@ from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .coordinator import FrameConfigEntry
+from .const import CONF_MAC
+from .coordinator import FrameConfigEntry, FrameCoordinator
 from .entity import FrameEntity
 
 PARALLEL_UPDATES = 0
@@ -25,9 +26,9 @@ class FrameArtModeBinarySensor(FrameEntity, BinarySensorEntity):
     _attr_translation_key = "art_mode"
     _attr_name = "Art mode"
 
-    def __init__(self, coordinator) -> None:
+    def __init__(self, coordinator: FrameCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.config_entry.data['mac']}_art_mode"
+        self._attr_unique_id = f"{coordinator.config_entry.data[CONF_MAC]}_art_mode"
 
     @property
     def is_on(self) -> bool | None:

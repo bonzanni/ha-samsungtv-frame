@@ -28,5 +28,8 @@ def mock_device() -> MagicMock:
     device.async_turn_off = AsyncMock()
     device.async_start_art_listener = AsyncMock()
     device.async_stop = AsyncMock()
+    device.async_send_key = AsyncMock()
+    device.async_launch_app = AsyncMock()
+    device.async_app_list = AsyncMock(return_value=None)
     device.newest_token = None  # plain attr: MagicMock's default would be truthy
     return device

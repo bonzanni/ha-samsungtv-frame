@@ -1,11 +1,15 @@
 # tests/test_media_player.py
 from unittest.mock import patch
 
+import pytest
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.samsungtv_frame.const import (
     CONF_HOST, CONF_MAC, CONF_TOKEN, DOMAIN,
 )
+
+ENTITY = "media_player.samsung_frame_tv"
 
 
 async def _setup(hass, mock_device):
@@ -55,3 +59,106 @@ async def test_turn_off_calls_device(hass, mock_device):
         {"entity_id": "media_player.samsung_frame_tv"}, blocking=True,
     )
     mock_device.async_turn_off.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("service", "data", "expected_key"),
+    [
+        ("volume_up", {}, "KEY_VOLUP"),
+        ("volume_down", {}, "KEY_VOLDOWN"),
+        ("volume_mute", {"is_volume_muted": True}, "KEY_MUTE"),
+        ("media_play", {}, "KEY_PLAY"),
+        ("media_pause", {}, "KEY_PAUSE"),
+    ],
+)
+async def test_key_backed_controls(hass, mock_device, service, data, expected_key):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    await _setup(hass, mock_device)
+    await hass.services.async_call(
+        "media_player", service, {"entity_id": ENTITY, **data}, blocking=True,
+    )
+    mock_device.async_send_key.assert_awaited_once_with(expected_key)
+
+
+async def test_send_key_failure_raises_ha_error(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.async_send_key.side_effect = OSError("gone")
+    await _setup(hass, mock_device)
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            "media_player", "volume_up", {"entity_id": ENTITY}, blocking=True,
+        )
+
+
+async def test_select_source_launches_app(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.async_app_list.return_value = [
+        {"name": "Netflix", "appId": "11101200001", "app_type": 2},
+        {"name": "YouTube", "appId": "111299001912", "app_type": 4},
+    ]
+    await _setup(hass, mock_device)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    state = hass.states.get(ENTITY)
+    assert state.attributes["source_list"] == ["Netflix", "YouTube"]
+
+    await hass.services.async_call(
+        "media_player", "select_source",
+        {"entity_id": ENTITY, "source": "Netflix"}, blocking=True,
+    )
+    mock_device.async_launch_app.assert_awaited_once_with("11101200001", "DEEP_LINK")
+
+    mock_device.async_launch_app.reset_mock()
+    await hass.services.async_call(
+        "media_player", "select_source",
+        {"entity_id": ENTITY, "source": "YouTube"}, blocking=True,
+    )
+    mock_device.async_launch_app.assert_awaited_once_with(
+        "111299001912", "NATIVE_LAUNCH"
+    )
+
+
+async def test_select_source_unknown_app_raises(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    await _setup(hass, mock_device)
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(
+            "media_player", "select_source",
+            {"entity_id": ENTITY, "source": "Nope"}, blocking=True,
+        )
+
+
+async def test_no_source_list_when_app_list_unsupported(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.async_app_list.return_value = None
+    await _setup(hass, mock_device)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    state = hass.states.get(ENTITY)
+    assert "source_list" not in state.attributes
+
+
+async def test_send_key_entity_service(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    await _setup(hass, mock_device)
+    await hass.services.async_call(
+        DOMAIN, "send_key",
+        {"entity_id": ENTITY, "key": "KEY_HOME"}, blocking=True,
+    )
+    mock_device.async_send_key.assert_awaited_once_with("KEY_HOME")
+
+
+async def test_set_art_mode_entity_service(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    await _setup(hass, mock_device)
+    await hass.services.async_call(
+        DOMAIN, "set_art_mode",
+        {"entity_id": ENTITY, "enabled": True}, blocking=True,
+    )
+    mock_device.async_set_artmode.assert_awaited_once_with(True)

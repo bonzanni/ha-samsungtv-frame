@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from typing import Any, Awaitable, Callable
 
 from homeassistant.config_entries import ConfigEntry
@@ -10,10 +11,11 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
     CONF_TOKEN,
-    DEFAULT_HEARTBEAT,
+    DEFAULT_HEARTBEAT_SECONDS,
     DOMAIN,
     LOGGER,
     OFF_DEBOUNCE_COUNT,
+    OPT_HEARTBEAT,
     PORT_REST,
     WAKE_PROBE_ATTEMPTS,
     WAKE_PROBE_DELAY,
@@ -35,7 +37,9 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             hass,
             LOGGER,
             name=DOMAIN,
-            update_interval=DEFAULT_HEARTBEAT,
+            update_interval=timedelta(
+                seconds=entry.options.get(OPT_HEARTBEAT, DEFAULT_HEARTBEAT_SECONDS)
+            ),
             config_entry=entry,
             always_update=False,
         )
@@ -49,6 +53,11 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         # override the art gate in derive_tv_mode. Never learned on 2025
         # models, which report "standby" during normal art mode (#185).
         self._art_implies_power_on = False
+        # Installed apps keyed by display name (media_player source list).
+        # Fetched once per power-on while the TV is up; None until then and
+        # on TVs whose firmware doesn't answer the app-list request.
+        self.app_map: dict[str, dict[str, Any]] | None = None
+        self._app_fetch_attempted = False
         # Set by __init__.py once the initial art listener + bridge callback
         # exist, so a power-cycle recovery can restart the SAME listener.
         self.restart_listener: Callable[[], Awaitable[None]] | None = None
@@ -66,8 +75,12 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
 
         was_reachable = self._was_reachable
         self._was_reachable = reachable
-        if reachable and not was_reachable and self.restart_listener is not None:
-            self.hass.async_create_task(self._restart_listener_safe())
+        if reachable and not was_reachable:
+            if self.restart_listener is not None:
+                self.hass.async_create_task(self._restart_listener_safe())
+            # New power-on: the app list may have changed (and the previous
+            # attempt may have hit a booting TV) — allow one fresh fetch.
+            self._app_fetch_attempted = False
 
         if reachable:
             self._unreachable_count = 0
@@ -101,6 +114,15 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             reachable, power_state, self._art_mode, mode,
         )
 
+        if (
+            mode in (TvMode.WATCHING, TvMode.ART_MODE)
+            and not self._app_fetch_attempted
+        ):
+            self._app_fetch_attempted = True
+            self.config_entry.async_create_background_task(
+                self.hass, self._async_fetch_app_list(), f"{DOMAIN}-app-list"
+            )
+
         # When the TV is off we know art mode cannot be active, even if the
         # last cached value says otherwise.  Keep self._art_mode unchanged so
         # the cached state is still valid once the TV comes back.
@@ -112,6 +134,17 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             tv_mode=mode,
             current_art=current_art,
         )
+
+    async def _async_fetch_app_list(self) -> None:
+        """Populate the media_player source list from the TV's installed apps."""
+        apps = await self.device.async_app_list()
+        if not apps:
+            return
+        self.app_map = {
+            app["name"]: app for app in apps if app.get("name") and app.get("appId")
+        }
+        LOGGER.debug("Fetched %d installed apps", len(self.app_map))
+        self.async_update_listeners()
 
     @callback
     def _async_capture_token(self) -> None:

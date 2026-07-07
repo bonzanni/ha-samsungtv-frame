@@ -133,6 +133,43 @@ async def test_restart_art_listener_creates_fresh_instance(hass, device):
     mock_new.start_listening.assert_called_once()
 
 
+async def test_send_key_clicks_remote(hass, device):
+    remote = MagicMock()
+    remote.send_commands = AsyncMock()
+    with patch.object(device, "_remote", remote):
+        await device.async_send_key("KEY_HOME")
+    cmds = remote.send_commands.call_args.args[0]
+    assert cmds[0].params["DataOfCmd"] == "KEY_HOME"
+    assert cmds[0].params["Cmd"] == "Click"
+
+
+async def test_remote_command_retries_on_stale_connection(hass, device):
+    remote = MagicMock()
+    remote.send_commands = AsyncMock(side_effect=[OSError("stale"), None])
+    remote.close = AsyncMock()
+    with patch.object(device, "_remote", remote):
+        await device.async_send_key("KEY_VOLUP")
+    assert remote.send_commands.await_count == 2
+    remote.close.assert_awaited_once()
+
+
+async def test_launch_app_emits_channel_command(hass, device):
+    remote = MagicMock()
+    remote.send_commands = AsyncMock()
+    with patch.object(device, "_remote", remote):
+        await device.async_launch_app("11101200001", "DEEP_LINK")
+    cmds = remote.send_commands.call_args.args[0]
+    assert cmds[0].params["event"] == "ed.apps.launch"
+    assert cmds[0].params["data"]["appId"] == "11101200001"
+
+
+async def test_app_list_failure_returns_none(hass, device):
+    remote = MagicMock()
+    remote.app_list = AsyncMock(side_effect=OSError("nope"))
+    with patch.object(device, "_remote", remote):
+        assert await device.async_app_list() is None
+
+
 async def test_turn_off_holds_power_key(hass, device):
     remote = MagicMock()
     remote.send_commands = AsyncMock()

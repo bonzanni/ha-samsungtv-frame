@@ -1,0 +1,22 @@
+send_key:
+  target:
+    entity:
+      integration: samsungtv_frame
+      domain: media_player
+  fields:
+    key:
+      required: true
+      example: KEY_HOME
+      selector:
+        text:
+
+set_art_mode:
+  target:
+    entity:
+      integration: samsungtv_frame
+      domain: media_player
+  fields:
+    enabled:
+      required: true
+      selector:
+        boolean:

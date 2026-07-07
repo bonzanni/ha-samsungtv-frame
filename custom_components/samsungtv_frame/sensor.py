@@ -5,7 +5,8 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .coordinator import FrameConfigEntry
+from .const import CONF_MAC
+from .coordinator import FrameConfigEntry, FrameCoordinator
 from .entity import FrameEntity
 from .models import TvMode
 
@@ -28,9 +29,9 @@ class FrameTvModeSensor(FrameEntity, SensorEntity):
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = [TvMode.OFF, TvMode.WATCHING, TvMode.ART_MODE]
 
-    def __init__(self, coordinator) -> None:
+    def __init__(self, coordinator: FrameCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.config_entry.data['mac']}_tv_mode"
+        self._attr_unique_id = f"{coordinator.config_entry.data[CONF_MAC]}_tv_mode"
 
     @property
     def native_value(self) -> str | None:

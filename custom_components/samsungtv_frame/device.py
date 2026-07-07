@@ -8,7 +8,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from samsungtvws.art import SamsungTVArt
 from samsungtvws.async_remote import SamsungTVWSAsyncRemote
 from samsungtvws.async_rest import SamsungTVAsyncRest
-from samsungtvws.remote import SendRemoteKey
+from samsungtvws.command import SamsungTVCommand
+from samsungtvws.remote import ChannelEmitCommand, SendRemoteKey
 from wakeonlan import send_magic_packet
 
 from .const import CLIENT_NAME, LOGGER, PORT_REST, PORT_WS
@@ -125,7 +126,40 @@ class FrameDevice:
 
     async def async_turn_off(self) -> None:
         # Single press only toggles art mode; a 3 s hold truly powers a Frame off.
-        await self._remote.send_commands(SendRemoteKey.hold("KEY_POWER", 3))
+        await self._async_remote_commands(SendRemoteKey.hold("KEY_POWER", 3))
+
+    async def async_send_key(self, key: str) -> None:
+        await self._async_remote_commands([SendRemoteKey.click(key)])
+
+    async def async_launch_app(self, app_id: str, app_type: str) -> None:
+        await self._async_remote_commands(
+            [ChannelEmitCommand.launch_app(app_id, app_type)]
+        )
+
+    async def async_app_list(self) -> list[dict[str, Any]] | None:
+        """Installed apps, or None (not supported on all TVs / TV not ready)."""
+        try:
+            return await self._remote.app_list()
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("app_list failed: %s", err)
+            return None
+
+    async def _async_remote_commands(self, commands: list[SamsungTVCommand]) -> None:
+        """Send on the persistent remote; reset once if the connection is stale.
+
+        Like the art client, the remote keeps a cached connection that is never
+        invalidated when the TV power-cycles; the first send after a cycle
+        fails, so close and retry once before giving up.
+        """
+        try:
+            await self._remote.send_commands(commands)
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("remote send failed, retrying on a fresh connection: %s", err)
+            try:
+                await self._remote.close()
+            except Exception:  # noqa: BLE001
+                pass
+            await self._remote.send_commands(commands)
 
     async def async_start_art_listener(
         self, callback: Callable[[str, Any], None]

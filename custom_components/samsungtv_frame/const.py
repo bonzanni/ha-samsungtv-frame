@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 
 from homeassistant.const import Platform
 
@@ -21,13 +20,22 @@ CONF_MAC = "mac"
 CONF_TOKEN = "token"
 CONF_MODEL = "model"
 
+# Options
+OPT_HEARTBEAT = "heartbeat_seconds"
+DEFAULT_HEARTBEAT_SECONDS = 10
+
+# Entity services (registered on media_player)
+SERVICE_SEND_KEY = "send_key"
+SERVICE_SET_ART_MODE = "set_art_mode"
+ATTR_KEY = "key"
+ATTR_ENABLED = "enabled"
+
 # Fixed websocket client name — the TV's token grant is keyed to this. Never change.
 CLIENT_NAME = "Home Assistant"
 
 PORT_REST = 8001
 PORT_WS = 8002
 
-DEFAULT_HEARTBEAT = timedelta(seconds=10)
 # Consecutive unreachable heartbeats before declaring OFF (debounce transient drops).
 OFF_DEBOUNCE_COUNT = 2
 
