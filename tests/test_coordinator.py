@@ -204,7 +204,7 @@ async def test_notify_turn_on_spawns_probe_once(hass, mock_device):
         coord.config_entry.async_create_background_task.assert_called_once()
 
 
-async def test_art_event_go_to_standby_holds(hass, mock_device):
+async def test_art_event_go_to_standby_holds_but_refreshes(hass, mock_device):
     coord = _make(hass, mock_device)
     coord.data = FrameData(
         reachable=True,
@@ -213,6 +213,27 @@ async def test_art_event_go_to_standby_holds(hass, mock_device):
         tv_mode=TvMode.ART_MODE,
         current_art=None,
     )
-    with patch.object(coord, "async_set_updated_data") as push:
+    with (
+        patch.object(coord, "async_set_updated_data") as push,
+        patch.object(coord, "async_request_refresh", AsyncMock()) as refresh,
+    ):
         coord.handle_art_event("d2d_service_message", {"event": "go_to_standby"})
+        # Destination is ambiguous -> never a state change by itself...
         push.assert_not_called()
+        await hass.async_block_till_done()
+        # ...but it must trigger an immediate poll to resolve OFF fast.
+        refresh.assert_awaited_once()
+
+
+async def test_poll_skips_art_retry_when_standby(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "standby"}
+    coord = _make(hass, mock_device)
+    await coord._async_update_data()
+    assert mock_device.async_get_artmode.call_args.kwargs["attempts"] == 1
+
+
+async def test_poll_uses_art_retry_when_on(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    coord = _make(hass, mock_device)
+    await coord._async_update_data()
+    assert mock_device.async_get_artmode.call_args.kwargs["attempts"] == 2

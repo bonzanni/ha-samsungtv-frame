@@ -67,6 +67,17 @@ async def test_get_artmode_failure_resets_connection(hass, device):
     assert art.close.call_count == 2
 
 
+async def test_get_artmode_single_attempt_when_requested(hass, device):
+    # attempts=1 is used while the TV reports standby (shutting down): the
+    # art socket hangs until timeout there, so a retry only adds latency.
+    art = MagicMock()
+    art.get_artmode.side_effect = OSError("hanging socket")
+    with patch.object(device, "_art", art):
+        assert await device.async_get_artmode(attempts=1) is None
+    assert art.get_artmode.call_count == 1
+    art.close.assert_called_once()
+
+
 async def test_get_artmode_retries_once_after_reset(hass, device):
     # First call hits the stale post-power-cycle connection; the retry (on a
     # fresh connection) must resolve art mode within the same poll.

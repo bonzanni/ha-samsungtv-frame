@@ -82,11 +82,13 @@ class FrameDevice:
             return None
         return info.get("device") if info else None
 
-    async def async_get_artmode(self) -> bool | None:
-        # Two attempts: the first call after a TV power cycle hits the stale
-        # cached connection and fails; the reset makes the retry reconnect, so
-        # the poll still resolves art mode in the same cycle.
-        for attempt in (1, 2):
+    async def async_get_artmode(self, attempts: int = 2) -> bool | None:
+        # Two attempts by default: the first call after a TV power cycle hits
+        # the stale cached connection and fails; the reset makes the retry
+        # reconnect, so the poll still resolves art mode in the same cycle.
+        # Callers pass attempts=1 when the TV is shutting down (its art socket
+        # hangs until timeout, so a retry only doubles the poll latency).
+        for attempt in range(1, attempts + 1):
             try:
                 value = await self._hass.async_add_executor_job(self._art.get_artmode)
             except Exception as err:  # noqa: BLE001

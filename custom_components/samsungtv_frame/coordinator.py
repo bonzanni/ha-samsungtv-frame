@@ -66,7 +66,12 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
 
         if reachable:
             self._unreachable_count = 0
-            self._art_mode = await self.device.async_get_artmode()
+            # A TV reporting standby is (on this model) shutting down and its
+            # art socket tends to hang until timeout — a retry would double
+            # the poll latency for nothing, and a single failed attempt
+            # already resolves to OFF via derive_tv_mode.
+            attempts = 1 if power_state == "standby" else 2
+            self._art_mode = await self.device.async_get_artmode(attempts=attempts)
             self._async_capture_token()
         else:
             self._unreachable_count += 1
@@ -162,6 +167,12 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         if sub in ("art_mode_changed", "artmode_status"):
             value = data.get("value") or data.get("status")
             self._art_mode = value == "on"
+        elif sub == "go_to_standby":
+            # Never a state by itself (the destination is ambiguous), but a
+            # strong hint the TV is shutting down: refresh now instead of
+            # waiting out the heartbeat, so OFF lands in seconds.
+            self.hass.async_create_task(self.async_request_refresh())
+            return
         else:
             return
         mode = derive_tv_mode(True, self._art_mode, "on")
