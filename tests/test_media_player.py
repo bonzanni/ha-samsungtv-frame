@@ -164,6 +164,43 @@ async def test_set_art_mode_entity_service(hass, mock_device):
     mock_device.async_set_artmode.assert_awaited_once_with(True)
 
 
+async def test_source_and_app_name_reflect_running_app(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.async_app_list.return_value = [
+        {"name": "Netflix", "appId": "NETFLIX_ID", "app_type": 2},
+    ]
+
+    async def _status(app_id):
+        return {"visible": True, "running": True}
+
+    mock_device.async_app_status.side_effect = _status
+    await _setup(hass, mock_device)
+    # First poll ran before the app list existed; the next one sweeps.
+    await hass.async_block_till_done(wait_background_tasks=True)
+    coordinator = hass.config_entries.async_entries(DOMAIN)[0].runtime_data
+    await coordinator.async_refresh()
+    state = hass.states.get(ENTITY)
+    assert state.attributes["source"] == "Netflix"
+    assert state.attributes["app_name"] == "Netflix"
+
+
+async def test_source_falls_back_to_tv_when_no_app_visible(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.async_app_list.return_value = [
+        {"name": "Netflix", "appId": "NETFLIX_ID", "app_type": 2},
+    ]
+    mock_device.async_app_status.return_value = {"visible": False}
+    await _setup(hass, mock_device)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    coordinator = hass.config_entries.async_entries(DOMAIN)[0].runtime_data
+    await coordinator.async_refresh()
+    state = hass.states.get(ENTITY)
+    assert state.attributes["source"] == "TV"
+    assert "app_name" not in state.attributes
+
+
 async def test_select_art_service(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False

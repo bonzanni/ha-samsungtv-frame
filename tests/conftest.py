@@ -31,6 +31,7 @@ def mock_device() -> MagicMock:
     device.async_send_key = AsyncMock()
     device.async_launch_app = AsyncMock()
     device.async_app_list = AsyncMock(return_value=None)
+    device.async_app_status = AsyncMock(return_value=None)
     device.async_get_current_art = AsyncMock(return_value=None)
     device.async_get_art_brightness = AsyncMock(return_value=None)
     device.async_set_art_brightness = AsyncMock()

@@ -127,6 +127,18 @@ class FrameMediaPlayer(FrameEntity, MediaPlayerEntity):
             return None
         return sorted(self.coordinator.app_map)
 
+    @property
+    def source(self) -> str | None:
+        data = self.coordinator.data
+        if data.tv_mode is not TvMode.WATCHING:
+            return None
+        # No visible app while watching = live TV or an HDMI input.
+        return data.running_app or "TV"
+
+    @property
+    def app_name(self) -> str | None:
+        return self.coordinator.data.running_app
+
     async def async_turn_on(self) -> None:
         await self.coordinator.device.async_turn_on()
         self.coordinator.async_notify_turn_on()

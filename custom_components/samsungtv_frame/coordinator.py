@@ -115,6 +115,10 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             if mode is TvMode.UNKNOWN:
                 mode = self._last_stable()
 
+        running_app: str | None = None
+        if mode is TvMode.WATCHING and self.app_map:
+            running_app = await self._async_detect_running_app()
+
         LOGGER.debug(
             "Poll: reachable=%s power=%s art=%s -> %s",
             reachable, power_state, self._art_mode, mode,
@@ -140,7 +144,27 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             tv_mode=mode,
             current_art=None if is_off else self._current_art,
             art_brightness=None if is_off else self._art_brightness,
+            running_app=running_app,
         )
+
+    async def _async_detect_running_app(self) -> str | None:
+        """Name of the foreground app, or None (live TV / HDMI / not found).
+
+        One REST status call per installed app, bounded concurrency; the
+        foreground app is the one reporting visible=true.
+        """
+        assert self.app_map is not None
+        sem = asyncio.Semaphore(8)
+
+        async def _check(name: str, app: dict[str, Any]) -> str | None:
+            async with sem:
+                status = await self.device.async_app_status(app["appId"])
+            return name if status and status.get("visible") else None
+
+        results = await asyncio.gather(
+            *(_check(name, app) for name, app in self.app_map.items())
+        )
+        return next((name for name in results if name), None)
 
     async def _async_fetch_app_list(self) -> None:
         """Populate the media_player source list from the TV's installed apps."""
@@ -250,5 +274,6 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
                 tv_mode=mode,
                 current_art=self._current_art,
                 art_brightness=current.art_brightness if current else None,
+                running_app=current.running_app if current else None,
             )
         )

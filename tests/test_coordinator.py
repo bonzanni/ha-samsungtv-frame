@@ -228,6 +228,44 @@ async def test_image_selected_push_updates_current_art(hass, mock_device):
     assert coord.data.art_brightness == 5
 
 
+async def test_running_app_detected_while_watching(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+
+    async def _status(app_id):
+        return {"visible": app_id == "NETFLIX_ID", "running": True}
+
+    mock_device.async_app_status.side_effect = _status
+    coord = _make(hass, mock_device)
+    coord.app_map = {
+        "Netflix": {"appId": "NETFLIX_ID"},
+        "YouTube": {"appId": "YT_ID"},
+    }
+    data = await coord._async_update_data()
+    assert data.tv_mode is TvMode.WATCHING
+    assert data.running_app == "Netflix"
+
+
+async def test_running_app_none_when_no_visible_app(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.async_app_status.return_value = {"visible": False}
+    coord = _make(hass, mock_device)
+    coord.app_map = {"Netflix": {"appId": "NETFLIX_ID"}}
+    data = await coord._async_update_data()
+    assert data.running_app is None
+
+
+async def test_running_app_not_swept_in_art_mode(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    coord = _make(hass, mock_device)
+    coord.app_map = {"Netflix": {"appId": "NETFLIX_ID"}}
+    data = await coord._async_update_data()
+    mock_device.async_app_status.assert_not_awaited()
+    assert data.running_app is None
+
+
 async def test_heartbeat_option_sets_update_interval(hass, mock_device):
     entry = MagicMock(spec=ConfigEntry)
     entry.entry_id = "abc"

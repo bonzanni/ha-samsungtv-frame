@@ -76,18 +76,29 @@ class FrameDevice:
         """Adopt a newly issued token for all future (re)connections."""
         self._token = token
 
-    async def async_device_info(self) -> dict[str, Any] | None:
+    def _ensure_rest(self) -> SamsungTVAsyncRest:
         if self._rest is None:
             session = async_get_clientsession(self._hass)
             self._rest = SamsungTVAsyncRest(
                 self._host, session=session, port=PORT_REST, timeout=8
             )
+        return self._rest
+
+    async def async_device_info(self) -> dict[str, Any] | None:
         try:
-            info = await self._rest.rest_device_info()
+            info = await self._ensure_rest().rest_device_info()
         except Exception as err:  # noqa: BLE001 - library raises broad connection types
             LOGGER.debug("REST device info failed for %s: %s", self._host, err)
             return None
         return info.get("device") if info else None
+
+    async def async_app_status(self, app_id: str) -> dict[str, Any] | None:
+        """Status payload for one app ({visible, running, ...}), or None."""
+        try:
+            return await self._ensure_rest().rest_app_status(app_id)
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("REST app status failed for %s: %s", app_id, err)
+            return None
 
     async def _async_art_call(self, func: Callable[..., Any], *args: Any) -> Any:
         """Run a sync art-client call in the executor, serialized."""

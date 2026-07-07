@@ -4,7 +4,9 @@ Accurate OFF / WATCHING / ART-MODE state for Samsung Frame TVs, plus power and b
 
 ## Entities
 - `media_player.samsung_frame_tv` — power on (Wake-on-LAN) / off (3 s hold), volume up/down/mute,
-  play/pause, and source selection (launches the TV's installed apps, e.g. Netflix)
+  play/pause, and source selection (launches the TV's installed apps, e.g. Netflix). While
+  watching, `source`/`app_name` report the foreground app ("TV" when on live TV or an HDMI
+  input). What plays *inside* an app is not exposed by the TV's local API.
 - `binary_sensor.samsung_frame_tv_art_mode` — art mode on/off
 - `sensor.samsung_frame_tv_tv_mode` — `off` / `watching` / `art_mode` (use this in automations)
 - `sensor.samsung_frame_tv_current_art` — content id of the artwork currently selected
