@@ -131,6 +131,33 @@ async def test_reachable_to_reachable_does_not_restart_listener(hass, mock_devic
     coord.restart_listener.assert_not_awaited()
 
 
+async def test_standby_wins_after_art_with_power_on_seen(hass, mock_device):
+    """2022-24 Frames: art mode runs with PowerState 'on', so once that has
+    been observed, standby + art-still-answering must mean shutdown => OFF
+    in a single poll (the dying art socket answers 'on' for ~50 s)."""
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    coord = _make(hass, mock_device)
+    first = await coord._async_update_data()
+    assert first.tv_mode is TvMode.ART_MODE
+
+    # Power-off: PowerState flips to standby, art socket still answers "on".
+    mock_device.async_device_info.return_value = {"PowerState": "standby"}
+    second = await coord._async_update_data()
+    assert second.tv_mode is TvMode.OFF
+    assert second.art_mode is False
+
+
+async def test_standby_holds_art_when_trait_not_learned(hass, mock_device):
+    """2025 Frames (#185) report standby during normal art mode; without the
+    learned trait the art gate must keep winning."""
+    mock_device.async_device_info.return_value = {"PowerState": "standby"}
+    mock_device.async_get_artmode.return_value = True
+    coord = _make(hass, mock_device)
+    data = await coord._async_update_data()
+    assert data.tv_mode is TvMode.ART_MODE
+
+
 async def test_poll_captures_newly_issued_token(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False

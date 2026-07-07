@@ -18,3 +18,24 @@ from custom_components.samsungtv_frame.models import TvMode, derive_tv_mode
 )
 def test_derive_tv_mode(reachable, art_mode, power_state, expected):
     assert derive_tv_mode(reachable, art_mode, power_state) == expected
+
+
+@pytest.mark.parametrize(
+    ("reachable", "art_mode", "power_state", "expected"),
+    [
+        # standby overrides even a (dying) art socket still answering "on"
+        (True, True, "standby", TvMode.OFF),
+        (True, None, "standby", TvMode.OFF),
+        # everything else is unchanged
+        (True, True, "on", TvMode.ART_MODE),
+        (True, False, "on", TvMode.WATCHING),
+        (False, True, "on", TvMode.OFF),
+    ],
+)
+def test_derive_tv_mode_standby_wins(reachable, art_mode, power_state, expected):
+    """Once art+power-on has been observed (2022-24 models), standby means
+    shutdown regardless of what the art websocket claims."""
+    assert (
+        derive_tv_mode(reachable, art_mode, power_state, standby_wins=True)
+        == expected
+    )

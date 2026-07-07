@@ -44,6 +44,11 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         self._art_mode: bool | None = None
         self._was_reachable = True
         self._wake_task: asyncio.Task | None = None
+        # Learned model trait: art mode coexisting with PowerState "on"
+        # (2022-24 Frames) means "standby" can only be a shutdown, so it may
+        # override the art gate in derive_tv_mode. Never learned on 2025
+        # models, which report "standby" during normal art mode (#185).
+        self._art_implies_power_on = False
         # Set by __init__.py once the initial art listener + bridge callback
         # exist, so a power-cycle recovery can restart the SAME listener.
         self.restart_listener: Callable[[], Awaitable[None]] | None = None
@@ -73,6 +78,8 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             attempts = 1 if power_state == "standby" else 2
             self._art_mode = await self.device.async_get_artmode(attempts=attempts)
             self._async_capture_token()
+            if self._art_mode is True and power_state == "on":
+                self._art_implies_power_on = True
         else:
             self._unreachable_count += 1
 
@@ -80,9 +87,19 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         if not reachable and self._unreachable_count < OFF_DEBOUNCE_COUNT:
             mode = self._last_stable()
         else:
-            mode = derive_tv_mode(reachable, self._art_mode, power_state)
+            mode = derive_tv_mode(
+                reachable,
+                self._art_mode,
+                power_state,
+                standby_wins=self._art_implies_power_on,
+            )
             if mode is TvMode.UNKNOWN:
                 mode = self._last_stable()
+
+        LOGGER.debug(
+            "Poll: reachable=%s power=%s art=%s -> %s",
+            reachable, power_state, self._art_mode, mode,
+        )
 
         # When the TV is off we know art mode cannot be active, even if the
         # last cached value says otherwise.  Keep self._art_mode unchanged so
@@ -163,6 +180,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
     @callback
     def handle_art_event(self, event: str, data: Any) -> None:
         """Loop-safe handler for pushed art events (see Task 5 bridge)."""
+        LOGGER.debug("Art event: %s", data)
         sub = data.get("event") if isinstance(data, dict) else None
         if sub in ("art_mode_changed", "artmode_status"):
             value = data.get("value") or data.get("status")
