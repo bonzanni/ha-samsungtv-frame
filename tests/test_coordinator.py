@@ -1,7 +1,6 @@
 # tests/test_coordinator.py
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from homeassistant.config_entries import ConfigEntry
 
 from custom_components.samsungtv_frame.coordinator import FrameCoordinator
@@ -130,6 +129,28 @@ async def test_reachable_to_reachable_does_not_restart_listener(hass, mock_devic
     await hass.async_block_till_done()
 
     coord.restart_listener.assert_not_awaited()
+
+
+async def test_poll_captures_newly_issued_token(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.newest_token = "fresh-token"
+    coord = _make(hass, mock_device)
+    coord.config_entry.data = {"host": "1.2.3.4", "token": None}
+    with patch.object(hass.config_entries, "async_update_entry") as update:
+        await coord._async_update_data()
+    mock_device.update_token.assert_called_once_with("fresh-token")
+    update.assert_called_once()
+    assert update.call_args.kwargs["data"]["token"] == "fresh-token"
+
+
+async def test_poll_no_token_update_when_none_issued(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    coord = _make(hass, mock_device)
+    with patch.object(hass.config_entries, "async_update_entry") as update:
+        await coord._async_update_data()
+    update.assert_not_called()
 
 
 async def test_wake_probe_refreshes_when_port_opens(hass, mock_device):

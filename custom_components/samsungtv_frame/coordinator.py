@@ -9,6 +9,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
+    CONF_TOKEN,
     DEFAULT_HEARTBEAT,
     DOMAIN,
     LOGGER,
@@ -66,6 +67,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         if reachable:
             self._unreachable_count = 0
             self._art_mode = await self.device.async_get_artmode()
+            self._async_capture_token()
         else:
             self._unreachable_count += 1
 
@@ -88,6 +90,24 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             tv_mode=mode,
             current_art=current_art,
         )
+
+    @callback
+    def _async_capture_token(self) -> None:
+        """Persist a token the TV issued after pairing, if one appeared.
+
+        Pairing granted access by client name without issuing a token; if the
+        TV hands one out on any later connection, store it in the config entry
+        so reconnects (and TV-side grant loss) don't depend on the name grant.
+        """
+        token = self.device.newest_token
+        if token is None or token == self.config_entry.data.get(CONF_TOKEN):
+            return
+        self.device.update_token(token)
+        self.hass.config_entries.async_update_entry(
+            self.config_entry,
+            data={**self.config_entry.data, CONF_TOKEN: token},
+        )
+        LOGGER.info("Captured a newly issued TV token into the config entry")
 
     @callback
     def async_notify_turn_on(self) -> None:

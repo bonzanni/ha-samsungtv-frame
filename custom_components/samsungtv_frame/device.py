@@ -51,6 +51,24 @@ class FrameDevice:
     def host(self) -> str:
         return self._host
 
+    @property
+    def newest_token(self) -> str | None:
+        """A token the TV issued that differs from the one we hold, if any.
+
+        Pairing on this TV granted access by client name without issuing a
+        token, but a token can still appear later on any of the three
+        connections; surface it so the coordinator can persist it.
+        """
+        for client in (self._art, self._art_listener, self._remote):
+            token = getattr(client, "token", None)
+            if token and token != self._token:
+                return token
+        return None
+
+    def update_token(self, token: str) -> None:
+        """Adopt a newly issued token for all future (re)connections."""
+        self._token = token
+
     async def async_device_info(self) -> dict[str, Any] | None:
         if self._rest is None:
             session = async_get_clientsession(self._hass)

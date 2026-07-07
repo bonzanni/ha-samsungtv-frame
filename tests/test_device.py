@@ -2,7 +2,6 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from samsungtvws.remote import SendRemoteKey
 
 from custom_components.samsungtv_frame.device import FrameDevice
 
@@ -89,6 +88,25 @@ async def test_set_artmode_failure_resets_connection_and_reraises(hass, device):
 
 async def test_listener_socket_has_no_timeout(hass, device):
     assert device._art_listener.timeout is None
+
+
+async def test_newest_token_none_when_unchanged(hass, device):
+    # All clients were constructed with the stored token ("tok").
+    assert device.newest_token is None
+
+
+async def test_newest_token_surfaces_library_issued_token(hass, device):
+    device._art.token = "fresh-token"
+    assert device.newest_token == "fresh-token"
+
+
+async def test_update_token_used_for_fresh_listener(hass, device):
+    device.update_token("fresh-token")
+    with patch(
+        "custom_components.samsungtv_frame.device.SamsungTVArt"
+    ) as mock_cls:
+        await device.async_restart_art_listener(lambda e, d: None)
+    assert mock_cls.call_args.kwargs["token"] == "fresh-token"
 
 
 async def test_restart_art_listener_creates_fresh_instance(hass, device):

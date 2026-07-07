@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
 
 from .art_listener import make_art_bridge
 from .const import CONF_HOST, CONF_MAC, CONF_TOKEN, DOMAIN, PLATFORMS

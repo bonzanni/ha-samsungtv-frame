@@ -1,7 +1,7 @@
 """Shared fixtures for Samsung Frame TV tests."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -28,4 +28,5 @@ def mock_device() -> MagicMock:
     device.async_turn_off = AsyncMock()
     device.async_start_art_listener = AsyncMock()
     device.async_stop = AsyncMock()
+    device.newest_token = None  # plain attr: MagicMock's default would be truthy
     return device
