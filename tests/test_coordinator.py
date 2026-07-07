@@ -168,6 +168,66 @@ async def test_standby_holds_art_when_trait_not_learned(hass, mock_device):
     assert data.tv_mode is TvMode.ART_MODE
 
 
+async def test_art_poll_fetches_current_art_and_brightness(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    mock_device.async_get_current_art.return_value = "MY_F0034"
+    mock_device.async_get_art_brightness.return_value = 7
+    coord = _make(hass, mock_device)
+    data = await coord._async_update_data()
+    assert data.current_art == "MY_F0034"
+    assert data.art_brightness == 7
+
+
+async def test_art_extras_skipped_when_watching_but_cache_held(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    mock_device.async_get_current_art.return_value = "MY_F0034"
+    mock_device.async_get_art_brightness.return_value = 7
+    coord = _make(hass, mock_device)
+    await coord._async_update_data()
+
+    # Switch to watching: extras are not re-fetched but the cache persists
+    # (the selected artwork is still the selected artwork).
+    mock_device.async_get_artmode.return_value = False
+    mock_device.async_get_current_art.reset_mock()
+    data = await coord._async_update_data()
+    mock_device.async_get_current_art.assert_not_awaited()
+    assert data.current_art == "MY_F0034"
+
+
+async def test_art_extras_cleared_when_off(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    mock_device.async_get_current_art.return_value = "MY_F0034"
+    mock_device.async_get_art_brightness.return_value = 7
+    coord = _make(hass, mock_device)
+    await coord._async_update_data()
+
+    mock_device.async_device_info.return_value = None
+    await coord._async_update_data()
+    data = await coord._async_update_data()  # past OFF debounce
+    assert data.tv_mode is TvMode.OFF
+    assert data.current_art is None
+    assert data.art_brightness is None
+
+
+async def test_image_selected_push_updates_current_art(hass, mock_device):
+    coord = _make(hass, mock_device)
+    coord.data = FrameData(
+        reachable=True, power_state="on", art_mode=True,
+        tv_mode=TvMode.ART_MODE, current_art="MY_F0001", art_brightness=5,
+    )
+    coord._art_mode = True
+    coord.handle_art_event(
+        "d2d_service_message",
+        {"event": "image_selected", "content_id": "MY_F0042"},
+    )
+    assert coord.data.current_art == "MY_F0042"
+    assert coord.data.tv_mode is TvMode.ART_MODE  # mode untouched
+    assert coord.data.art_brightness == 5
+
+
 async def test_heartbeat_option_sets_update_interval(hass, mock_device):
     entry = MagicMock(spec=ConfigEntry)
     entry.entry_id = "abc"

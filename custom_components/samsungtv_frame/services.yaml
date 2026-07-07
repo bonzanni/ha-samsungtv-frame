@@ -20,3 +20,81 @@ set_art_mode:
       required: true
       selector:
         boolean:
+
+select_art:
+  target:
+    entity:
+      integration: samsungtv_frame
+      domain: media_player
+  fields:
+    content_id:
+      required: true
+      example: MY_F0034
+      selector:
+        text:
+    show:
+      required: false
+      default: true
+      selector:
+        boolean:
+
+upload_art:
+  target:
+    entity:
+      integration: samsungtv_frame
+      domain: media_player
+  fields:
+    path:
+      required: true
+      example: /config/www/art/monet.jpg
+      selector:
+        text:
+    matte:
+      required: false
+      default: none
+      example: shadowbox_polar
+      selector:
+        text:
+    show:
+      required: false
+      default: true
+      selector:
+        boolean:
+
+delete_art:
+  target:
+    entity:
+      integration: samsungtv_frame
+      domain: media_player
+  fields:
+    content_id:
+      required: true
+      example: MY_F0034
+      selector:
+        text:
+
+set_slideshow:
+  target:
+    entity:
+      integration: samsungtv_frame
+      domain: media_player
+  fields:
+    duration_minutes:
+      required: true
+      example: 60
+      selector:
+        number:
+          min: 0
+          max: 1440
+          unit_of_measurement: min
+    shuffle:
+      required: false
+      default: true
+      selector:
+        boolean:
+    category_id:
+      required: false
+      default: MY-C0002
+      example: MY-C0004
+      selector:
+        text:

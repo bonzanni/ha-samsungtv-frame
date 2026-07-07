@@ -46,6 +46,8 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         self.device = device
         self._unreachable_count = 0
         self._art_mode: bool | None = None
+        self._current_art: str | None = None
+        self._art_brightness: int | None = None
         self._was_reachable = True
         self._wake_task: asyncio.Task | None = None
         # Learned model trait: art mode coexisting with PowerState "on"
@@ -71,7 +73,6 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         info = await self.device.async_device_info()
         reachable = info is not None
         power_state = info.get("PowerState") if info else None
-        current_art: str | None = None
 
         was_reachable = self._was_reachable
         self._was_reachable = reachable
@@ -93,6 +94,11 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             self._async_capture_token()
             if self._art_mode is True and power_state == "on":
                 self._art_implies_power_on = True
+                # Art extras ride the same (healthy) art socket. Cached values
+                # persist while WATCHING: the selection stays valid until an
+                # image_selected push or the next art-mode poll changes it.
+                self._current_art = await self.device.async_get_current_art()
+                self._art_brightness = await self.device.async_get_art_brightness()
         else:
             self._unreachable_count += 1
 
@@ -126,13 +132,14 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         # When the TV is off we know art mode cannot be active, even if the
         # last cached value says otherwise.  Keep self._art_mode unchanged so
         # the cached state is still valid once the TV comes back.
-        art_mode_out = False if mode is TvMode.OFF else self._art_mode
+        is_off = mode is TvMode.OFF
         return FrameData(
             reachable=reachable,
             power_state=power_state,
-            art_mode=art_mode_out,
+            art_mode=False if is_off else self._art_mode,
             tv_mode=mode,
-            current_art=current_art,
+            current_art=None if is_off else self._current_art,
+            art_brightness=None if is_off else self._art_brightness,
         )
 
     async def _async_fetch_app_list(self) -> None:
@@ -218,6 +225,11 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         if sub in ("art_mode_changed", "artmode_status"):
             value = data.get("value") or data.get("status")
             self._art_mode = value == "on"
+        elif sub in ("image_selected", "slideshow_image_changed", "image_changed"):
+            content_id = data.get("content_id")
+            if not content_id:
+                return
+            self._current_art = content_id
         elif sub == "go_to_standby":
             # Never a state by itself (the destination is ambiguous), but a
             # strong hint the TV is shutting down: refresh now instead of
@@ -236,6 +248,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
                 power_state=current.power_state if current else "on",
                 art_mode=self._art_mode,
                 tv_mode=mode,
-                current_art=current.current_art if current else None,
+                current_art=self._current_art,
+                art_brightness=current.art_brightness if current else None,
             )
         )

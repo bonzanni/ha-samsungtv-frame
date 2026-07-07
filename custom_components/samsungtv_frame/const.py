@@ -11,6 +11,7 @@ LOGGER = logging.getLogger(__package__)
 PLATFORMS: list[Platform] = [
     Platform.MEDIA_PLAYER,
     Platform.BINARY_SENSOR,
+    Platform.NUMBER,
     Platform.SENSOR,
 ]
 
@@ -27,8 +28,19 @@ DEFAULT_HEARTBEAT_SECONDS = 10
 # Entity services (registered on media_player)
 SERVICE_SEND_KEY = "send_key"
 SERVICE_SET_ART_MODE = "set_art_mode"
+SERVICE_SELECT_ART = "select_art"
+SERVICE_UPLOAD_ART = "upload_art"
+SERVICE_DELETE_ART = "delete_art"
+SERVICE_SET_SLIDESHOW = "set_slideshow"
 ATTR_KEY = "key"
 ATTR_ENABLED = "enabled"
+ATTR_CONTENT_ID = "content_id"
+ATTR_SHOW = "show"
+ATTR_PATH = "path"
+ATTR_MATTE = "matte"
+ATTR_DURATION = "duration_minutes"
+ATTR_SHUFFLE = "shuffle"
+ATTR_CATEGORY_ID = "category_id"
 
 # Fixed websocket client name — the TV's token grant is keyed to this. Never change.
 CLIENT_NAME = "Home Assistant"

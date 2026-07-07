@@ -18,7 +18,12 @@ async def async_setup_entry(
     entry: FrameConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    async_add_entities([FrameTvModeSensor(entry.runtime_data)])
+    async_add_entities(
+        [
+            FrameTvModeSensor(entry.runtime_data),
+            FrameCurrentArtSensor(entry.runtime_data),
+        ]
+    )
 
 
 class FrameTvModeSensor(FrameEntity, SensorEntity):
@@ -37,3 +42,19 @@ class FrameTvModeSensor(FrameEntity, SensorEntity):
     def native_value(self) -> str | None:
         mode = self.coordinator.data.tv_mode
         return mode if mode in self._attr_options else None
+
+
+class FrameCurrentArtSensor(FrameEntity, SensorEntity):
+    """Content id of the artwork currently selected on the TV."""
+
+    _attr_translation_key = "current_art"
+    _attr_name = "Current art"
+    _attr_icon = "mdi:image-frame"
+
+    def __init__(self, coordinator: FrameCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.config_entry.data[CONF_MAC]}_current_art"
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.data.current_art

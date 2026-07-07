@@ -162,3 +162,70 @@ async def test_set_art_mode_entity_service(hass, mock_device):
         {"entity_id": ENTITY, "enabled": True}, blocking=True,
     )
     mock_device.async_set_artmode.assert_awaited_once_with(True)
+
+
+async def test_select_art_service(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    await _setup(hass, mock_device)
+    await hass.services.async_call(
+        DOMAIN, "select_art",
+        {"entity_id": ENTITY, "content_id": "MY_F0034"}, blocking=True,
+    )
+    mock_device.async_select_art.assert_awaited_once_with("MY_F0034", True)
+
+
+async def test_upload_art_service(hass, mock_device, tmp_path):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    img = tmp_path / "monet.jpg"
+    img.write_bytes(b"fake-jpeg-bytes")
+    hass.config.allowlist_external_dirs = {str(tmp_path)}
+    await _setup(hass, mock_device)
+    await hass.services.async_call(
+        DOMAIN, "upload_art",
+        {"entity_id": ENTITY, "path": str(img)}, blocking=True,
+    )
+    mock_device.async_upload_art.assert_awaited_once_with(
+        b"fake-jpeg-bytes", "jpg", "none"
+    )
+    # show=True default selects the freshly uploaded content id
+    mock_device.async_select_art.assert_awaited_once_with("MY_F9999", True)
+
+
+async def test_upload_art_rejects_disallowed_path(hass, mock_device, tmp_path):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    img = tmp_path / "monet.jpg"
+    img.write_bytes(b"x")
+    await _setup(hass, mock_device)
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(
+            DOMAIN, "upload_art",
+            {"entity_id": ENTITY, "path": str(img)}, blocking=True,
+        )
+    mock_device.async_upload_art.assert_not_awaited()
+
+
+async def test_delete_art_service(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    await _setup(hass, mock_device)
+    await hass.services.async_call(
+        DOMAIN, "delete_art",
+        {"entity_id": ENTITY, "content_id": "MY_F0001"}, blocking=True,
+    )
+    mock_device.async_delete_art.assert_awaited_once_with("MY_F0001")
+
+
+async def test_set_slideshow_service(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    await _setup(hass, mock_device)
+    await hass.services.async_call(
+        DOMAIN, "set_slideshow",
+        {"entity_id": ENTITY, "duration_minutes": 60, "shuffle": False,
+         "category_id": "MY-C0004"},
+        blocking=True,
+    )
+    mock_device.async_set_slideshow.assert_awaited_once_with(60, False, "MY-C0004")

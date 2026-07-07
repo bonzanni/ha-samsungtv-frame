@@ -1,6 +1,7 @@
 """Async facade over the samsungtvws library for a Frame TV."""
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable
 
 from homeassistant.core import HomeAssistant
@@ -9,6 +10,7 @@ from samsungtvws.art import SamsungTVArt
 from samsungtvws.async_remote import SamsungTVWSAsyncRemote
 from samsungtvws.async_rest import SamsungTVAsyncRest
 from samsungtvws.command import SamsungTVCommand
+from samsungtvws.exceptions import ResponseError
 from samsungtvws.remote import ChannelEmitCommand, SendRemoteKey
 from wakeonlan import send_magic_packet
 
@@ -36,6 +38,10 @@ class FrameDevice:
         self._art = SamsungTVArt(
             host, token=token, port=PORT_WS, name=CLIENT_NAME, timeout=8
         )
+        # The sync client is not thread-safe: serialize all executor calls on
+        # it (heartbeat poll vs entity services would otherwise interleave
+        # frames on one websocket).
+        self._art_lock = asyncio.Lock()
         # Dedicated second instance for start_listening — samsungtvws raises
         # ConnectionFailure if start_listening is called on a connection that
         # is already open (e.g. after get_artmode opened it during first refresh).
@@ -83,6 +89,11 @@ class FrameDevice:
             return None
         return info.get("device") if info else None
 
+    async def _async_art_call(self, func: Callable[..., Any], *args: Any) -> Any:
+        """Run a sync art-client call in the executor, serialized."""
+        async with self._art_lock:
+            return await self._hass.async_add_executor_job(func, *args)
+
     async def async_get_artmode(self, attempts: int = 2) -> bool | None:
         # Two attempts by default: the first call after a TV power cycle hits
         # the stale cached connection and fails; the reset makes the retry
@@ -91,7 +102,7 @@ class FrameDevice:
         # hangs until timeout, so a retry only doubles the poll latency).
         for attempt in range(1, attempts + 1):
             try:
-                value = await self._hass.async_add_executor_job(self._art.get_artmode)
+                value = await self._async_art_call(self._art.get_artmode)
             except Exception as err:  # noqa: BLE001
                 LOGGER.debug("get_artmode failed (attempt %s): %s", attempt, err)
                 await self._async_reset_art_connection()
@@ -101,10 +112,76 @@ class FrameDevice:
 
     async def async_set_artmode(self, on: bool) -> None:
         try:
-            await self._hass.async_add_executor_job(self._art.set_artmode, on)
+            await self._async_art_call(self._art.set_artmode, on)
         except Exception:
             await self._async_reset_art_connection()
             raise
+
+    async def async_get_current_art(self) -> str | None:
+        """Content id of the artwork currently selected, or None."""
+        try:
+            current = await self._async_art_call(self._art.get_current)
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("get_current failed: %s", err)
+            return None
+        if isinstance(current, dict):
+            return current.get("content_id")
+        return None
+
+    async def async_get_art_brightness(self) -> int | None:
+        try:
+            value = await self._async_art_call(self._art.get_brightness)
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("get_brightness failed: %s", err)
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    async def async_set_art_brightness(self, value: int) -> None:
+        await self._async_art_call(self._art.set_brightness, value)
+
+    async def async_select_art(self, content_id: str, show: bool) -> None:
+        await self._async_art_call(self._art.select_image, content_id, None, show)
+
+    async def async_upload_art(
+        self, data: bytes, file_type: str, matte: str
+    ) -> str:
+        """Upload image bytes; returns the TV-assigned content id."""
+
+        def _upload() -> str:
+            return self._art.upload(
+                data, matte=matte, portrait_matte=matte, file_type=file_type
+            )
+
+        async with self._art_lock:
+            return await self._hass.async_add_executor_job(_upload)
+
+    async def async_delete_art(self, content_id: str) -> None:
+        await self._async_art_call(self._art.delete, content_id)
+
+    async def async_set_slideshow(
+        self, duration: int, shuffle: bool, category_id: str
+    ) -> None:
+        """Configure the art slideshow.
+
+        2021+ firmwares use auto_rotation; older ones the slideshow request.
+        Try the modern one first and fall back on a response error.
+        """
+
+        def _set() -> None:
+            try:
+                self._art.set_auto_rotation_status(
+                    duration=duration, type=shuffle, category_id=category_id
+                )
+            except ResponseError:
+                self._art.set_slideshow_status(
+                    duration=duration, type=shuffle, category_id=category_id
+                )
+
+        async with self._art_lock:
+            await self._hass.async_add_executor_job(_set)
 
     async def _async_reset_art_connection(self) -> None:
         """Close the (likely dead) art websocket so the next call reopens fresh.

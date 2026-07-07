@@ -170,6 +170,39 @@ async def test_app_list_failure_returns_none(hass, device):
         assert await device.async_app_list() is None
 
 
+async def test_set_slideshow_falls_back_to_legacy_request(hass, device):
+    from samsungtvws.exceptions import ResponseError
+
+    art = MagicMock()
+    art.set_auto_rotation_status.side_effect = ResponseError("unsupported")
+    with patch.object(device, "_art", art):
+        await device.async_set_slideshow(60, True, "MY-C0002")
+    art.set_auto_rotation_status.assert_called_once_with(
+        duration=60, type=True, category_id="MY-C0002"
+    )
+    art.set_slideshow_status.assert_called_once_with(
+        duration=60, type=True, category_id="MY-C0002"
+    )
+
+
+async def test_upload_art_returns_content_id(hass, device):
+    art = MagicMock()
+    art.upload.return_value = "MY_F0100"
+    with patch.object(device, "_art", art):
+        result = await device.async_upload_art(b"bytes", "jpg", "none")
+    assert result == "MY_F0100"
+    art.upload.assert_called_once_with(
+        b"bytes", matte="none", portrait_matte="none", file_type="jpg"
+    )
+
+
+async def test_get_current_art_returns_content_id(hass, device):
+    art = MagicMock()
+    art.get_current.return_value = {"content_id": "MY_F0034", "matte_id": "none"}
+    with patch.object(device, "_art", art):
+        assert await device.async_get_current_art() == "MY_F0034"
+
+
 async def test_turn_off_holds_power_key(hass, device):
     remote = MagicMock()
     remote.send_commands = AsyncMock()

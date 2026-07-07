@@ -1,6 +1,8 @@
 """Media player entity for Samsung Frame TV (state + power + basic controls)."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import voluptuous as vol
 from homeassistant.components.media_player import (
     MediaPlayerDeviceClass,
@@ -14,11 +16,22 @@ from homeassistant.helpers import config_validation as cv, entity_platform
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import (
+    ATTR_CATEGORY_ID,
+    ATTR_CONTENT_ID,
+    ATTR_DURATION,
     ATTR_ENABLED,
     ATTR_KEY,
+    ATTR_MATTE,
+    ATTR_PATH,
+    ATTR_SHOW,
+    ATTR_SHUFFLE,
     CONF_MAC,
+    SERVICE_DELETE_ART,
+    SERVICE_SELECT_ART,
     SERVICE_SEND_KEY,
     SERVICE_SET_ART_MODE,
+    SERVICE_SET_SLIDESHOW,
+    SERVICE_UPLOAD_ART,
 )
 from .coordinator import FrameConfigEntry, FrameCoordinator
 from .entity import FrameEntity
@@ -48,6 +61,39 @@ async def async_setup_entry(
         SERVICE_SET_ART_MODE,
         {vol.Required(ATTR_ENABLED): cv.boolean},
         "async_set_art_mode_service",
+    )
+    platform.async_register_entity_service(
+        SERVICE_SELECT_ART,
+        {
+            vol.Required(ATTR_CONTENT_ID): cv.string,
+            vol.Optional(ATTR_SHOW, default=True): cv.boolean,
+        },
+        "async_select_art_service",
+    )
+    platform.async_register_entity_service(
+        SERVICE_UPLOAD_ART,
+        {
+            vol.Required(ATTR_PATH): cv.string,
+            vol.Optional(ATTR_MATTE, default="none"): cv.string,
+            vol.Optional(ATTR_SHOW, default=True): cv.boolean,
+        },
+        "async_upload_art_service",
+    )
+    platform.async_register_entity_service(
+        SERVICE_DELETE_ART,
+        {vol.Required(ATTR_CONTENT_ID): cv.string},
+        "async_delete_art_service",
+    )
+    platform.async_register_entity_service(
+        SERVICE_SET_SLIDESHOW,
+        {
+            vol.Required(ATTR_DURATION): vol.All(
+                vol.Coerce(int), vol.Range(min=0, max=1440)
+            ),
+            vol.Optional(ATTR_SHUFFLE, default=True): cv.boolean,
+            vol.Optional(ATTR_CATEGORY_ID, default="MY-C0002"): cv.string,
+        },
+        "async_set_slideshow_service",
     )
     async_add_entities([FrameMediaPlayer(entry.runtime_data)])
 
@@ -127,6 +173,52 @@ class FrameMediaPlayer(FrameEntity, MediaPlayerEntity):
         except Exception as err:  # noqa: BLE001
             raise HomeAssistantError("Failed to set art mode on the TV") from err
         await self.coordinator.async_request_refresh()
+
+    async def async_select_art_service(self, content_id: str, show: bool) -> None:
+        try:
+            await self.coordinator.device.async_select_art(content_id, show)
+        except Exception as err:  # noqa: BLE001
+            raise HomeAssistantError(f"Failed to select artwork {content_id}") from err
+        await self.coordinator.async_request_refresh()
+
+    async def async_upload_art_service(
+        self, path: str, matte: str, show: bool
+    ) -> None:
+        hass = self.hass
+        if not hass.config.is_allowed_path(path):
+            raise ServiceValidationError(
+                f"Path '{path}' is not in allowlist_external_dirs"
+            )
+        file = Path(path)
+        if not file.is_file():
+            raise ServiceValidationError(f"No such file: {path}")
+        file_type = file.suffix.lstrip(".").lower() or "png"
+        data = await hass.async_add_executor_job(file.read_bytes)
+        try:
+            content_id = await self.coordinator.device.async_upload_art(
+                data, file_type, matte
+            )
+        except Exception as err:  # noqa: BLE001
+            raise HomeAssistantError(f"Failed to upload {path} to the TV") from err
+        if show:
+            await self.async_select_art_service(content_id, True)
+
+    async def async_delete_art_service(self, content_id: str) -> None:
+        try:
+            await self.coordinator.device.async_delete_art(content_id)
+        except Exception as err:  # noqa: BLE001
+            raise HomeAssistantError(f"Failed to delete artwork {content_id}") from err
+        await self.coordinator.async_request_refresh()
+
+    async def async_set_slideshow_service(
+        self, duration_minutes: int, shuffle: bool, category_id: str
+    ) -> None:
+        try:
+            await self.coordinator.device.async_set_slideshow(
+                duration_minutes, shuffle, category_id
+            )
+        except Exception as err:  # noqa: BLE001
+            raise HomeAssistantError("Failed to configure the slideshow") from err
 
     async def _async_send_key(self, key: str) -> None:
         try:

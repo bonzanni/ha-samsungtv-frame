@@ -35,8 +35,12 @@
   },
   "entity": {
     "binary_sensor": {"art_mode": {"name": "Art mode"}},
-    "sensor": {"tv_mode": {"name": "TV mode",
-      "state": {"off": "Off", "watching": "Watching", "art_mode": "Art mode"}}}
+    "number": {"art_brightness": {"name": "Art brightness"}},
+    "sensor": {
+      "tv_mode": {"name": "TV mode",
+        "state": {"off": "Off", "watching": "Watching", "art_mode": "Art mode"}},
+      "current_art": {"name": "Current art"}
+    }
   },
   "services": {
     "send_key": {
@@ -51,6 +55,39 @@
       "description": "Switches the TV into or out of art mode (TV must be on).",
       "fields": {
         "enabled": {"name": "Enabled", "description": "True to show art, false to switch to watching."}
+      }
+    },
+    "select_art": {
+      "name": "Select art",
+      "description": "Selects an artwork on the TV by its content id (see the current art sensor).",
+      "fields": {
+        "content_id": {"name": "Content ID", "description": "The TV-side id of the artwork, e.g. MY_F0034."},
+        "show": {"name": "Show", "description": "Display it immediately."}
+      }
+    },
+    "upload_art": {
+      "name": "Upload art",
+      "description": "Uploads an image file to the TV's art collection (path must be inside allowlist_external_dirs).",
+      "fields": {
+        "path": {"name": "Path", "description": "Local image path, e.g. /config/www/art/monet.jpg."},
+        "matte": {"name": "Matte", "description": "Matte style id, e.g. shadowbox_polar; 'none' for no matte."},
+        "show": {"name": "Show", "description": "Display the uploaded image immediately."}
+      }
+    },
+    "delete_art": {
+      "name": "Delete art",
+      "description": "Deletes an artwork from the TV by content id. Cannot be undone.",
+      "fields": {
+        "content_id": {"name": "Content ID", "description": "The TV-side id of the artwork to delete."}
+      }
+    },
+    "set_slideshow": {
+      "name": "Set slideshow",
+      "description": "Configures the art-mode slideshow rotation.",
+      "fields": {
+        "duration_minutes": {"name": "Duration", "description": "Minutes per artwork; 0 disables the slideshow."},
+        "shuffle": {"name": "Shuffle", "description": "Shuffled or sequential order."},
+        "category_id": {"name": "Category", "description": "MY-C0002 = my pictures, MY-C0004 = favourites, MY-C0008 = store."}
       }
     }
   }
