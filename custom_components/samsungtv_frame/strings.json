@@ -35,11 +35,22 @@
   },
   "entity": {
     "binary_sensor": {"art_mode": {"name": "Art mode"}},
-    "number": {"art_brightness": {"name": "Art brightness"}},
+    "image": {"current_art_image": {"name": "Current art image"}},
+    "number": {
+      "art_brightness": {"name": "Art brightness"},
+      "art_color_temperature": {"name": "Art color temperature"}
+    },
     "sensor": {
       "tv_mode": {"name": "TV mode",
         "state": {"off": "Off", "watching": "Watching", "art_mode": "Art mode"}},
       "current_art": {"name": "Current art"}
+    }
+  },
+  "device_automation": {
+    "trigger_type": {
+      "turned_off": "Turned off",
+      "started_watching": "Started watching",
+      "entered_art_mode": "Entered art mode"
     }
   },
   "services": {
@@ -88,6 +99,30 @@
         "duration_minutes": {"name": "Duration", "description": "Minutes per artwork; 0 disables the slideshow."},
         "shuffle": {"name": "Shuffle", "description": "Shuffled or sequential order."},
         "category_id": {"name": "Category", "description": "MY-C0002 = my pictures, MY-C0004 = favourites, MY-C0008 = store."}
+      }
+    },
+    "change_matte": {
+      "name": "Change matte",
+      "description": "Changes the matte (frame style) of an artwork; defaults to the current one.",
+      "fields": {
+        "matte_id": {"name": "Matte", "description": "Matte style id, e.g. shadowbox_polar, modern_apricot, none."},
+        "content_id": {"name": "Content ID", "description": "Artwork to change; defaults to the currently displayed one."}
+      }
+    },
+    "set_photo_filter": {
+      "name": "Set photo filter",
+      "description": "Applies a photo filter to an artwork; defaults to the current one.",
+      "fields": {
+        "filter_id": {"name": "Filter", "description": "Filter id, e.g. ink, aqua, none."},
+        "content_id": {"name": "Content ID", "description": "Artwork to change; defaults to the currently displayed one."}
+      }
+    },
+    "set_favourite": {
+      "name": "Set favourite",
+      "description": "Marks or unmarks an artwork as favourite; defaults to the current one.",
+      "fields": {
+        "favourite": {"name": "Favourite", "description": "True to favourite, false to unfavourite."},
+        "content_id": {"name": "Content ID", "description": "Artwork to change; defaults to the currently displayed one."}
       }
     }
   }

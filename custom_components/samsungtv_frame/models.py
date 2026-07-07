@@ -60,6 +60,7 @@ class FrameData:
     tv_mode: TvMode
     current_art: str | None = None
     art_brightness: int | None = None
+    art_color_temperature: int | None = None
     running_app: str | None = None
     volume_level: float | None = None
     is_muted: bool | None = None

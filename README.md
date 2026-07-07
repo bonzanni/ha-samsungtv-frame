@@ -14,7 +14,9 @@ Accurate OFF / WATCHING / ART-MODE state for Samsung Frame TVs, plus power and b
 - `binary_sensor.samsung_frame_tv_art_mode` — art mode on/off
 - `sensor.samsung_frame_tv_tv_mode` — `off` / `watching` / `art_mode` (use this in automations)
 - `sensor.samsung_frame_tv_current_art` — content id of the artwork currently selected
+- `image.samsung_frame_tv_current_art_image` — thumbnail of the current artwork (for dashboards)
 - `number.samsung_frame_tv_art_brightness` — art-mode panel brightness (0–10)
+- `number.samsung_frame_tv_art_color_temperature` — art-mode color temperature (-5…5)
 
 ## Services
 - `samsungtv_frame.send_key` — send any Samsung remote key code (e.g. `KEY_HOME`, `KEY_MENU`)
@@ -25,6 +27,14 @@ Accurate OFF / WATCHING / ART-MODE state for Samsung Frame TVs, plus power and b
 - `samsungtv_frame.delete_art` — remove an artwork by content id (irreversible)
 - `samsungtv_frame.set_slideshow` — rotate art every N minutes (0 disables); categories:
   `MY-C0002` my pictures, `MY-C0004` favourites, `MY-C0008` store
+- `samsungtv_frame.change_matte` / `set_photo_filter` / `set_favourite` — style an artwork
+  (all default to the currently displayed one)
+- `media_player.play_media` with `media_content_type: app` — launch an app, optionally with
+  deep-link content: `extra: {meta_tag: "v=VIDEO_ID"}` (support varies per app)
+
+## Device triggers
+"Turned off", "Started watching" and "Entered art mode" are available directly in the
+automation editor (Device → Samsung Frame TV), each with an optional duration filter.
 
 ## Options
 Settings → Devices & Services → Samsung Frame TV → Configure: polling heartbeat (5–60 s,

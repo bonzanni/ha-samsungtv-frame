@@ -300,3 +300,84 @@ async def test_set_slideshow_service(hass, mock_device):
         blocking=True,
     )
     mock_device.async_set_slideshow.assert_awaited_once_with(60, False, "MY-C0004")
+
+
+async def test_change_matte_defaults_to_current_art(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    mock_device.async_get_current_art.return_value = "MY_F0034"
+    await _setup(hass, mock_device)
+    await hass.services.async_call(
+        DOMAIN, "change_matte",
+        {"entity_id": ENTITY, "matte_id": "shadowbox_polar"}, blocking=True,
+    )
+    mock_device.async_change_matte.assert_awaited_once_with(
+        "MY_F0034", "shadowbox_polar"
+    )
+
+
+async def test_change_matte_without_art_raises(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False  # no current art known
+    await _setup(hass, mock_device)
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(
+            DOMAIN, "change_matte",
+            {"entity_id": ENTITY, "matte_id": "none"}, blocking=True,
+        )
+
+
+async def test_set_favourite_service(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    mock_device.async_get_current_art.return_value = "MY_F0034"
+    await _setup(hass, mock_device)
+    await hass.services.async_call(
+        DOMAIN, "set_favourite", {"entity_id": ENTITY}, blocking=True,
+    )
+    mock_device.async_set_favourite.assert_awaited_once_with("MY_F0034", True)
+
+
+async def test_set_photo_filter_service(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    mock_device.async_get_current_art.return_value = "MY_F0034"
+    await _setup(hass, mock_device)
+    await hass.services.async_call(
+        DOMAIN, "set_photo_filter",
+        {"entity_id": ENTITY, "filter_id": "ink"}, blocking=True,
+    )
+    mock_device.async_set_photo_filter.assert_awaited_once_with("MY_F0034", "ink")
+
+
+async def test_play_media_launches_app_with_deep_link(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.async_app_list.return_value = [
+        {"name": "YouTube", "appId": "111299001912", "app_type": 2},
+    ]
+    await _setup(hass, mock_device)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    await hass.services.async_call(
+        "media_player", "play_media",
+        {"entity_id": ENTITY, "media_content_type": "app",
+         "media_content_id": "YouTube",
+         "extra": {"meta_tag": "v=dQw4w9WgXcQ"}},
+        blocking=True,
+    )
+    mock_device.async_launch_app.assert_awaited_once_with(
+        "111299001912", "DEEP_LINK", "v=dQw4w9WgXcQ"
+    )
+
+
+async def test_play_media_rejects_non_app_type(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    await _setup(hass, mock_device)
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(
+            "media_player", "play_media",
+            {"entity_id": ENTITY, "media_content_type": "music",
+             "media_content_id": "x"},
+            blocking=True,
+        )

@@ -18,7 +18,12 @@ async def async_setup_entry(
     entry: FrameConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    async_add_entities([FrameArtBrightnessNumber(entry.runtime_data)])
+    async_add_entities(
+        [
+            FrameArtBrightnessNumber(entry.runtime_data),
+            FrameArtColorTempNumber(entry.runtime_data),
+        ]
+    )
 
 
 class FrameArtBrightnessNumber(FrameEntity, NumberEntity):
@@ -47,4 +52,33 @@ class FrameArtBrightnessNumber(FrameEntity, NumberEntity):
             await self.coordinator.device.async_set_art_brightness(int(value))
         except Exception as err:  # noqa: BLE001
             raise HomeAssistantError("Failed to set art brightness") from err
+        await self.coordinator.async_request_refresh()
+
+
+class FrameArtColorTempNumber(FrameEntity, NumberEntity):
+    """Color temperature of the art-mode panel (Frame scale -5..5)."""
+
+    _attr_translation_key = "art_color_temperature"
+    _attr_name = "Art color temperature"
+    _attr_icon = "mdi:thermometer"
+    _attr_mode = NumberMode.SLIDER
+    _attr_native_min_value = -5
+    _attr_native_max_value = 5
+    _attr_native_step = 1
+
+    def __init__(self, coordinator: FrameCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.config_entry.data[CONF_MAC]}_art_color_temperature"
+        )
+
+    @property
+    def native_value(self) -> int | None:
+        return self.coordinator.data.art_color_temperature
+
+    async def async_set_native_value(self, value: float) -> None:
+        try:
+            await self.coordinator.device.async_set_color_temperature(int(value))
+        except Exception as err:  # noqa: BLE001
+            raise HomeAssistantError("Failed to set art color temperature") from err
         await self.coordinator.async_request_refresh()

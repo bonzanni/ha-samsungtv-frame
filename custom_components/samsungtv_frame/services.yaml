@@ -98,3 +98,54 @@ set_slideshow:
       example: MY-C0004
       selector:
         text:
+
+change_matte:
+  target:
+    entity:
+      integration: samsungtv_frame
+      domain: media_player
+  fields:
+    matte_id:
+      required: true
+      example: shadowbox_polar
+      selector:
+        text:
+    content_id:
+      required: false
+      example: MY_F0034
+      selector:
+        text:
+
+set_photo_filter:
+  target:
+    entity:
+      integration: samsungtv_frame
+      domain: media_player
+  fields:
+    filter_id:
+      required: true
+      example: ink
+      selector:
+        text:
+    content_id:
+      required: false
+      example: MY_F0034
+      selector:
+        text:
+
+set_favourite:
+  target:
+    entity:
+      integration: samsungtv_frame
+      domain: media_player
+  fields:
+    favourite:
+      required: false
+      default: true
+      selector:
+        boolean:
+    content_id:
+      required: false
+      example: MY_F0034
+      selector:
+        text:

@@ -226,6 +226,40 @@ class FrameDevice:
     async def async_delete_art(self, content_id: str) -> None:
         await self._async_art_call(self._art.delete, content_id)
 
+    async def async_get_art_thumbnail(self, content_id: str) -> bytes | None:
+        """JPEG thumbnail bytes for an artwork, or None."""
+        try:
+            data = await self._async_art_call(self._art.get_thumbnail, content_id)
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("get_thumbnail failed for %s: %s", content_id, err)
+            return None
+        return bytes(data) if data else None
+
+    async def async_change_matte(self, content_id: str, matte_id: str) -> None:
+        await self._async_art_call(self._art.change_matte, content_id, matte_id)
+
+    async def async_set_photo_filter(self, content_id: str, filter_id: str) -> None:
+        await self._async_art_call(self._art.set_photo_filter, content_id, filter_id)
+
+    async def async_set_favourite(self, content_id: str, favourite: bool) -> None:
+        await self._async_art_call(
+            self._art.set_favourite, content_id, "on" if favourite else "off"
+        )
+
+    async def async_get_color_temperature(self) -> int | None:
+        try:
+            value = await self._async_art_call(self._art.get_color_temperature)
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("get_color_temperature failed: %s", err)
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    async def async_set_color_temperature(self, value: int) -> None:
+        await self._async_art_call(self._art.set_color_temperature, value)
+
     async def async_set_slideshow(
         self, duration: int, shuffle: bool, category_id: str
     ) -> None:
@@ -276,9 +310,11 @@ class FrameDevice:
     async def async_hold_key(self, key: str, seconds: float) -> None:
         await self._async_remote_commands(SendRemoteKey.hold(key, seconds))
 
-    async def async_launch_app(self, app_id: str, app_type: str) -> None:
+    async def async_launch_app(
+        self, app_id: str, app_type: str, meta_tag: str = ""
+    ) -> None:
         await self._async_remote_commands(
-            [ChannelEmitCommand.launch_app(app_id, app_type)]
+            [ChannelEmitCommand.launch_app(app_id, app_type, meta_tag)]
         )
 
     async def async_app_list(self) -> list[dict[str, Any]] | None:

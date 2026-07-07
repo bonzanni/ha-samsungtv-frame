@@ -52,3 +52,17 @@ async def test_set_art_brightness(hass, mock_device):
         {"entity_id": ENTITY, "value": 8}, blocking=True,
     )
     mock_device.async_set_art_brightness.assert_awaited_once_with(8)
+
+
+async def test_color_temperature_entity(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    mock_device.async_get_color_temperature.return_value = -2
+    await _setup(hass, mock_device)
+    entity = "number.samsung_frame_tv_art_color_temperature"
+    assert hass.states.get(entity).state == "-2"
+    await hass.services.async_call(
+        "number", "set_value",
+        {"entity_id": entity, "value": 3}, blocking=True,
+    )
+    mock_device.async_set_color_temperature.assert_awaited_once_with(3)

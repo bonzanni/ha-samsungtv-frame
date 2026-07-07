@@ -48,6 +48,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         self._art_mode: bool | None = None
         self._current_art: str | None = None
         self._art_brightness: int | None = None
+        self._art_color_temp: int | None = None
         self._was_reachable = True
         self._wake_task: asyncio.Task | None = None
         # Learned model trait: art mode coexisting with PowerState "on"
@@ -99,6 +100,9 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
                 # image_selected push or the next art-mode poll changes it.
                 self._current_art = await self.device.async_get_current_art()
                 self._art_brightness = await self.device.async_get_art_brightness()
+                self._art_color_temp = (
+                    await self.device.async_get_color_temperature()
+                )
         else:
             self._unreachable_count += 1
 
@@ -149,6 +153,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             tv_mode=mode,
             current_art=None if is_off else self._current_art,
             art_brightness=None if is_off else self._art_brightness,
+            art_color_temperature=None if is_off else self._art_color_temp,
             running_app=running_app,
             volume_level=volume_level,
             is_muted=is_muted,
@@ -281,6 +286,9 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
                 tv_mode=mode,
                 current_art=self._current_art,
                 art_brightness=current.art_brightness if current else None,
+                art_color_temperature=(
+                    current.art_color_temperature if current else None
+                ),
                 running_app=current.running_app if current else None,
                 volume_level=current.volume_level if current else None,
                 is_muted=current.is_muted if current else None,

@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import voluptuous as vol
 from homeassistant.components.media_player import (
+    ATTR_MEDIA_EXTRA,
     MediaPlayerDeviceClass,
     MediaPlayerEntity,
     MediaPlayerEntityFeature,
     MediaPlayerState,
+    MediaType,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
@@ -20,16 +23,22 @@ from .const import (
     ATTR_CONTENT_ID,
     ATTR_DURATION,
     ATTR_ENABLED,
+    ATTR_FAVOURITE,
+    ATTR_FILTER_ID,
     ATTR_KEY,
     ATTR_MATTE,
+    ATTR_MATTE_ID,
     ATTR_PATH,
     ATTR_SHOW,
     ATTR_SHUFFLE,
     CONF_MAC,
+    SERVICE_CHANGE_MATTE,
     SERVICE_DELETE_ART,
     SERVICE_SELECT_ART,
     SERVICE_SEND_KEY,
     SERVICE_SET_ART_MODE,
+    SERVICE_SET_FAVOURITE,
+    SERVICE_SET_PHOTO_FILTER,
     SERVICE_SET_SLIDESHOW,
     SERVICE_UPLOAD_ART,
 )
@@ -95,6 +104,30 @@ async def async_setup_entry(
         },
         "async_set_slideshow_service",
     )
+    platform.async_register_entity_service(
+        SERVICE_CHANGE_MATTE,
+        {
+            vol.Required(ATTR_MATTE_ID): cv.string,
+            vol.Optional(ATTR_CONTENT_ID): cv.string,
+        },
+        "async_change_matte_service",
+    )
+    platform.async_register_entity_service(
+        SERVICE_SET_PHOTO_FILTER,
+        {
+            vol.Required(ATTR_FILTER_ID): cv.string,
+            vol.Optional(ATTR_CONTENT_ID): cv.string,
+        },
+        "async_set_photo_filter_service",
+    )
+    platform.async_register_entity_service(
+        SERVICE_SET_FAVOURITE,
+        {
+            vol.Optional(ATTR_FAVOURITE, default=True): cv.boolean,
+            vol.Optional(ATTR_CONTENT_ID): cv.string,
+        },
+        "async_set_favourite_service",
+    )
     async_add_entities([FrameMediaPlayer(entry.runtime_data)])
 
 
@@ -115,6 +148,7 @@ class FrameMediaPlayer(FrameEntity, MediaPlayerEntity):
         | MediaPlayerEntityFeature.NEXT_TRACK
         | MediaPlayerEntityFeature.PREVIOUS_TRACK
         | MediaPlayerEntityFeature.SELECT_SOURCE
+        | MediaPlayerEntityFeature.PLAY_MEDIA
     )
 
     def __init__(self, coordinator: FrameCoordinator) -> None:
@@ -262,6 +296,76 @@ class FrameMediaPlayer(FrameEntity, MediaPlayerEntity):
             )
         except Exception as err:  # noqa: BLE001
             raise HomeAssistantError("Failed to configure the slideshow") from err
+
+    async def async_change_matte_service(
+        self, matte_id: str, content_id: str | None = None
+    ) -> None:
+        content_id = self._resolve_content_id(content_id)
+        try:
+            await self.coordinator.device.async_change_matte(content_id, matte_id)
+        except Exception as err:  # noqa: BLE001
+            raise HomeAssistantError(
+                f"Failed to change matte on {content_id}"
+            ) from err
+        await self.coordinator.async_request_refresh()
+
+    async def async_set_photo_filter_service(
+        self, filter_id: str, content_id: str | None = None
+    ) -> None:
+        content_id = self._resolve_content_id(content_id)
+        try:
+            await self.coordinator.device.async_set_photo_filter(
+                content_id, filter_id
+            )
+        except Exception as err:  # noqa: BLE001
+            raise HomeAssistantError(
+                f"Failed to set photo filter on {content_id}"
+            ) from err
+
+    async def async_set_favourite_service(
+        self, favourite: bool, content_id: str | None = None
+    ) -> None:
+        content_id = self._resolve_content_id(content_id)
+        try:
+            await self.coordinator.device.async_set_favourite(content_id, favourite)
+        except Exception as err:  # noqa: BLE001
+            raise HomeAssistantError(
+                f"Failed to change favourite on {content_id}"
+            ) from err
+
+    async def async_play_media(
+        self, media_type: str, media_id: str, **kwargs: Any
+    ) -> None:
+        """Launch an app, optionally with deep-link content.
+
+        media_type must be "app"; media_id is an app name (from the source
+        list) or a raw Tizen app id. extra.meta_tag carries deep-link content
+        (e.g. a YouTube video id) — support varies per app.
+        """
+        if media_type != MediaType.APP:
+            raise ServiceValidationError(
+                f"Unsupported media type '{media_type}'; only 'app' is supported"
+            )
+        extra = kwargs.get(ATTR_MEDIA_EXTRA) or {}
+        app_map = self.coordinator.app_map or {}
+        app = app_map.get(media_id)
+        app_id = app["appId"] if app else media_id
+        app_type = "DEEP_LINK" if (app is None or app.get("app_type") == 2) else "NATIVE_LAUNCH"
+        meta_tag = extra.get("meta_tag", "")
+        try:
+            await self.coordinator.device.async_launch_app(
+                app_id, app_type, meta_tag
+            )
+        except Exception as err:  # noqa: BLE001
+            raise HomeAssistantError(f"Failed to launch {media_id}") from err
+
+    def _resolve_content_id(self, content_id: str | None) -> str:
+        resolved = content_id or self.coordinator.data.current_art
+        if not resolved:
+            raise ServiceValidationError(
+                "No content_id given and no current artwork is known"
+            )
+        return resolved
 
     async def _async_send_key(self, key: str) -> None:
         try:

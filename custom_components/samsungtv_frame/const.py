@@ -11,6 +11,7 @@ LOGGER = logging.getLogger(__package__)
 PLATFORMS: list[Platform] = [
     Platform.MEDIA_PLAYER,
     Platform.BINARY_SENSOR,
+    Platform.IMAGE,
     Platform.NUMBER,
     Platform.REMOTE,
     Platform.SENSOR,
@@ -33,6 +34,12 @@ SERVICE_SELECT_ART = "select_art"
 SERVICE_UPLOAD_ART = "upload_art"
 SERVICE_DELETE_ART = "delete_art"
 SERVICE_SET_SLIDESHOW = "set_slideshow"
+SERVICE_CHANGE_MATTE = "change_matte"
+SERVICE_SET_PHOTO_FILTER = "set_photo_filter"
+SERVICE_SET_FAVOURITE = "set_favourite"
+ATTR_MATTE_ID = "matte_id"
+ATTR_FILTER_ID = "filter_id"
+ATTR_FAVOURITE = "favourite"
 ATTR_KEY = "key"
 ATTR_ENABLED = "enabled"
 ATTR_CONTENT_ID = "content_id"
