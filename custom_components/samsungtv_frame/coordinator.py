@@ -119,6 +119,11 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         if mode is TvMode.WATCHING and self.app_map:
             running_app = await self._async_detect_running_app()
 
+        volume_level: float | None = None
+        is_muted: bool | None = None
+        if reachable and power_state == "on":
+            volume_level, is_muted = await self.device.async_get_volume()
+
         LOGGER.debug(
             "Poll: reachable=%s power=%s art=%s -> %s",
             reachable, power_state, self._art_mode, mode,
@@ -145,6 +150,8 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             current_art=None if is_off else self._current_art,
             art_brightness=None if is_off else self._art_brightness,
             running_app=running_app,
+            volume_level=volume_level,
+            is_muted=is_muted,
         )
 
     async def _async_detect_running_app(self) -> str | None:
@@ -275,5 +282,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
                 current_art=self._current_art,
                 art_brightness=current.art_brightness if current else None,
                 running_app=current.running_app if current else None,
+                volume_level=current.volume_level if current else None,
+                is_muted=current.is_muted if current else None,
             )
         )

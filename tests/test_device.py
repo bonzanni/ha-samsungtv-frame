@@ -203,6 +203,48 @@ async def test_get_current_art_returns_content_id(hass, device):
         assert await device.async_get_current_art() == "MY_F0034"
 
 
+def _mock_rendering_control(actions: dict) -> MagicMock:
+    rc = MagicMock()
+    rc.action.side_effect = lambda name: actions[name]
+    return rc
+
+
+def _mock_action(result) -> MagicMock:
+    action = MagicMock()
+    action.async_call = AsyncMock(return_value=result)
+    return action
+
+
+async def test_get_volume_via_upnp(hass, device):
+    rc = _mock_rendering_control({
+        "GetVolume": _mock_action({"CurrentVolume": 23}),
+        "GetMute": _mock_action({"CurrentMute": False}),
+    })
+    with patch.object(device, "_async_rendering_control", AsyncMock(return_value=rc)):
+        vol, mute = await device.async_get_volume()
+    assert vol == 0.23
+    assert mute is False
+
+
+async def test_get_volume_failure_resets_upnp_device(hass, device):
+    device._upnp_device = MagicMock()
+    with patch.object(
+        device, "_async_rendering_control", AsyncMock(side_effect=OSError("down"))
+    ):
+        assert await device.async_get_volume() == (None, None)
+    assert device._upnp_device is None
+
+
+async def test_set_volume_scales_to_percent(hass, device):
+    set_action = _mock_action({})
+    rc = _mock_rendering_control({"SetVolume": set_action})
+    with patch.object(device, "_async_rendering_control", AsyncMock(return_value=rc)):
+        await device.async_set_volume(0.4)
+    set_action.async_call.assert_awaited_once_with(
+        InstanceID=0, Channel="Master", DesiredVolume=40
+    )
+
+
 async def test_turn_off_holds_power_key(hass, device):
     remote = MagicMock()
     remote.send_commands = AsyncMock()

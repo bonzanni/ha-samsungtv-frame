@@ -1,7 +1,7 @@
 {
   "domain": "samsungtv_frame",
   "name": "Samsung Frame TV",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "integration_type": "device",
   "iot_class": "local_push",
   "quality_scale": "silver",
@@ -10,7 +10,11 @@
   "documentation": "https://github.com/bonzanni/ha-samsungtv-frame",
   "issue_tracker": "https://github.com/bonzanni/ha-samsungtv-frame/issues",
   "loggers": ["samsungtvws"],
-  "requirements": ["samsungtvws[async,encrypted]==3.0.5", "wakeonlan==3.3.0"],
+  "requirements": [
+    "samsungtvws[async,encrypted]==3.0.5",
+    "wakeonlan==3.3.0",
+    "async-upnp-client==0.46.2"
+  ],
   "dependencies": [],
   "ssdp": [
     {"manufacturer": "Samsung Electronics", "deviceType": "urn:samsung.com:device:RemoteControlReceiver:1"}

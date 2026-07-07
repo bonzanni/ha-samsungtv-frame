@@ -66,9 +66,11 @@ async def test_turn_off_calls_device(hass, mock_device):
     [
         ("volume_up", {}, "KEY_VOLUP"),
         ("volume_down", {}, "KEY_VOLDOWN"),
-        ("volume_mute", {"is_volume_muted": True}, "KEY_MUTE"),
         ("media_play", {}, "KEY_PLAY"),
         ("media_pause", {}, "KEY_PAUSE"),
+        ("media_stop", {}, "KEY_STOP"),
+        ("media_next_track", {}, "KEY_CHUP"),
+        ("media_previous_track", {}, "KEY_CHDOWN"),
     ],
 )
 async def test_key_backed_controls(hass, mock_device, service, data, expected_key):
@@ -79,6 +81,38 @@ async def test_key_backed_controls(hass, mock_device, service, data, expected_ke
         "media_player", service, {"entity_id": ENTITY, **data}, blocking=True,
     )
     mock_device.async_send_key.assert_awaited_once_with(expected_key)
+
+
+async def test_volume_level_and_mute_reported(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.async_get_volume.return_value = (0.23, False)
+    await _setup(hass, mock_device)
+    state = hass.states.get(ENTITY)
+    assert state.attributes["volume_level"] == 0.23
+    assert state.attributes["is_volume_muted"] is False
+
+
+async def test_set_volume_level(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    await _setup(hass, mock_device)
+    await hass.services.async_call(
+        "media_player", "volume_set",
+        {"entity_id": ENTITY, "volume_level": 0.4}, blocking=True,
+    )
+    mock_device.async_set_volume.assert_awaited_once_with(0.4)
+
+
+async def test_mute_uses_upnp_absolute_mute(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    await _setup(hass, mock_device)
+    await hass.services.async_call(
+        "media_player", "volume_mute",
+        {"entity_id": ENTITY, "is_volume_muted": True}, blocking=True,
+    )
+    mock_device.async_set_mute.assert_awaited_once_with(True)
 
 
 async def test_send_key_failure_raises_ha_error(hass, mock_device):

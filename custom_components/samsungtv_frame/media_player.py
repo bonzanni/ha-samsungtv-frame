@@ -107,9 +107,13 @@ class FrameMediaPlayer(FrameEntity, MediaPlayerEntity):
         MediaPlayerEntityFeature.TURN_ON
         | MediaPlayerEntityFeature.TURN_OFF
         | MediaPlayerEntityFeature.VOLUME_STEP
+        | MediaPlayerEntityFeature.VOLUME_SET
         | MediaPlayerEntityFeature.VOLUME_MUTE
         | MediaPlayerEntityFeature.PLAY
         | MediaPlayerEntityFeature.PAUSE
+        | MediaPlayerEntityFeature.STOP
+        | MediaPlayerEntityFeature.NEXT_TRACK
+        | MediaPlayerEntityFeature.PREVIOUS_TRACK
         | MediaPlayerEntityFeature.SELECT_SOURCE
     )
 
@@ -139,6 +143,14 @@ class FrameMediaPlayer(FrameEntity, MediaPlayerEntity):
     def app_name(self) -> str | None:
         return self.coordinator.data.running_app
 
+    @property
+    def volume_level(self) -> float | None:
+        return self.coordinator.data.volume_level
+
+    @property
+    def is_volume_muted(self) -> bool | None:
+        return self.coordinator.data.is_muted
+
     async def async_turn_on(self) -> None:
         await self.coordinator.device.async_turn_on()
         self.coordinator.async_notify_turn_on()
@@ -152,15 +164,34 @@ class FrameMediaPlayer(FrameEntity, MediaPlayerEntity):
     async def async_volume_down(self) -> None:
         await self._async_send_key("KEY_VOLDOWN")
 
+    async def async_set_volume_level(self, volume: float) -> None:
+        try:
+            await self.coordinator.device.async_set_volume(volume)
+        except Exception as err:  # noqa: BLE001
+            raise HomeAssistantError("Failed to set volume on the TV") from err
+        await self.coordinator.async_request_refresh()
+
     async def async_mute_volume(self, mute: bool) -> None:
-        # The TV only exposes a mute toggle key; there is no absolute setter.
-        await self._async_send_key("KEY_MUTE")
+        try:
+            await self.coordinator.device.async_set_mute(mute)
+        except Exception as err:  # noqa: BLE001
+            raise HomeAssistantError("Failed to set mute on the TV") from err
+        await self.coordinator.async_request_refresh()
 
     async def async_media_play(self) -> None:
         await self._async_send_key("KEY_PLAY")
 
     async def async_media_pause(self) -> None:
         await self._async_send_key("KEY_PAUSE")
+
+    async def async_media_stop(self) -> None:
+        await self._async_send_key("KEY_STOP")
+
+    async def async_media_next_track(self) -> None:
+        await self._async_send_key("KEY_CHUP")
+
+    async def async_media_previous_track(self) -> None:
+        await self._async_send_key("KEY_CHDOWN")
 
     async def async_select_source(self, source: str) -> None:
         app_map = self.coordinator.app_map or {}

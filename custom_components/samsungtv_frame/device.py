@@ -4,6 +4,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable
 
+from async_upnp_client.aiohttp import AiohttpSessionRequester
+from async_upnp_client.client import UpnpDevice, UpnpService
+from async_upnp_client.client_factory import UpnpFactory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from samsungtvws.art import SamsungTVArt
@@ -15,6 +18,9 @@ from samsungtvws.remote import ChannelEmitCommand, SendRemoteKey
 from wakeonlan import send_magic_packet
 
 from .const import CLIENT_NAME, LOGGER, PORT_REST, PORT_WS
+
+_RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
+_DMR_URL = "http://{host}:9197/dmr"
 
 
 class FrameDevice:
@@ -42,6 +48,9 @@ class FrameDevice:
         # it (heartbeat poll vs entity services would otherwise interleave
         # frames on one websocket).
         self._art_lock = asyncio.Lock()
+        # UPnP DMR device (RenderingControl) — created lazily, dropped on
+        # failure so a TV power cycle just triggers a fresh description fetch.
+        self._upnp_device: UpnpDevice | None = None
         # Dedicated second instance for start_listening — samsungtvws raises
         # ConnectionFailure if start_listening is called on a connection that
         # is already open (e.g. after get_artmode opened it during first refresh).
@@ -91,6 +100,51 @@ class FrameDevice:
             LOGGER.debug("REST device info failed for %s: %s", self._host, err)
             return None
         return info.get("device") if info else None
+
+    async def _async_rendering_control(self) -> UpnpService:
+        if self._upnp_device is None:
+            session = async_get_clientsession(self._hass)
+            factory = UpnpFactory(AiohttpSessionRequester(session), non_strict=True)
+            self._upnp_device = await factory.async_create_device(
+                _DMR_URL.format(host=self._host)
+            )
+        return self._upnp_device.service(_RENDERING_CONTROL)
+
+    async def async_get_volume(self) -> tuple[float | None, bool | None]:
+        """(volume_level 0-1, muted) via UPnP, or (None, None)."""
+        try:
+            rc = await self._async_rendering_control()
+            vol = await rc.action("GetVolume").async_call(
+                InstanceID=0, Channel="Master"
+            )
+            mute = await rc.action("GetMute").async_call(
+                InstanceID=0, Channel="Master"
+            )
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("UPnP volume query failed: %s", err)
+            self._upnp_device = None
+            return None, None
+        return vol["CurrentVolume"] / 100, bool(mute["CurrentMute"])
+
+    async def async_set_volume(self, level: float) -> None:
+        try:
+            rc = await self._async_rendering_control()
+            await rc.action("SetVolume").async_call(
+                InstanceID=0, Channel="Master", DesiredVolume=round(level * 100)
+            )
+        except Exception:
+            self._upnp_device = None
+            raise
+
+    async def async_set_mute(self, mute: bool) -> None:
+        try:
+            rc = await self._async_rendering_control()
+            await rc.action("SetMute").async_call(
+                InstanceID=0, Channel="Master", DesiredMute=mute
+            )
+        except Exception:
+            self._upnp_device = None
+            raise
 
     async def async_app_status(self, app_id: str) -> dict[str, Any] | None:
         """Status payload for one app ({visible, running, ...}), or None."""
@@ -218,6 +272,9 @@ class FrameDevice:
 
     async def async_send_key(self, key: str) -> None:
         await self._async_remote_commands([SendRemoteKey.click(key)])
+
+    async def async_hold_key(self, key: str, seconds: float) -> None:
+        await self._async_remote_commands(SendRemoteKey.hold(key, seconds))
 
     async def async_launch_app(self, app_id: str, app_type: str) -> None:
         await self._async_remote_commands(

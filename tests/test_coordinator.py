@@ -266,6 +266,24 @@ async def test_running_app_not_swept_in_art_mode(hass, mock_device):
     assert data.running_app is None
 
 
+async def test_volume_polled_when_powered_on(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.async_get_volume.return_value = (0.15, True)
+    coord = _make(hass, mock_device)
+    data = await coord._async_update_data()
+    assert data.volume_level == 0.15
+    assert data.is_muted is True
+
+
+async def test_volume_not_polled_when_unreachable(hass, mock_device):
+    mock_device.async_device_info.return_value = None
+    coord = _make(hass, mock_device)
+    data = await coord._async_update_data()
+    mock_device.async_get_volume.assert_not_awaited()
+    assert data.volume_level is None
+
+
 async def test_heartbeat_option_sets_update_interval(hass, mock_device):
     entry = MagicMock(spec=ConfigEntry)
     entry.entry_id = "abc"
