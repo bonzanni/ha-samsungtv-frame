@@ -64,8 +64,11 @@ OFF_DEBOUNCE_COUNT = 2
 ART_FAIL_UNKNOWN_COUNT = 6
 # Consecutive failed UPnP volume reads (TV on) before warning once.
 UPNP_FAIL_WARN_COUNT = 6
-# App-list fetch attempts per power-on before giving up (with one warning).
-APP_FETCH_MAX_ATTEMPTS = 3
+# App-list fetch attempts per power-on before giving up (with one warning),
+# spaced APP_FETCH_POLL_SPACING polls apart (a cold-booting TV ignores the
+# request for its first ~30 s).
+APP_FETCH_MAX_ATTEMPTS = 10
+APP_FETCH_POLL_SPACING = 3
 
 # Wake probe: after turn_on (WoL) the TV takes 10-20 s to boot, and the regular
 # heartbeat reacts slowly (each poll of a still-booting TV burns the full REST

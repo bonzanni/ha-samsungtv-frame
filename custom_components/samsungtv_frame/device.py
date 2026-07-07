@@ -59,6 +59,8 @@ class FrameDevice:
         # UPnP DMR device (RenderingControl) — created lazily, dropped on
         # failure so a TV power cycle just triggers a fresh description fetch.
         self._upnp_device: UpnpDevice | None = None
+        # Guards against stacking thumbnail fetches if one wedges.
+        self._thumb_busy = False
         # Dedicated second instance for start_listening — samsungtvws raises
         # ConnectionFailure if start_listening is called on a connection that
         # is already open (e.g. after get_artmode opened it during first refresh).
@@ -254,13 +256,42 @@ class FrameDevice:
         await self._async_art_command(self._art.delete, content_id)
 
     async def async_get_art_thumbnail(self, content_id: str) -> bytes | None:
-        """JPEG thumbnail bytes for an artwork, or None."""
-        try:
-            data = await self._async_art_call(self._art.get_thumbnail, content_id)
-        except Exception as err:  # noqa: BLE001
-            LOGGER.debug("get_thumbnail failed for %s: %s", content_id, err)
+        """JPEG thumbnail bytes for an artwork, or None.
+
+        Uses get_thumbnail_list (the TV answers it; the singular
+        get_thumbnail request is ignored by 2022+ firmware and would spin
+        forever) on a DEDICATED short-lived connection, so a misbehaving
+        fetch can never block the shared art client the coordinator polls
+        on. Store artworks (SAM-*) are DRM-refused by the TV and yield None.
+        """
+        if self._thumb_busy:
+            LOGGER.debug("thumbnail fetch already in flight; skipping")
             return None
-        return bytes(data) if data else None
+
+        def _fetch() -> bytes | None:
+            art = SamsungTVArt(
+                self._host, token=self._token, port=PORT_WS,
+                name=CLIENT_NAME, timeout=8,
+            )
+            try:
+                thumbs = art.get_thumbnail_list(content_id)
+                if not thumbs:
+                    return None
+                return bytes(next(iter(thumbs.values())))
+            finally:
+                try:
+                    art.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        self._thumb_busy = True
+        try:
+            return await self._hass.async_add_executor_job(_fetch)
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("thumbnail fetch failed for %s: %s", content_id, err)
+            return None
+        finally:
+            self._thumb_busy = False
 
     async def async_change_matte(self, content_id: str, matte_id: str) -> None:
         await self._async_art_command(self._art.change_matte, content_id, matte_id)

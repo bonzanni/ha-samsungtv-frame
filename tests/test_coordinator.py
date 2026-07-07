@@ -340,7 +340,11 @@ async def test_app_fetch_retries_after_failure(hass, mock_device):
     mock_device.async_app_list.return_value = [
         {"name": "Netflix", "appId": "X", "app_type": 2}
     ]
-    await coord._async_update_data()  # retried on a later poll
+    # Attempts are spaced APP_FETCH_POLL_SPACING polls apart.
+    from custom_components.samsungtv_frame.const import APP_FETCH_POLL_SPACING
+
+    for _ in range(APP_FETCH_POLL_SPACING):
+        await coord._async_update_data()
     await hass.async_block_till_done()
     assert coord.app_map == {"Netflix": {"name": "Netflix", "appId": "X", "app_type": 2}}
 

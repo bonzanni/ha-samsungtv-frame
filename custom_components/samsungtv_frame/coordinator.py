@@ -11,6 +11,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
     APP_FETCH_MAX_ATTEMPTS,
+    APP_FETCH_POLL_SPACING,
     ART_FAIL_UNKNOWN_COUNT,
     CONF_TOKEN,
     DEFAULT_HEARTBEAT_SECONDS,
@@ -73,6 +74,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         # until then and on TVs whose firmware doesn't answer the request.
         self.app_map: dict[str, dict[str, Any]] | None = None
         self._app_fetch_attempts = 0
+        self._app_fetch_countdown = 0
         # Set by __init__.py once the initial art listener + bridge callback
         # exist, so a power-cycle recovery can restart the SAME listener.
         self.restart_listener: Callable[[], Awaitable[None]] | None = None
@@ -94,6 +96,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             # New power-on: the app list may have changed (and the previous
             # attempts may have hit a booting TV) — allow fresh fetches.
             self._app_fetch_attempts = 0
+            self._app_fetch_countdown = 0
             self._app_fetch_warned = False
         elif (
             reachable
@@ -186,15 +189,21 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             reachable, power_state, self._art_mode, mode,
         )
 
+        # App-list fetch: retry on every APP_FETCH_POLL_SPACING-th poll so the
+        # attempts span minutes — a cold-booting TV ignores the request for
+        # the first ~30 s, which would burn back-to-back attempts for nothing.
         if (
             mode in (TvMode.WATCHING, TvMode.ART_MODE)
             and self.app_map is None
             and self._app_fetch_attempts < APP_FETCH_MAX_ATTEMPTS
         ):
-            self._app_fetch_attempts += 1
-            self.config_entry.async_create_background_task(
-                self.hass, self._async_fetch_app_list(), f"{DOMAIN}-app-list"
-            )
+            self._app_fetch_countdown -= 1
+            if self._app_fetch_countdown <= 0:
+                self._app_fetch_countdown = APP_FETCH_POLL_SPACING
+                self._app_fetch_attempts += 1
+                self.config_entry.async_create_background_task(
+                    self.hass, self._async_fetch_app_list(), f"{DOMAIN}-app-list"
+                )
 
         # When the TV is off we know art mode cannot be active, even if the
         # last cached value says otherwise.  Keep self._art_mode unchanged so
