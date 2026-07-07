@@ -30,3 +30,11 @@ PORT_WS = 8002
 DEFAULT_HEARTBEAT = timedelta(seconds=10)
 # Consecutive unreachable heartbeats before declaring OFF (debounce transient drops).
 OFF_DEBOUNCE_COUNT = 2
+
+# Wake probe: after turn_on (WoL) the TV takes 10-20 s to boot, and the regular
+# heartbeat reacts slowly (each poll of a still-booting TV burns the full REST
+# timeout before the next is scheduled). Instead, probe the REST port cheaply
+# until it opens, then refresh immediately.
+WAKE_PROBE_ATTEMPTS = 30
+WAKE_PROBE_DELAY = 1.0
+WAKE_PROBE_TIMEOUT = 2.0

@@ -50,6 +50,7 @@ class FrameMediaPlayer(FrameEntity, MediaPlayerEntity):
 
     async def async_turn_on(self) -> None:
         await self.coordinator.device.async_turn_on()
+        self.coordinator.async_notify_turn_on()
 
     async def async_turn_off(self) -> None:
         await self.coordinator.device.async_turn_off()

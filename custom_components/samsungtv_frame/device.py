@@ -47,6 +47,10 @@ class FrameDevice:
             host, token=token, port=PORT_WS, name=CLIENT_NAME, timeout=None
         )
 
+    @property
+    def host(self) -> str:
+        return self._host
+
     async def async_device_info(self) -> dict[str, Any] | None:
         if self._rest is None:
             session = async_get_clientsession(self._hass)
@@ -61,13 +65,18 @@ class FrameDevice:
         return info.get("device") if info else None
 
     async def async_get_artmode(self) -> bool | None:
-        try:
-            value = await self._hass.async_add_executor_job(self._art.get_artmode)
-        except Exception as err:  # noqa: BLE001
-            LOGGER.debug("get_artmode failed: %s", err)
-            await self._async_reset_art_connection()
-            return None
-        return value == "on"
+        # Two attempts: the first call after a TV power cycle hits the stale
+        # cached connection and fails; the reset makes the retry reconnect, so
+        # the poll still resolves art mode in the same cycle.
+        for attempt in (1, 2):
+            try:
+                value = await self._hass.async_add_executor_job(self._art.get_artmode)
+            except Exception as err:  # noqa: BLE001
+                LOGGER.debug("get_artmode failed (attempt %s): %s", attempt, err)
+                await self._async_reset_art_connection()
+                continue
+            return value == "on"
+        return None
 
     async def async_set_artmode(self, on: bool) -> None:
         try:

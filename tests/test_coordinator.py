@@ -132,6 +132,57 @@ async def test_reachable_to_reachable_does_not_restart_listener(hass, mock_devic
     coord.restart_listener.assert_not_awaited()
 
 
+async def test_wake_probe_refreshes_when_port_opens(hass, mock_device):
+    coord = _make(hass, mock_device)
+    coord.data = FrameData(
+        reachable=False, power_state=None, art_mode=None,
+        tv_mode=TvMode.OFF, current_art=None,
+    )
+
+    def _resolve():
+        coord.data = FrameData(
+            reachable=True, power_state="on", art_mode=True,
+            tv_mode=TvMode.ART_MODE, current_art=None,
+        )
+
+    with (
+        patch.object(
+            coord, "_async_probe_port", AsyncMock(side_effect=[False, True])
+        ) as probe,
+        patch.object(
+            coord, "async_request_refresh", AsyncMock(side_effect=_resolve)
+        ) as refresh,
+        patch("custom_components.samsungtv_frame.coordinator.WAKE_PROBE_DELAY", 0),
+    ):
+        await coord._wake_probe()
+
+    assert probe.await_count == 2  # port closed while booting, then open
+    refresh.assert_awaited_once()
+
+
+async def test_wake_probe_exits_immediately_when_not_off(hass, mock_device):
+    coord = _make(hass, mock_device)
+    coord.data = FrameData(
+        reachable=True, power_state="on", art_mode=False,
+        tv_mode=TvMode.WATCHING, current_art=None,
+    )
+    with patch.object(coord, "_async_probe_port", AsyncMock()) as probe:
+        await coord._wake_probe()
+    probe.assert_not_awaited()
+
+
+async def test_notify_turn_on_spawns_probe_once(hass, mock_device):
+    coord = _make(hass, mock_device)
+    with patch.object(coord, "_wake_probe", MagicMock(return_value=None)):
+        coord.async_notify_turn_on()
+        coord.config_entry.async_create_background_task.assert_called_once()
+        # While the first probe is still running, another turn_on is a no-op.
+        coord._wake_task = MagicMock()
+        coord._wake_task.done.return_value = False
+        coord.async_notify_turn_on()
+        coord.config_entry.async_create_background_task.assert_called_once()
+
+
 async def test_art_event_go_to_standby_holds(hass, mock_device):
     coord = _make(hass, mock_device)
     coord.data = FrameData(

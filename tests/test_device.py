@@ -64,6 +64,17 @@ async def test_get_artmode_failure_resets_connection(hass, device):
     with patch.object(device, "_art", art):
         result = await device.async_get_artmode()
     assert result is None
+    # One reset per attempt (initial call + the retry).
+    assert art.close.call_count == 2
+
+
+async def test_get_artmode_retries_once_after_reset(hass, device):
+    # First call hits the stale post-power-cycle connection; the retry (on a
+    # fresh connection) must resolve art mode within the same poll.
+    art = MagicMock()
+    art.get_artmode.side_effect = [OSError("stale socket"), "on"]
+    with patch.object(device, "_art", art):
+        assert await device.async_get_artmode() is True
     art.close.assert_called_once()
 
 

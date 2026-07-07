@@ -1,13 +1,23 @@
 """Data update coordinator for a Samsung Frame TV."""
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Awaitable, Callable
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DEFAULT_HEARTBEAT, DOMAIN, LOGGER, OFF_DEBOUNCE_COUNT
+from .const import (
+    DEFAULT_HEARTBEAT,
+    DOMAIN,
+    LOGGER,
+    OFF_DEBOUNCE_COUNT,
+    PORT_REST,
+    WAKE_PROBE_ATTEMPTS,
+    WAKE_PROBE_DELAY,
+    WAKE_PROBE_TIMEOUT,
+)
 from .device import FrameDevice
 from .models import FrameData, TvMode, derive_tv_mode
 
@@ -32,6 +42,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         self._unreachable_count = 0
         self._art_mode: bool | None = None
         self._was_reachable = True
+        self._wake_task: asyncio.Task | None = None
         # Set by __init__.py once the initial art listener + bridge callback
         # exist, so a power-cycle recovery can restart the SAME listener.
         self.restart_listener: Callable[[], Awaitable[None]] | None = None
@@ -77,6 +88,41 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             tv_mode=mode,
             current_art=current_art,
         )
+
+    @callback
+    def async_notify_turn_on(self) -> None:
+        """Kick a fast wake probe after turn_on (WoL) was sent.
+
+        The heartbeat alone reacts slowly to wake-up: while the TV boots,
+        each poll burns the full REST timeout before the next one is even
+        scheduled, so consecutive polls end up ~18 s apart. Probing the REST
+        port directly is cheap, so we can afford a tight loop and refresh
+        the moment the TV answers.
+        """
+        if self._wake_task is not None and not self._wake_task.done():
+            return
+        self._wake_task = self.config_entry.async_create_background_task(
+            self.hass, self._wake_probe(), f"{DOMAIN}-wake-probe"
+        )
+
+    async def _wake_probe(self) -> None:
+        for _ in range(WAKE_PROBE_ATTEMPTS):
+            if self.data is not None and self.data.tv_mode is not TvMode.OFF:
+                return
+            if await self._async_probe_port():
+                # Debounced (immediate on first call), so the repeat calls
+                # while the art socket isn't ready yet stay cheap.
+                await self.async_request_refresh()
+            await asyncio.sleep(WAKE_PROBE_DELAY)
+
+    async def _async_probe_port(self) -> bool:
+        try:
+            async with asyncio.timeout(WAKE_PROBE_TIMEOUT):
+                _, writer = await asyncio.open_connection(self.device.host, PORT_REST)
+        except Exception:  # noqa: BLE001 - any failure just means "not up yet"
+            return False
+        writer.close()
+        return True
 
     async def _restart_listener_safe(self) -> None:
         """Restart the art push listener, swallowing failures.
