@@ -44,7 +44,8 @@
       "tv_mode": {"name": "TV mode",
         "state": {"off": "Off", "watching": "Watching", "art_mode": "Art mode"}},
       "current_art": {"name": "Current art"}
-    }
+    },
+    "switch": {"art_mode_switch": {"name": "Art mode switch"}}
   },
   "device_automation": {
     "trigger_type": {

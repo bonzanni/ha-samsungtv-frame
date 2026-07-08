@@ -53,6 +53,20 @@ async def test_image_serves_current_art_thumbnail(hass, mock_device):
     assert mock_device.async_get_art_thumbnail.await_count == 2
 
 
+async def test_image_serves_placeholder_when_thumbnail_refused(hass, mock_device):
+    """Store artworks refuse thumbnails (DRM); the bundled placeholder must
+    be served instead of a broken image."""
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    mock_device.async_get_current_art.return_value = "SAM-S1110879"
+    mock_device.async_get_art_thumbnail.return_value = None
+    await _setup(hass, mock_device)
+    entity = hass.data["image"].get_entity(ENTITY)
+    image = await entity.async_image()
+    assert image is not None
+    assert image[:3] == b"\xff\xd8\xff"  # bundled JPEG placeholder
+
+
 async def test_image_keeps_last_thumbnail_on_fetch_failure(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = True

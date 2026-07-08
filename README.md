@@ -13,8 +13,12 @@ Accurate OFF / WATCHING / ART-MODE state for Samsung Frame TVs, plus power and b
   `num_repeats` / `delay_secs` / `hold_secs` support.
 - `binary_sensor.samsung_frame_tv_art_mode` — art mode on/off
 - `sensor.samsung_frame_tv_tv_mode` — `off` / `watching` / `art_mode` (use this in automations)
+- `switch.samsung_frame_tv_art_mode_switch` — the clickable art ⇄ watching toggle
+  (unavailable while the TV is off)
 - `sensor.samsung_frame_tv_current_art` — content id of the artwork currently selected
-- `image.samsung_frame_tv_current_art_image` — thumbnail of the current artwork (for dashboards)
+- `image.samsung_frame_tv_current_art_image` — thumbnail of the current artwork (for
+  dashboards). Note: Samsung Store artworks are DRM-protected and show a placeholder;
+  your own uploaded images display normally.
 - `number.samsung_frame_tv_art_brightness` — art-mode panel brightness (0–10)
 - `number.samsung_frame_tv_art_color_temperature` — art-mode color temperature (-5…5)
 
@@ -45,6 +49,14 @@ The IP address can be changed later via the entry's Reconfigure menu.
 Settings → Devices & Services → Add Integration → "Samsung Frame TV" → enter the IP.
 **Accept the "Allow" prompt on the TV once** (do it while the TV is showing normal content, not
 art mode). The token is stored; you won't be asked again unless you reset the TV.
+
+## UI notes
+- **Volume**: the media player exposes absolute volume, so HA shows a slider; the mute
+  button is the speaker icon at its left end. ⏮/⏭ are channel down/up while watching.
+- **Remote entity toggle**: toggling `remote.*` powers the TV on/off; its main purpose is
+  `remote.send_command` for key sequences in automations.
+- A ready-made remote-control dashboard card (d-pad, apps, art toggle, current-art image)
+  is in [`examples/remote-card.yaml`](examples/remote-card.yaml).
 
 ## Example automation
 ```yaml

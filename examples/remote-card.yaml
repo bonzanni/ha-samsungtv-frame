@@ -1,0 +1,136 @@
+# Samsung Frame TV — remote control dashboard card
+# Paste into a Manual card (Dashboard -> Edit -> Add card -> Manual).
+# Replace living_room_tv entity ids with yours if they differ.
+type: vertical-stack
+cards:
+  - type: tile
+    entity: media_player.living_room_tv_2
+    features:
+      - type: media-player-volume-slider
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Art mode
+        icon: mdi:palette
+        entity: switch.living_room_tv_art_mode_switch
+        tap_action: {action: toggle}
+      - type: button
+        name: Power off
+        icon: mdi:power
+        tap_action:
+          action: perform-action
+          perform_action: media_player.turn_off
+          target: {entity_id: media_player.living_room_tv_2}
+      - type: button
+        name: Power on
+        icon: mdi:power-on
+        tap_action:
+          action: perform-action
+          perform_action: media_player.turn_on
+          target: {entity_id: media_player.living_room_tv_2}
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Netflix
+        icon: mdi:netflix
+        tap_action:
+          action: perform-action
+          perform_action: media_player.select_source
+          target: {entity_id: media_player.living_room_tv_2}
+          data: {source: Netflix}
+      - type: button
+        name: YouTube
+        icon: mdi:youtube
+        tap_action:
+          action: perform-action
+          perform_action: media_player.select_source
+          target: {entity_id: media_player.living_room_tv_2}
+          data: {source: YouTube}
+      - type: button
+        name: Home
+        icon: mdi:home
+        tap_action:
+          action: perform-action
+          perform_action: samsungtv_frame.send_key
+          target: {entity_id: media_player.living_room_tv_2}
+          data: {key: KEY_HOME}
+      - type: button
+        name: Back
+        icon: mdi:arrow-left
+        tap_action:
+          action: perform-action
+          perform_action: samsungtv_frame.send_key
+          target: {entity_id: media_player.living_room_tv_2}
+          data: {key: KEY_RETURN}
+  - type: horizontal-stack
+    cards:
+      - type: button
+        icon: mdi:blank
+        tap_action: {action: none}
+      - type: button
+        name: Up
+        icon: mdi:chevron-up
+        tap_action:
+          action: perform-action
+          perform_action: samsungtv_frame.send_key
+          target: {entity_id: media_player.living_room_tv_2}
+          data: {key: KEY_UP}
+      - type: button
+        icon: mdi:blank
+        tap_action: {action: none}
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Left
+        icon: mdi:chevron-left
+        tap_action:
+          action: perform-action
+          perform_action: samsungtv_frame.send_key
+          target: {entity_id: media_player.living_room_tv_2}
+          data: {key: KEY_LEFT}
+      - type: button
+        name: OK
+        icon: mdi:circle-outline
+        tap_action:
+          action: perform-action
+          perform_action: samsungtv_frame.send_key
+          target: {entity_id: media_player.living_room_tv_2}
+          data: {key: KEY_ENTER}
+      - type: button
+        name: Right
+        icon: mdi:chevron-right
+        tap_action:
+          action: perform-action
+          perform_action: samsungtv_frame.send_key
+          target: {entity_id: media_player.living_room_tv_2}
+          data: {key: KEY_RIGHT}
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Ch -
+        icon: mdi:chevron-double-down
+        tap_action:
+          action: perform-action
+          perform_action: samsungtv_frame.send_key
+          target: {entity_id: media_player.living_room_tv_2}
+          data: {key: KEY_CHDOWN}
+      - type: button
+        name: Down
+        icon: mdi:chevron-down
+        tap_action:
+          action: perform-action
+          perform_action: samsungtv_frame.send_key
+          target: {entity_id: media_player.living_room_tv_2}
+          data: {key: KEY_DOWN}
+      - type: button
+        name: Ch +
+        icon: mdi:chevron-double-up
+        tap_action:
+          action: perform-action
+          perform_action: samsungtv_frame.send_key
+          target: {entity_id: media_player.living_room_tv_2}
+          data: {key: KEY_CHUP}
+  - type: picture-entity
+    entity: image.living_room_tv_current_art_image
+    show_state: false
+    show_name: false

@@ -15,6 +15,7 @@ PLATFORMS: list[Platform] = [
     Platform.NUMBER,
     Platform.REMOTE,
     Platform.SENSOR,
+    Platform.SWITCH,
 ]
 
 # Config entry keys
