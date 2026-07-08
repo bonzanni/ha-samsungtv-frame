@@ -166,6 +166,29 @@ async def test_send_key_clicks_remote(hass, device):
     assert cmds[0].params["Cmd"] == "Click"
 
 
+async def test_rejected_remote_token_falls_back_to_tokenless(hass, device):
+    """An ms.channel.timeOut reply to a token-carrying connect means the
+    token is invalid for the remote channel; the client must be recreated
+    without a token so the on-TV Allow prompt can render."""
+    remote = MagicMock()
+    remote.app_list = AsyncMock(
+        side_effect=Exception("ConnectionFailure: {'event': 'ms.channel.timeOut'}")
+    )
+    with patch.object(device, "_remote", remote):
+        assert await device.async_app_list() is None
+        assert device._remote is not remote  # replaced with a fresh client
+        assert device._remote.token is None
+    assert device._remote_tokenless is True
+
+
+async def test_other_remote_errors_keep_token(hass, device):
+    remote = MagicMock()
+    remote.app_list = AsyncMock(side_effect=OSError("network down"))
+    with patch.object(device, "_remote", remote):
+        assert await device.async_app_list() is None
+    assert device._remote_tokenless is False
+
+
 async def test_remote_command_retries_on_stale_connection(hass, device):
     remote = MagicMock()
     remote.send_commands = AsyncMock(side_effect=[OSError("stale"), None])

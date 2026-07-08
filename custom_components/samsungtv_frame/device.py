@@ -61,6 +61,10 @@ class FrameDevice:
         self._upnp_device: UpnpDevice | None = None
         # Guards against stacking thumbnail fetches if one wedges.
         self._thumb_busy = False
+        # Set once the remote channel rejects the stored token (see
+        # _maybe_drop_rejected_remote_token); stays tokenless until a real
+        # remote token is granted and captured.
+        self._remote_tokenless = False
         # Dedicated second instance for start_listening — samsungtvws raises
         # ConnectionFailure if start_listening is called on a connection that
         # is already open (e.g. after get_artmode opened it during first refresh).
@@ -385,7 +389,30 @@ class FrameDevice:
             return await self._remote.app_list()
         except Exception as err:  # noqa: BLE001
             LOGGER.debug("app_list failed: %s", err)
+            self._maybe_drop_rejected_remote_token(err)
             return None
+
+    def _maybe_drop_rejected_remote_token(self, err: Exception) -> None:
+        """Fall back to a tokenless remote client when the token is rejected.
+
+        The remote channel answers a connect carrying a token it does not
+        recognize (e.g. one issued on the art channel) with an instant
+        ``ms.channel.timeOut`` and never shows the on-TV Allow prompt.
+        Reconnecting without a token makes the prompt render (while the TV
+        shows normal content); once granted, the TV issues a proper remote
+        token which the coordinator's capture persists into the entry.
+        """
+        if self._remote_tokenless or "ms.channel.timeOut" not in str(err):
+            return
+        self._remote_tokenless = True
+        LOGGER.warning(
+            "The TV rejected the stored token on the remote-control channel; "
+            "retrying without a token — accept the Allow prompt on the TV "
+            "(it only renders while the TV is showing normal content)"
+        )
+        self._remote = SamsungTVWSAsyncRemote(
+            self._host, token=None, port=PORT_WS, name=CLIENT_NAME, timeout=8
+        )
 
     async def _async_remote_commands(self, commands: list[SamsungTVCommand]) -> None:
         """Send on the persistent remote; reset once if the connection is stale.
@@ -398,6 +425,7 @@ class FrameDevice:
             await self._remote.send_commands(commands)
         except Exception as err:  # noqa: BLE001
             LOGGER.debug("remote send failed, retrying on a fresh connection: %s", err)
+            self._maybe_drop_rejected_remote_token(err)
             try:
                 await self._remote.close()
             except Exception:  # noqa: BLE001
