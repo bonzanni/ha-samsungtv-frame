@@ -410,8 +410,10 @@ class FrameDevice:
             "retrying without a token — accept the Allow prompt on the TV "
             "(it only renders while the TV is showing normal content)"
         )
+        # Generous timeout: each tokenless connect holds the on-TV Allow
+        # prompt open for this long, giving the user a real chance to react.
         self._remote = SamsungTVWSAsyncRemote(
-            self._host, token=None, port=PORT_WS, name=CLIENT_NAME, timeout=8
+            self._host, token=None, port=PORT_WS, name=CLIENT_NAME, timeout=30
         )
 
     async def _async_remote_commands(self, commands: list[SamsungTVCommand]) -> None:
