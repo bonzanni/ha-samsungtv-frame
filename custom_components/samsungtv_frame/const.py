@@ -64,6 +64,10 @@ OFF_DEBOUNCE_COUNT = 2
 ART_FAIL_UNKNOWN_COUNT = 6
 # Consecutive failed UPnP volume reads (TV on) before warning once.
 UPNP_FAIL_WARN_COUNT = 6
+# Hard upper bound on any single sync art-client call: the library's wait
+# loop restarts its socket timeout on every incoming frame and can otherwise
+# spin forever against a chatty-but-unresponsive (booting) TV.
+ART_CALL_DEADLINE = 20
 # App-list fetch attempts per power-on before giving up (with one warning),
 # spaced APP_FETCH_POLL_SPACING polls apart (a cold-booting TV ignores the
 # request for its first ~30 s).

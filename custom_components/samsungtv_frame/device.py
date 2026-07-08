@@ -17,7 +17,7 @@ from samsungtvws.exceptions import ResponseError
 from samsungtvws.remote import ChannelEmitCommand, SendRemoteKey
 from wakeonlan import send_magic_packet
 
-from .const import CLIENT_NAME, LOGGER, PORT_REST, PORT_WS
+from .const import ART_CALL_DEADLINE, CLIENT_NAME, LOGGER, PORT_REST, PORT_WS
 
 _RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
 _DMR_URL = "http://{host}:9197/dmr"
@@ -169,9 +169,29 @@ class FrameDevice:
             return None
 
     async def _async_art_call(self, func: Callable[..., Any], *args: Any) -> Any:
-        """Run a sync art-client call in the executor, serialized."""
+        """Run a sync art-client call in the executor, serialized and bounded.
+
+        The library's response-wait loop restarts its socket timeout on EVERY
+        incoming frame, so it can spin indefinitely while a (booting) TV
+        streams unrelated channel events without ever answering the request —
+        wedging the executor thread and this lock, and with them all polling.
+        The outer deadline forces the socket closed, which makes the wedged
+        thread's recv raise and exit.
+        """
         async with self._art_lock:
-            return await self._hass.async_add_executor_job(func, *args)
+            try:
+                async with asyncio.timeout(ART_CALL_DEADLINE):
+                    return await self._hass.async_add_executor_job(func, *args)
+            except TimeoutError:
+                LOGGER.debug(
+                    "art call wedged past %ss; forcing the socket closed",
+                    ART_CALL_DEADLINE,
+                )
+                try:
+                    await self._hass.async_add_executor_job(self._art.close)
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
 
     async def _async_art_command(self, func: Callable[..., Any], *args: Any) -> Any:
         """Art command with reset + one retry on a stale connection.
@@ -290,7 +310,8 @@ class FrameDevice:
 
         self._thumb_busy = True
         try:
-            return await self._hass.async_add_executor_job(_fetch)
+            async with asyncio.timeout(ART_CALL_DEADLINE):
+                return await self._hass.async_add_executor_job(_fetch)
         except Exception as err:  # noqa: BLE001
             LOGGER.debug("thumbnail fetch failed for %s: %s", content_id, err)
             return None
