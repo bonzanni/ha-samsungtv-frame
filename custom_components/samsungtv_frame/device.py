@@ -472,9 +472,15 @@ class FrameDevice:
         async with self._listener_lock:
             if self._stopped:
                 return
-            await self._hass.async_add_executor_job(
-                self._art_listener.start_listening, callback
-            )
+            # Art lock too: two of our clients handshaking at the same time
+            # poison each other — the TV broadcasts a clientConnect frame for
+            # one connect into the other's handshake read, and the library
+            # treats any unexpected first frame as failure. Lock order is
+            # always listener_lock -> art_lock.
+            async with self._art_lock:
+                await self._hass.async_add_executor_job(
+                    self._art_listener.start_listening, callback
+                )
 
     async def async_restart_art_listener(
         self, callback: Callable[[str, Any], None]
@@ -502,7 +508,10 @@ class FrameDevice:
         async with self._listener_lock:
             if self._stopped:
                 return
-            await self._hass.async_add_executor_job(_restart)
+            # See async_start_art_listener: never handshake two of our
+            # clients concurrently (listener_lock -> art_lock order).
+            async with self._art_lock:
+                await self._hass.async_add_executor_job(_restart)
 
     async def async_stop(self) -> None:
         try:
