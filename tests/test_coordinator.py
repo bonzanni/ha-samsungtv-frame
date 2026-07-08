@@ -349,6 +349,33 @@ async def test_app_fetch_retries_after_failure(hass, mock_device):
     assert coord.app_map == {"Netflix": {"name": "Netflix", "appId": "X", "app_type": 2}}
 
 
+async def test_app_fetch_falls_back_to_default_catalog(hass, mock_device):
+    """TVs that never answer the installed-apps request get the built-in
+    catalog once attempts are exhausted, so sources still work."""
+    from custom_components.samsungtv_frame.const import (
+        APP_FETCH_MAX_ATTEMPTS,
+        APP_FETCH_POLL_SPACING,
+        DEFAULT_APP_MAP,
+    )
+
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.async_app_list.return_value = None
+    coord = _make(hass, mock_device)
+    for _ in range(APP_FETCH_MAX_ATTEMPTS * APP_FETCH_POLL_SPACING):
+        await coord._async_update_data()
+    await hass.async_block_till_done()
+    assert coord.app_map is not None
+    assert set(coord.app_map) == set(DEFAULT_APP_MAP)
+
+    # A power cycle discards the fallback so the real list gets retried.
+    mock_device.async_device_info.return_value = None
+    await coord._async_update_data()
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    await coord._async_update_data()
+    assert coord.app_map is None
+
+
 async def test_volume_polled_when_powered_on(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False

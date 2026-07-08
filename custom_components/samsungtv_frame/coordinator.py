@@ -13,6 +13,7 @@ from .const import (
     APP_FETCH_MAX_ATTEMPTS,
     APP_FETCH_POLL_SPACING,
     ART_FAIL_UNKNOWN_COUNT,
+    DEFAULT_APP_MAP,
     CONF_TOKEN,
     DEFAULT_HEARTBEAT_SECONDS,
     DOMAIN,
@@ -73,6 +74,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         # Fetched (with a few retries) per power-on while the TV is up; None
         # until then and on TVs whose firmware doesn't answer the request.
         self.app_map: dict[str, dict[str, Any]] | None = None
+        self._app_map_is_fallback = False
         self._app_fetch_attempts = 0
         self._app_fetch_countdown = 0
         # Set by __init__.py once the initial art listener + bridge callback
@@ -94,10 +96,14 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         if reachable and not was_reachable:
             self._async_kick_listener_restart()
             # New power-on: the app list may have changed (and the previous
-            # attempts may have hit a booting TV) — allow fresh fetches.
+            # attempts may have hit a booting TV) — allow fresh fetches. A
+            # fallback catalog is discarded so the real list gets a new shot.
             self._app_fetch_attempts = 0
             self._app_fetch_countdown = 0
             self._app_fetch_warned = False
+            if self._app_map_is_fallback:
+                self.app_map = None
+                self._app_map_is_fallback = False
         elif (
             reachable
             and power_state == "on"
@@ -250,12 +256,21 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
                 and not self._app_fetch_warned
             ):
                 self._app_fetch_warned = True
+                # Some firmwares (e.g. 2022 LS03B) accept the request but
+                # never answer it; fall back to a catalog of well-known apps
+                # so source selection and app detection still work.
+                self.app_map = {
+                    name: dict(app) for name, app in DEFAULT_APP_MAP.items()
+                }
+                self._app_map_is_fallback = True
                 LOGGER.warning(
-                    "Could not fetch the TV's installed apps after %s attempts; "
-                    "source selection and app detection unavailable until the "
-                    "next power-on",
+                    "The TV did not answer the installed-apps request after "
+                    "%s attempts; using a built-in catalog of %s well-known "
+                    "apps for source selection and app detection",
                     self._app_fetch_attempts,
+                    len(self.app_map),
                 )
+                self.async_update_listeners()
             return
         self.app_map = {
             app["name"]: app for app in apps if app.get("name") and app.get("appId")

@@ -70,6 +70,19 @@ UPNP_FAIL_WARN_COUNT = 6
 APP_FETCH_MAX_ATTEMPTS = 10
 APP_FETCH_POLL_SPACING = 3
 
+# Fallback source catalog for TVs whose firmware never answers the
+# installed-apps request (e.g. 2022 LS03B): well-known Tizen app ids from
+# https://github.com/jaruba/ha-samsungtv-tizen/blob/master/App_IDs.md
+DEFAULT_APP_MAP: dict[str, dict[str, str | int]] = {
+    "Netflix": {"appId": "11101200001", "app_type": 2},
+    "YouTube": {"appId": "111299001912", "app_type": 2},
+    "Prime Video": {"appId": "3201910019365", "app_type": 2},
+    "Disney+": {"appId": "3201901017640", "app_type": 2},
+    "Spotify": {"appId": "3201606009684", "app_type": 2},
+    "Plex": {"appId": "3201512006963", "app_type": 2},
+    "Apple TV": {"appId": "3201807016597", "app_type": 2},
+}
+
 # Wake probe: after turn_on (WoL) the TV takes 10-20 s to boot, and the regular
 # heartbeat reacts slowly (each poll of a still-booting TV burns the full REST
 # timeout before the next is scheduled). Instead, probe the REST port cheaply
