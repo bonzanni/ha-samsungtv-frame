@@ -166,14 +166,17 @@ async def test_select_source_unknown_app_raises(hass, mock_device):
         )
 
 
-async def test_no_source_list_when_app_list_unsupported(hass, mock_device):
+async def test_catalog_source_list_when_app_list_unsupported(hass, mock_device):
+    """TVs that never answer the app-list request still get the built-in
+    catalog as source_list, available immediately."""
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False
     mock_device.async_app_list.return_value = None
     await _setup(hass, mock_device)
     await hass.async_block_till_done(wait_background_tasks=True)
     state = hass.states.get(ENTITY)
-    assert "source_list" not in state.attributes
+    assert "Netflix" in state.attributes["source_list"]
+    assert len(state.attributes["source_list"]) == 7
 
 
 async def test_send_key_entity_service(hass, mock_device):

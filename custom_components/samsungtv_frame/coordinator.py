@@ -71,10 +71,13 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         # models, which report "standby" during normal art mode (#185).
         self._art_implies_power_on = False
         # Installed apps keyed by display name (media_player source list).
-        # Fetched (with a few retries) per power-on while the TV is up; None
-        # until then and on TVs whose firmware doesn't answer the request.
-        self.app_map: dict[str, dict[str, Any]] | None = None
-        self._app_map_is_fallback = False
+        # Seeded with the built-in catalog so the source dropdown exists from
+        # the first poll; replaced by the TV's real list when (if) the TV
+        # answers the request — some firmwares never do.
+        self.app_map: dict[str, dict[str, Any]] = {
+            name: dict(app) for name, app in DEFAULT_APP_MAP.items()
+        }
+        self._app_map_is_fallback = True
         self._app_fetch_attempts = 0
         self._app_fetch_countdown = 0
         # Set by __init__.py once the initial art listener + bridge callback
@@ -96,14 +99,11 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         if reachable and not was_reachable:
             self._async_kick_listener_restart()
             # New power-on: the app list may have changed (and the previous
-            # attempts may have hit a booting TV) — allow fresh fetches. A
-            # fallback catalog is discarded so the real list gets a new shot.
+            # attempts may have hit a booting TV) — the real list gets a new
+            # shot; the catalog keeps serving sources meanwhile.
             self._app_fetch_attempts = 0
             self._app_fetch_countdown = 0
             self._app_fetch_warned = False
-            if self._app_map_is_fallback:
-                self.app_map = None
-                self._app_map_is_fallback = False
         elif (
             reachable
             and power_state == "on"
@@ -195,12 +195,12 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             reachable, power_state, self._art_mode, mode,
         )
 
-        # App-list fetch: retry on every APP_FETCH_POLL_SPACING-th poll so the
-        # attempts span minutes — a cold-booting TV ignores the request for
-        # the first ~30 s, which would burn back-to-back attempts for nothing.
+        # Real app-list fetch: retry on every APP_FETCH_POLL_SPACING-th poll
+        # so the attempts span minutes — a cold-booting TV ignores the request
+        # for the first ~30 s, which would burn back-to-back attempts.
         if (
             mode in (TvMode.WATCHING, TvMode.ART_MODE)
-            and self.app_map is None
+            and self._app_map_is_fallback
             and self._app_fetch_attempts < APP_FETCH_MAX_ATTEMPTS
         ):
             self._app_fetch_countdown -= 1
@@ -257,24 +257,19 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             ):
                 self._app_fetch_warned = True
                 # Some firmwares (e.g. 2022 LS03B) accept the request but
-                # never answer it; fall back to a catalog of well-known apps
-                # so source selection and app detection still work.
-                self.app_map = {
-                    name: dict(app) for name, app in DEFAULT_APP_MAP.items()
-                }
-                self._app_map_is_fallback = True
-                LOGGER.warning(
+                # never answer it; the pre-seeded catalog keeps serving.
+                LOGGER.info(
                     "The TV did not answer the installed-apps request after "
-                    "%s attempts; using a built-in catalog of %s well-known "
-                    "apps for source selection and app detection",
+                    "%s attempts; keeping the built-in catalog of %s "
+                    "well-known apps",
                     self._app_fetch_attempts,
                     len(self.app_map),
                 )
-                self.async_update_listeners()
             return
         self.app_map = {
             app["name"]: app for app in apps if app.get("name") and app.get("appId")
         }
+        self._app_map_is_fallback = False
         LOGGER.debug("Fetched %d installed apps", len(self.app_map))
         self.async_update_listeners()
 

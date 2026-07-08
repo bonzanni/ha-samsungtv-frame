@@ -328,30 +328,35 @@ async def test_persistent_art_failure_becomes_unknown(hass, mock_device):
     assert coord.data.tv_mode is TvMode.UNKNOWN  # bounded: surfaces as unknown
 
 
-async def test_app_fetch_retries_after_failure(hass, mock_device):
+async def test_app_fetch_retries_and_replaces_catalog(hass, mock_device):
+    from custom_components.samsungtv_frame.const import (
+        APP_FETCH_POLL_SPACING,
+        DEFAULT_APP_MAP,
+    )
+
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False
     mock_device.async_app_list.return_value = None  # booting TV: fetch fails
     coord = _make(hass, mock_device)
     await coord._async_update_data()
     await hass.async_block_till_done()
-    assert coord.app_map is None
+    # Catalog serves from the start, even while real fetches fail.
+    assert set(coord.app_map) == set(DEFAULT_APP_MAP)
 
     mock_device.async_app_list.return_value = [
         {"name": "Netflix", "appId": "X", "app_type": 2}
     ]
     # Attempts are spaced APP_FETCH_POLL_SPACING polls apart.
-    from custom_components.samsungtv_frame.const import APP_FETCH_POLL_SPACING
-
     for _ in range(APP_FETCH_POLL_SPACING):
         await coord._async_update_data()
     await hass.async_block_till_done()
+    # The TV's real list replaces the catalog once it answers.
     assert coord.app_map == {"Netflix": {"name": "Netflix", "appId": "X", "app_type": 2}}
 
 
-async def test_app_fetch_falls_back_to_default_catalog(hass, mock_device):
-    """TVs that never answer the installed-apps request get the built-in
-    catalog once attempts are exhausted, so sources still work."""
+async def test_catalog_kept_after_exhaustion_and_power_cycle(hass, mock_device):
+    """TVs that never answer the installed-apps request keep the built-in
+    catalog through attempt exhaustion and power cycles — sources always work."""
     from custom_components.samsungtv_frame.const import (
         APP_FETCH_MAX_ATTEMPTS,
         APP_FETCH_POLL_SPACING,
@@ -365,15 +370,17 @@ async def test_app_fetch_falls_back_to_default_catalog(hass, mock_device):
     for _ in range(APP_FETCH_MAX_ATTEMPTS * APP_FETCH_POLL_SPACING):
         await coord._async_update_data()
     await hass.async_block_till_done()
-    assert coord.app_map is not None
     assert set(coord.app_map) == set(DEFAULT_APP_MAP)
+    assert mock_device.async_app_list.await_count == APP_FETCH_MAX_ATTEMPTS
 
-    # A power cycle discards the fallback so the real list gets retried.
+    # A power cycle re-arms the real-list attempts; catalog keeps serving.
     mock_device.async_device_info.return_value = None
     await coord._async_update_data()
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     await coord._async_update_data()
-    assert coord.app_map is None
+    await hass.async_block_till_done()
+    assert set(coord.app_map) == set(DEFAULT_APP_MAP)
+    assert mock_device.async_app_list.await_count == APP_FETCH_MAX_ATTEMPTS + 1
 
 
 async def test_volume_polled_when_powered_on(hass, mock_device):
