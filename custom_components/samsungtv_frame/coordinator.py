@@ -7,7 +7,7 @@ from typing import Any, Awaitable, Callable
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
     APP_FETCH_MAX_ATTEMPTS,
@@ -20,6 +20,7 @@ from .const import (
     LOGGER,
     OFF_DEBOUNCE_COUNT,
     OPT_HEARTBEAT,
+    POLL_DEADLINE,
     PORT_REST,
     UPNP_FAIL_WARN_COUNT,
     WAKE_PROBE_ATTEMPTS,
@@ -90,6 +91,17 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         return TvMode.UNKNOWN
 
     async def _async_update_data(self) -> FrameData:
+        # One wedged device call must never kill the update loop: a poll that
+        # blows the deadline fails cleanly and the next interval retries.
+        try:
+            async with asyncio.timeout(POLL_DEADLINE):
+                return await self._async_poll()
+        except TimeoutError as err:
+            raise UpdateFailed(
+                f"TV poll exceeded {POLL_DEADLINE}s deadline"
+            ) from err
+
+    async def _async_poll(self) -> FrameData:
         info = await self.device.async_device_info()
         reachable = info is not None
         power_state = info.get("PowerState") if info else None

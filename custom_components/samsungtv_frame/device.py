@@ -17,7 +17,15 @@ from samsungtvws.exceptions import ResponseError
 from samsungtvws.remote import ChannelEmitCommand, SendRemoteKey
 from wakeonlan import send_magic_packet
 
-from .const import ART_CALL_DEADLINE, CLIENT_NAME, LOGGER, PORT_REST, PORT_WS
+from .const import (
+    ART_CALL_DEADLINE,
+    CLIENT_NAME,
+    LISTENER_CONNECT_TIMEOUT,
+    LISTENER_START_DEADLINE,
+    LOGGER,
+    PORT_REST,
+    PORT_WS,
+)
 
 _RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
 _DMR_URL = "http://{host}:9197/dmr"
@@ -68,14 +76,12 @@ class FrameDevice:
         # Dedicated second instance for start_listening — samsungtvws raises
         # ConnectionFailure if start_listening is called on a connection that
         # is already open (e.g. after get_artmode opened it during first refresh).
-        # timeout=None => blocking recv(): the TV goes silent for long stretches
-        # (e.g. idle art mode) and a finite timeout raises WebSocketTimeoutException
-        # inside the library's listener thread, which is uncaught and kills the
-        # thread permanently. A real socket error (e.g. TV power-cycle) still
-        # ends the thread, which async_restart_art_listener recovers from.
-        self._art_listener = SamsungTVArt(
-            host, token=token, port=PORT_WS, name=CLIENT_NAME, timeout=None
-        )
+        # Connect with a bounded timeout (a no-timeout connect once wedged for
+        # HOURS holding the art lock); _finish_listener_start then removes the
+        # timeout so the recv loop can idle indefinitely — the TV goes silent
+        # for long stretches in art mode, and a finite recv timeout kills the
+        # library's listener thread.
+        self._art_listener = self._new_listener()
 
     @property
     def host(self) -> str:
@@ -455,6 +461,27 @@ class FrameDevice:
                 pass
             await self._remote.send_commands(commands)
 
+    def _new_listener(self) -> SamsungTVArt:
+        return SamsungTVArt(
+            self._host,
+            token=self._token,
+            port=PORT_WS,
+            name=CLIENT_NAME,
+            timeout=LISTENER_CONNECT_TIMEOUT,
+        )
+
+    def _finish_listener_start(
+        self, listener: SamsungTVArt, callback: Callable[[str, Any], None]
+    ) -> None:
+        """start_listening with a bounded connect, then unbounded recv."""
+        listener.start_listening(callback)
+        # Connected: remove the socket timeout so the recv loop can idle
+        # forever (the TV is silent for long stretches in art mode).
+        listener.timeout = None
+        connection = listener.connection
+        if connection is not None:
+            connection.settimeout(None)
+
     @property
     def listener_alive(self) -> bool:
         """Whether the push listener's recv thread is currently running.
@@ -478,8 +505,8 @@ class FrameDevice:
             # treats any unexpected first frame as failure. Lock order is
             # always listener_lock -> art_lock.
             async with self._art_lock:
-                await self._hass.async_add_executor_job(
-                    self._art_listener.start_listening, callback
+                await self._async_listener_job(
+                    self._finish_listener_start, self._art_listener, callback
                 )
 
     async def async_restart_art_listener(
@@ -500,10 +527,8 @@ class FrameDevice:
                 self._art_listener.close()
             except Exception:  # noqa: BLE001
                 pass
-            self._art_listener = SamsungTVArt(
-                self._host, token=self._token, port=PORT_WS, name=CLIENT_NAME, timeout=None
-            )
-            self._art_listener.start_listening(callback)
+            self._art_listener = self._new_listener()
+            self._finish_listener_start(self._art_listener, callback)
 
         async with self._listener_lock:
             if self._stopped:
@@ -511,7 +536,31 @@ class FrameDevice:
             # See async_start_art_listener: never handshake two of our
             # clients concurrently (listener_lock -> art_lock order).
             async with self._art_lock:
-                await self._hass.async_add_executor_job(_restart)
+                await self._async_listener_job(_restart)
+
+    async def _async_listener_job(
+        self, func: Callable[..., Any], *args: Any
+    ) -> None:
+        """Run a listener (re)start in the executor, deadline-bounded.
+
+        Both locks are held by the caller; without a deadline a wedged
+        handshake would block every art call behind the lock indefinitely
+        (this froze the whole integration for a day once). On expiry the
+        listener socket is force-closed so the wedged thread exits.
+        """
+        try:
+            async with asyncio.timeout(LISTENER_START_DEADLINE):
+                await self._hass.async_add_executor_job(func, *args)
+        except TimeoutError:
+            LOGGER.debug(
+                "listener start wedged past %ss; forcing the socket closed",
+                LISTENER_START_DEADLINE,
+            )
+            try:
+                await self._hass.async_add_executor_job(self._art_listener.close)
+            except Exception:  # noqa: BLE001
+                pass
+            raise
 
     async def async_stop(self) -> None:
         try:

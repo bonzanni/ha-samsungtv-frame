@@ -108,8 +108,21 @@ async def test_set_artmode_retries_once_on_stale_connection(hass, device):
     art.close.assert_called_once()
 
 
-async def test_listener_socket_has_no_timeout(hass, device):
-    assert device._art_listener.timeout is None
+async def test_listener_connects_bounded_then_unbounded(hass, device):
+    from custom_components.samsungtv_frame.const import LISTENER_CONNECT_TIMEOUT
+
+    # Constructed with a bounded connect timeout (a no-timeout connect once
+    # wedged for hours holding the art lock)...
+    assert device._art_listener.timeout == LISTENER_CONNECT_TIMEOUT
+
+    # ...and after start_listening succeeds the timeout is removed so the
+    # recv loop can idle forever.
+    listener = MagicMock()
+    device._art_listener = listener
+    await device.async_start_art_listener(lambda e, d: None)
+    listener.start_listening.assert_called_once()
+    assert listener.timeout is None
+    listener.connection.settimeout.assert_called_once_with(None)
 
 
 async def test_newest_token_none_when_unchanged(hass, device):
