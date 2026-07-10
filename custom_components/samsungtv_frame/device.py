@@ -280,6 +280,13 @@ class FrameDevice:
         for attempt in range(1, attempts + 1):
             try:
                 value = await self._async_art_call(self._art.get_artmode)
+            except TimeoutError:
+                # The call burned its whole deadline — the art service is not
+                # answering at all; a retry would just double the poll time
+                # and push the poll past its own deadline.
+                LOGGER.debug("get_artmode hit the deadline (attempt %s)", attempt)
+                await self._async_reset_art_connection()
+                return None
             except Exception as err:  # noqa: BLE001
                 LOGGER.debug("get_artmode failed (attempt %s): %s", attempt, err)
                 await self._async_reset_art_connection()
