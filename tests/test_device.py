@@ -122,6 +122,30 @@ async def test_handshake_ignores_client_broadcasts(hass):
         )
 
 
+async def test_art_open_tolerates_broadcasts_before_ready(hass):
+    """The art-channel ready-wait must skip client broadcasts (a broadcast in
+    that single-frame slot killed the connect in production)."""
+    from samsungtvws.art import SamsungTVArt
+
+    art = SamsungTVArt("1.2.3.4", port=8002, name="x", timeout=1)
+    frames = [
+        ("ms.channel.clientDisconnect", {"event": "ms.channel.clientDisconnect"}),
+        ("ms.channel.clientConnect", {"event": "ms.channel.clientConnect"}),
+        ("ms.channel.ready", {"event": "ms.channel.ready"}),
+    ]
+    from samsungtvws.connection import SamsungTVWSConnection
+
+    with (
+        patch.object(SamsungTVWSConnection, "open", lambda self: None),
+        patch.object(art, "_recv_frame", side_effect=frames),
+        patch.object(art, "close") as close,
+    ):
+        art.connection = MagicMock()
+        result = art.open()
+    assert result is art.connection
+    close.assert_not_called()
+
+
 async def test_listener_connects_bounded_then_unbounded(hass, device):
     from custom_components.samsungtv_frame.const import LISTENER_CONNECT_TIMEOUT
 

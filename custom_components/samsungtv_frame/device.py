@@ -44,6 +44,7 @@ from .const import (
 from samsungtvws import async_connection as _stv_async_connection  # noqa: E402
 from samsungtvws import connection as _stv_connection  # noqa: E402
 from samsungtvws import event as _stv_event  # noqa: E402
+from samsungtvws import exceptions as _stv_exceptions  # noqa: E402
 
 _TOLERANT_STARTUP_EVENTS = tuple(
     dict.fromkeys(
@@ -57,6 +58,28 @@ _TOLERANT_STARTUP_EVENTS = tuple(
 _stv_event.IGNORE_EVENTS_AT_STARTUP = _TOLERANT_STARTUP_EVENTS
 _stv_connection.IGNORE_EVENTS_AT_STARTUP = _TOLERANT_STARTUP_EVENTS
 _stv_async_connection.IGNORE_EVENTS_AT_STARTUP = _TOLERANT_STARTUP_EVENTS
+
+
+def _tolerant_art_open(self: SamsungTVArt) -> Any:
+    """SamsungTVArt.open with broadcast tolerance on the ready-wait.
+
+    The library's art override performs ONE extra single-frame read after the
+    base handshake, expecting ms.channel.ready — a client broadcast landing in
+    that slot raised ConnectionFailure past the (patched) base loop. Loop over
+    tolerated broadcasts instead; each recv is bounded by the client timeout.
+    """
+    _stv_connection.SamsungTVWSConnection.open(self)
+    while True:
+        event, frame = self._recv_frame()
+        if event == _stv_event.MS_CHANNEL_READY_EVENT:
+            return self.connection
+        if event in _TOLERANT_STARTUP_EVENTS:
+            continue
+        self.close()
+        raise _stv_exceptions.ConnectionFailure(frame)
+
+
+SamsungTVArt.open = _tolerant_art_open  # type: ignore[method-assign]
 
 _RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
 _DMR_URL = "http://{host}:9197/dmr"
