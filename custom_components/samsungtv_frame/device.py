@@ -27,6 +27,37 @@ from .const import (
     PORT_WS,
 )
 
+# ---------------------------------------------------------------------------
+# Library shim: tolerate client broadcasts during the websocket handshake.
+#
+# The TV broadcasts ms.channel.clientConnect / clientDisconnect to every
+# client whenever ANY client (ours, the TV's own internal "Smart Device"
+# hosts, the SmartThings app...) comes or goes. samsungtvws's open() loops
+# until a non-ignored event arrives and treats anything that is not the
+# connect ack as a fatal ConnectionFailure — so a broadcast landing inside
+# the handshake window kills the connect. Seen repeatedly in production on
+# both the poll and listener paths. The library already has the right
+# mechanism (IGNORE_EVENTS_AT_STARTUP); it just doesn't include the client
+# broadcasts. Extend it — in every module namespace that bound the tuple at
+# import time.
+# ---------------------------------------------------------------------------
+from samsungtvws import async_connection as _stv_async_connection  # noqa: E402
+from samsungtvws import connection as _stv_connection  # noqa: E402
+from samsungtvws import event as _stv_event  # noqa: E402
+
+_TOLERANT_STARTUP_EVENTS = tuple(
+    dict.fromkeys(
+        (
+            *_stv_event.IGNORE_EVENTS_AT_STARTUP,
+            _stv_event.MS_CHANNEL_CLIENT_CONNECT_EVENT,
+            _stv_event.MS_CHANNEL_CLIENT_DISCONNECT_EVENT,
+        )
+    )
+)
+_stv_event.IGNORE_EVENTS_AT_STARTUP = _TOLERANT_STARTUP_EVENTS
+_stv_connection.IGNORE_EVENTS_AT_STARTUP = _TOLERANT_STARTUP_EVENTS
+_stv_async_connection.IGNORE_EVENTS_AT_STARTUP = _TOLERANT_STARTUP_EVENTS
+
 _RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
 _DMR_URL = "http://{host}:9197/dmr"
 

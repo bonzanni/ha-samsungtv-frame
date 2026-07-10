@@ -108,6 +108,20 @@ async def test_set_artmode_retries_once_on_stale_connection(hass, device):
     art.close.assert_called_once()
 
 
+async def test_handshake_ignores_client_broadcasts(hass):
+    """The shim must make every samsungtvws handshake skip clientConnect /
+    clientDisconnect broadcasts instead of dying on them (production
+    livelock: any client joining/leaving during our handshake killed it)."""
+    from samsungtvws import async_connection, connection, event
+
+    for module in (event, connection, async_connection):
+        assert event.MS_CHANNEL_CLIENT_CONNECT_EVENT in module.IGNORE_EVENTS_AT_STARTUP
+        assert (
+            event.MS_CHANNEL_CLIENT_DISCONNECT_EVENT
+            in module.IGNORE_EVENTS_AT_STARTUP
+        )
+
+
 async def test_listener_connects_bounded_then_unbounded(hass, device):
     from custom_components.samsungtv_frame.const import LISTENER_CONNECT_TIMEOUT
 
