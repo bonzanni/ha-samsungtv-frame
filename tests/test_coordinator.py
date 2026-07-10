@@ -354,6 +354,19 @@ async def test_app_fetch_retries_and_replaces_catalog(hass, mock_device):
     assert coord.app_map == {"Netflix": {"name": "Netflix", "appId": "X", "app_type": 2}}
 
 
+async def test_no_background_app_fetch_before_remote_confirmed(hass, mock_device):
+    """A remote connect can pop an authorization prompt on the TV; background
+    fetches must never be the trigger — only user-initiated remote use."""
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.remote_confirmed = False
+    coord = _make(hass, mock_device)
+    for _ in range(6):
+        await coord._async_update_data()
+    await hass.async_block_till_done()
+    mock_device.async_app_list.assert_not_awaited()
+
+
 async def test_catalog_kept_after_exhaustion_and_power_cycle(hass, mock_device):
     """TVs that never answer the installed-apps request keep the built-in
     catalog through attempt exhaustion and power cycles — sources always work."""

@@ -210,8 +210,13 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         # Real app-list fetch: retry on every APP_FETCH_POLL_SPACING-th poll
         # so the attempts span minutes — a cold-booting TV ignores the request
         # for the first ~30 s, which would burn back-to-back attempts.
+        # Gated on remote_confirmed: opening the remote channel can pop an
+        # authorization prompt on the TV (a power cycle can wipe the grant),
+        # and only user-initiated actions should ever do that — never a
+        # background fetch. The catalog serves sources until then.
         if (
             mode in (TvMode.WATCHING, TvMode.ART_MODE)
+            and self.device.remote_confirmed
             and self._app_map_is_fallback
             and self._app_fetch_attempts < APP_FETCH_MAX_ATTEMPTS
         ):

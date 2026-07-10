@@ -127,6 +127,11 @@ class FrameDevice:
         # _maybe_drop_rejected_remote_token); stays tokenless until a real
         # remote token is granted and captured.
         self._remote_tokenless = False
+        # True after any successful remote-channel operation this run. The
+        # background app-list fetch is gated on it: a remote connect can make
+        # the TV pop an authorization prompt (e.g. after a power cycle wiped
+        # the grant), and only user-initiated actions should ever do that.
+        self.remote_confirmed = False
         # Dedicated second instance for start_listening — samsungtvws raises
         # ConnectionFailure if start_listening is called on a connection that
         # is already open (e.g. after get_artmode opened it during first refresh).
@@ -474,11 +479,13 @@ class FrameDevice:
     async def async_app_list(self) -> list[dict[str, Any]] | None:
         """Installed apps, or None (not supported on all TVs / TV not ready)."""
         try:
-            return await self._remote.app_list()
+            apps = await self._remote.app_list()
         except Exception as err:  # noqa: BLE001
             LOGGER.debug("app_list failed: %s", err)
             self._maybe_drop_rejected_remote_token(err)
             return None
+        self.remote_confirmed = True
+        return apps
 
     def _maybe_drop_rejected_remote_token(self, err: Exception) -> None:
         """Fall back to a tokenless remote client when the token is rejected.
@@ -521,6 +528,7 @@ class FrameDevice:
             except Exception:  # noqa: BLE001
                 pass
             await self._remote.send_commands(commands)
+        self.remote_confirmed = True
 
     def _new_listener(self) -> SamsungTVArt:
         return SamsungTVArt(
