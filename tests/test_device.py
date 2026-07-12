@@ -296,6 +296,49 @@ async def test_get_current_art_returns_content_id(hass, device):
     assert await device.async_get_current_art() == "MY_F0034"
 
 
+@pytest.mark.parametrize(
+    ("getter", "legacy_request", "value"),
+    [
+        ("async_get_art_brightness", "get_brightness", 5),
+        ("async_get_color_temperature", "get_color_temperature", 2),
+    ],
+)
+async def test_numeric_art_getter_malformed_settings_falls_back_without_reset(
+    device, getter, legacy_request, value
+):
+    device._art.request = AsyncMock(
+        side_effect=[{"data": "not-json"}, {"value": value}]
+    )
+    device._art.close = AsyncMock()
+
+    assert await getattr(device, getter)() == value
+    assert device._art.request.await_args_list == [
+        (("get_artmode_settings",), {}),
+        ((legacy_request,), {}),
+    ]
+    device._art.close.assert_not_awaited()
+
+
+async def test_thumbnail_d2d_failure_does_not_reset_or_retry(device, caplog):
+    device._art.request = AsyncMock(
+        return_value={
+            "conn_info": {
+                "ip": "10.0.0.8",
+                "port": 4321,
+                "secured": False,
+            }
+        }
+    )
+    device._art._open_d2d = AsyncMock(side_effect=OSError("D2D unavailable"))
+    device._art.close = AsyncMock()
+
+    assert await device.async_get_art_thumbnail("MY_F0001") is None
+    device._art.request.assert_awaited_once()
+    device._art._open_d2d.assert_awaited_once()
+    device._art.close.assert_not_awaited()
+    assert "thumbnail fetch failed for MY_F0001" in caplog.text
+
+
 async def test_all_art_operations_stay_off_executor(hass, device):
     device._art.get_artmode = AsyncMock(return_value="off")
     device._art.set_artmode = AsyncMock()

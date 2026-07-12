@@ -232,7 +232,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
         try:
             payload = await self.get_artmode_settings("brightness")
             return payload.get("value")
-        except ResponseError:
+        except (ResponseError, json.JSONDecodeError):
             return await self._get_value("get_brightness")
 
     async def set_brightness(self, value: Any) -> dict[str, Any]:
@@ -244,7 +244,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
         try:
             payload = await self.get_artmode_settings("color_temperature")
             return payload.get("value")
-        except ResponseError:
+        except (ResponseError, json.JSONDecodeError):
             return await self._get_value("get_color_temperature")
 
     async def set_color_temperature(self, value: Any) -> dict[str, Any]:

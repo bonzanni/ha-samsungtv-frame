@@ -265,9 +265,7 @@ class FrameDevice:
         Store artworks (SAM-*) are DRM-refused by the TV and yield None.
         """
         try:
-            return await self._async_art_command(
-                lambda: self._art.get_thumbnail(content_id)
-            )
+            return await self._art.get_thumbnail(content_id)
         except Exception as err:  # noqa: BLE001
             LOGGER.debug("thumbnail fetch failed for %s: %s", content_id, err)
             return None
