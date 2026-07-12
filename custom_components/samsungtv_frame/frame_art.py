@@ -102,7 +102,8 @@ class FrameArt(SamsungTVWSAsyncConnection):
 
             websocket = None
             try:
-                async with asyncio.timeout(ART_CONNECT_DEADLINE):
+                deadline = self.timeout or ART_CONNECT_DEADLINE
+                async with asyncio.timeout(deadline):
                     kwargs = (
                         {"ssl": self._ssl_context}
                         if self._is_ssl_connection()
@@ -110,7 +111,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
                     )
                     websocket = await connect(
                         self._format_websocket_url(self.endpoint),
-                        open_timeout=ART_CONNECT_DEADLINE,
+                        open_timeout=deadline,
                         **kwargs,
                     )
                     await self._wait_for_handshake(websocket)
@@ -645,9 +646,12 @@ class FrameArt(SamsungTVWSAsyncConnection):
 
         callback = self._event_callback
         if callback is not None:
-            awaitable = callback(event, payload)
-            if awaitable is not None:
-                await awaitable
+            try:
+                awaitable = callback(event, payload)
+                if awaitable is not None:
+                    await awaitable
+            except Exception as err:
+                LOGGER.warning("Art event callback failed: %s", err)
 
     async def _receiver_finished(self, connection: ClientConnection | None) -> None:
         """Clean up only the connection captured by this receiver."""

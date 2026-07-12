@@ -45,6 +45,10 @@ Settings → Devices & Services → Samsung Frame TV → Configure: polling hear
 default 10). Push events (art mode changes) arrive instantly regardless of the heartbeat.
 The IP address can be changed later via the entry's Reconfigure menu.
 
+## Reliability
+Art commands, push events, thumbnails, uploads, pairing, and shutdown use cancellable
+async I/O. No configuration migration is required when upgrading to 0.6.7.
+
 ## Setup
 Settings → Devices & Services → Add Integration → "Samsung Frame TV" → enter the IP.
 **Accept the "Allow" prompt on the TV once** (do it while the TV is showing normal content, not

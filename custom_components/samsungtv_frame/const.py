@@ -65,19 +65,12 @@ OFF_DEBOUNCE_COUNT = 2
 ART_FAIL_UNKNOWN_COUNT = 6
 # Consecutive failed UPnP volume reads (TV on) before warning once.
 UPNP_FAIL_WARN_COUNT = 6
-# Hard upper bound on any single sync art-client call: the library's wait
-# loop restarts its socket timeout on every incoming frame and can otherwise
-# spin forever against a chatty-but-unresponsive (booting) TV.
-ART_CALL_DEADLINE = 20
-# Async art transport deadlines.
+# Art transport deadlines.
 ART_CONNECT_DEADLINE = 10
 ART_REQUEST_DEADLINE = 20
 ART_D2D_DEADLINE = 20
 ART_CLOSE_DEADLINE = 5
 PAIRING_DEADLINE = 30
-# Retained until the sync listener facade is removed in a later task.
-LISTENER_CONNECT_TIMEOUT = 10
-LISTENER_START_DEADLINE = 30
 # One wedged call must never kill the coordinator: whole-poll deadline.
 POLL_DEADLINE = 45
 # App-list fetch attempts per power-on before giving up (with one warning),

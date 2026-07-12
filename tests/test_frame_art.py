@@ -15,7 +15,7 @@ from custom_components.samsungtv_frame.frame_art import FrameArt
 class FakeWebSocket:
     """Controllable websocket for transport tests."""
 
-    def __init__(self, frames, *, on_send=None):
+    def __init__(self, frames, *, on_send=None, recv_delay=0):
         self.frames = asyncio.Queue()
         for frame in frames:
             self.frames.put_nowait(json.dumps(frame))
@@ -23,8 +23,11 @@ class FakeWebSocket:
         self.closed = False
         self.state = State.OPEN
         self.on_send = on_send
+        self.recv_delay = recv_delay
 
     async def recv(self):
+        if self.recv_delay:
+            await asyncio.sleep(self.recv_delay)
         frame = await self.frames.get()
         if isinstance(frame, BaseException):
             raise frame
@@ -120,7 +123,7 @@ def task_factory(coroutine, name):
     return asyncio.create_task(coroutine, name=name)
 
 
-def make_art(*, callback=None):
+def make_art(*, callback=None, **kwargs):
     """Create a transport under test."""
     return FrameArt(
         "1.2.3.4",
@@ -128,6 +131,7 @@ def make_art(*, callback=None):
         ssl_context=MagicMock(),
         task_factory=task_factory,
         event_callback=callback,
+        **kwargs,
     )
 
 
@@ -907,6 +911,40 @@ async def test_open_ignores_broadcasts_captures_token_and_waits_for_ready():
     assert not ws.closed
 
 
+async def test_open_uses_instance_timeout_for_connect():
+    ws = FakeWebSocket(handshake_frames())
+    art = make_art(timeout=0.123)
+    connect_mock = AsyncMock(return_value=ws)
+    try:
+        with patch(
+            "custom_components.samsungtv_frame.frame_art.connect", connect_mock
+        ):
+            assert await art.open() is ws
+
+        assert connect_mock.await_args.kwargs["open_timeout"] == 0.123
+    finally:
+        await art.close()
+
+
+async def test_open_uses_instance_timeout_for_handshake():
+    ws = FakeWebSocket(handshake_frames(), recv_delay=0.02)
+    art = make_art(timeout=0.01)
+    try:
+        with (
+            patch(
+                "custom_components.samsungtv_frame.frame_art.connect",
+                AsyncMock(return_value=ws),
+            ),
+            pytest.raises(TimeoutError),
+        ):
+            await art.open()
+    finally:
+        await art.close()
+
+    assert ws.closed
+    assert art.connection is None
+
+
 @pytest.mark.parametrize("event", ["ms.channel.unauthorized", "unexpected"])
 async def test_open_closes_local_socket_on_failed_handshake(event):
     ws = FakeWebSocket([{"event": event}])
@@ -923,13 +961,12 @@ async def test_open_closes_local_socket_on_failed_handshake(event):
 
 async def test_open_deadline_bounds_endless_broadcast_stream():
     ws = FakeWebSocket([{"event": "ms.channel.clientConnect"}] * 20)
-    art = make_art()
+    art = make_art(timeout=0.01)
     with (
         patch(
             "custom_components.samsungtv_frame.frame_art.connect",
             AsyncMock(return_value=ws),
         ),
-        patch("custom_components.samsungtv_frame.frame_art.ART_CONNECT_DEADLINE", 0.01),
         pytest.raises(TimeoutError),
     ):
         await art.open()
@@ -1180,6 +1217,57 @@ async def test_push_and_request_response_coexist():
         )
         assert (await request_task)["value"] == "on"
         await art.close()
+
+
+@pytest.mark.parametrize("callback_kind", ["sync", "async"])
+async def test_callback_exception_does_not_interrupt_pending_request(
+    callback_kind, caplog
+):
+    if callback_kind == "sync":
+
+        def callback(_event, _payload):
+            raise RuntimeError("callback failed")
+
+    else:
+
+        async def callback(_event, _payload):
+            raise RuntimeError("callback failed")
+
+    ws = FakeWebSocket(handshake_frames())
+    art = make_art(callback=callback)
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.connect",
+        AsyncMock(return_value=ws),
+    ):
+        request_task = asyncio.create_task(art.request("get_artmode_status"))
+        try:
+            await wait_for_sent(ws, 1)
+            inner = sent_art_request(ws, 0)
+            await ws.frames.put(
+                art_response(event="art_mode_changed", value="on")
+            )
+            await ws.frames.put(
+                art_response(
+                    request_id=inner["request_id"],
+                    value="on",
+                )
+            )
+
+            assert (await request_task)["value"] == "on"
+            assert art.is_alive()
+            assert "Art event callback failed" in caplog.text
+        finally:
+            await art.close()
+
+
+async def test_dispatch_propagates_callback_cancellation():
+    async def callback(_event, _payload):
+        raise asyncio.CancelledError
+
+    art = make_art(callback=callback)
+    frame = art_response(event="art_mode_changed", value="on")
+    with pytest.raises(asyncio.CancelledError):
+        await art._dispatch_frame("d2d_service_message", json.loads(frame))
 
 
 async def test_receiver_disconnect_fails_pending_request():
