@@ -15,13 +15,14 @@ from custom_components.samsungtv_frame.frame_art import FrameArt
 class FakeWebSocket:
     """Controllable websocket for transport tests."""
 
-    def __init__(self, frames):
+    def __init__(self, frames, *, on_send=None):
         self.frames = asyncio.Queue()
         for frame in frames:
             self.frames.put_nowait(json.dumps(frame))
         self.sent = []
         self.closed = False
         self.state = State.OPEN
+        self.on_send = on_send
 
     async def recv(self):
         frame = await self.frames.get()
@@ -31,10 +32,74 @@ class FakeWebSocket:
 
     async def send(self, payload):
         self.sent.append(payload)
+        if self.on_send is not None:
+            self.on_send(payload)
 
     async def close(self):
         self.closed = True
         self.state = State.CLOSED
+
+
+class FakeWriter:
+    """Record stream writes and expose complete close semantics."""
+
+    def __init__(self, *, on_write=None, drain_error=None):
+        self.data = bytearray()
+        self.closed = False
+        self.waited_closed = False
+        self.on_write = on_write
+        self.drain_error = drain_error
+
+    def write(self, data):
+        self.data.extend(data)
+        if self.on_write is not None:
+            self.on_write(data)
+
+    async def drain(self):
+        if self.drain_error is not None:
+            raise self.drain_error
+
+    def close(self):
+        self.closed = True
+
+    async def wait_closed(self):
+        self.waited_closed = True
+
+
+class BlockingWriter(FakeWriter):
+    """A complete writer whose drain can be cancelled while blocked."""
+
+    def __init__(self):
+        super().__init__()
+        self.drain_started = asyncio.Event()
+        self.drain_release = asyncio.Event()
+
+    async def drain(self):
+        self.drain_started.set()
+        await self.drain_release.wait()
+
+
+def d2d_file(name="thumb", body=b"jpeg", num=0, total=1):
+    """Build one complete file frame from the TV's D2D stream."""
+    header = json.dumps(
+        {
+            "fileLength": len(body),
+            "fileID": name,
+            "fileType": "jpg",
+            "num": num,
+            "total": total,
+        }
+    ).encode()
+    return len(header).to_bytes(4, "big") + header + body
+
+
+def stream_reader(data=b"", *, eof=True):
+    """Return a StreamReader fed with real stream-shaped bytes."""
+    reader = asyncio.StreamReader()
+    reader.feed_data(data)
+    if eof:
+        reader.feed_eof()
+    return reader
 
 
 def task_factory(coroutine, name):
@@ -278,6 +343,405 @@ async def test_slideshow_does_not_mask_transport_errors():
     art.request.assert_awaited_once()
 
 
+async def test_thumbnail_downloads_d2d_file_with_secured_stream():
+    art = make_art()
+    reader = stream_reader(d2d_file(name="MY_F0001", body=b"jpeg-bytes"))
+    writer = FakeWriter()
+    art.request = AsyncMock(
+        return_value={
+            "conn_info": json.dumps(
+                {
+                    "ip": "10.0.0.8",
+                    "port": "4321",
+                    "secured": True,
+                }
+            )
+        }
+    )
+    open_connection = AsyncMock(return_value=(reader, writer))
+
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+        open_connection,
+    ):
+        assert await art.get_thumbnail("MY_F0001") == b"jpeg-bytes"
+
+    request = art.request.await_args
+    assert request.args == ("get_thumbnail_list",)
+    assert request.kwargs["content_id_list"] == [{"content_id": "MY_F0001"}]
+    conn_info = request.kwargs["conn_info"]
+    assert conn_info["d2d_mode"] == "socket"
+    assert conn_info["id"] == request.kwargs["request_id"]
+    assert isinstance(conn_info["connection_id"], int)
+    open_connection.assert_awaited_once_with(
+        "10.0.0.8", 4321, ssl=art._ssl_context
+    )
+    assert writer.closed
+    assert writer.waited_closed
+
+
+async def test_thumbnail_drm_response_returns_none_without_opening_stream():
+    art = make_art()
+    art.request = AsyncMock(side_effect=ResponseError("DRM refused"))
+    open_connection = AsyncMock()
+
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+        open_connection,
+    ):
+        assert await art.get_thumbnail("SAM-F0001") is None
+
+    open_connection.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [
+        b"\x00\x00\x00\x08short",
+        d2d_file(body=b"jpeg")[:-1],
+    ],
+    ids=["truncated-header", "truncated-body"],
+)
+async def test_thumbnail_truncated_stream_propagates_and_closes_writer(stream):
+    art = make_art()
+    writer = FakeWriter()
+    art.request = AsyncMock(
+        return_value={"conn_info": {"ip": "10.0.0.8", "port": 4321}}
+    )
+
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            AsyncMock(return_value=(stream_reader(stream), writer)),
+        ),
+        pytest.raises(asyncio.IncompleteReadError),
+    ):
+        await art.get_thumbnail("MY_F0001")
+
+    assert writer.closed
+    assert writer.waited_closed
+
+
+async def test_thumbnail_read_timeout_propagates_and_closes_writer():
+    art = make_art()
+    writer = FakeWriter()
+    art.request = AsyncMock(
+        return_value={"conn_info": {"ip": "10.0.0.8", "port": 4321}}
+    )
+
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            AsyncMock(return_value=(stream_reader(eof=False), writer)),
+        ),
+        patch("custom_components.samsungtv_frame.frame_art.ART_D2D_DEADLINE", 0.01),
+        pytest.raises(TimeoutError),
+    ):
+        await art.get_thumbnail("MY_F0001")
+
+    assert writer.closed
+    assert writer.waited_closed
+
+
+async def test_thumbnail_cancellation_propagates_and_closes_writer():
+    art = make_art()
+    writer = FakeWriter()
+    art.request = AsyncMock(
+        return_value={"conn_info": {"ip": "10.0.0.8", "port": 4321}}
+    )
+
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+        AsyncMock(return_value=(stream_reader(eof=False), writer)),
+    ):
+        thumbnail = asyncio.create_task(art.get_thumbnail("MY_F0001"))
+        await asyncio.sleep(0)
+        thumbnail.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await thumbnail
+
+    assert writer.closed
+    assert writer.waited_closed
+
+
+async def test_upload_d2d_correlates_ready_and_pre_registers_completion():
+    image = b"jpeg-image"
+    completion_sent = False
+    art = make_art()
+    ws = FakeWebSocket(handshake_frames())
+
+    def on_write(_data):
+        nonlocal completion_sent
+        pending = art._uuidless_pending
+        assert pending is not None
+        assert pending.expected_sub_event == "image_added"
+        if not completion_sent:
+            completion_sent = True
+            ws.frames.put_nowait(
+                art_response(event="image_added", content_id="MY_F0099")
+            )
+
+    writer = FakeWriter(on_write=on_write)
+    open_connection = AsyncMock(
+        return_value=(stream_reader(), writer)
+    )
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            AsyncMock(return_value=ws),
+        ),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            open_connection,
+        ),
+    ):
+        upload = asyncio.create_task(art.upload(image, "jpeg", "none"))
+        await wait_for_sent(ws, 1)
+        version_request = sent_art_request(ws, 0)
+        await ws.frames.put(
+            art_response(
+                request_id=version_request["request_id"], version="4.3"
+            )
+        )
+
+        await wait_for_sent(ws, 2)
+        send_image = sent_art_request(ws, 1)
+        upload_id = send_image["request_id"]
+        assert send_image["id"] == upload_id
+        assert send_image["request"] == "send_image"
+        assert send_image["file_type"] == "jpg"
+        assert send_image["file_size"] == len(image)
+        assert send_image["matte_id"] == "none"
+        assert send_image["portrait_matte_id"] == "none"
+        assert send_image["conn_info"]["id"] == upload_id
+
+        await ws.frames.put(
+            art_response(
+                event="ready_to_use",
+                request_id="different-upload",
+                conn_info={"ip": "wrong", "port": 1, "key": "wrong"},
+            )
+        )
+        await asyncio.sleep(0)
+        open_connection.assert_not_awaited()
+
+        await ws.frames.put(
+            art_response(
+                event="ready_to_use",
+                request_id=upload_id,
+                conn_info=json.dumps(
+                    {"ip": "10.0.0.8", "port": "4321", "key": "secret"}
+                ),
+            )
+        )
+        assert await upload == "MY_F0099"
+
+    open_connection.assert_awaited_once_with("10.0.0.8", 4321)
+    header_len = int.from_bytes(writer.data[:4], "big")
+    header = json.loads(bytes(writer.data[4 : 4 + header_len]))
+    assert header == {
+        "num": 0,
+        "total": 1,
+        "fileLength": len(image),
+        "fileName": "image",
+        "fileType": "jpg",
+        "secKey": "secret",
+        "version": "0.0.1",
+    }
+    assert bytes(writer.data[4 + header_len :]) == image
+    assert writer.closed
+    assert writer.waited_closed
+    assert art._uuidless_pending is None
+    await art.close()
+
+
+async def test_upload_d2d_does_not_retry_failed_drain_and_closes_writer():
+    art = make_art()
+    art.connection = FakeWebSocket([])
+    writer = FakeWriter(drain_error=OSError("partial upload"))
+    request = AsyncMock(
+        side_effect=[
+            {"version": "4.3"},
+            {
+                "event": "ready_to_use",
+                "conn_info": {
+                    "ip": "10.0.0.8",
+                    "port": 4321,
+                    "key": "secret",
+                },
+            },
+        ]
+    )
+    open_connection = AsyncMock(
+        return_value=(stream_reader(), writer)
+    )
+
+    with (
+        patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "_request_unlocked", request),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            open_connection,
+        ),
+        pytest.raises(OSError, match="partial upload"),
+    ):
+        await art.upload(b"image", "jpg", "none")
+
+    assert request.await_count == 2
+    open_connection.assert_awaited_once()
+    assert writer.closed
+    assert writer.waited_closed
+    assert art._uuidless_pending is None
+
+
+async def test_upload_cancellation_cleans_completion_and_writer():
+    art = make_art()
+    art.connection = FakeWebSocket([])
+    writer = BlockingWriter()
+    request = AsyncMock(
+        side_effect=[
+            {"version": "4.3"},
+            {
+                "event": "ready_to_use",
+                "conn_info": {
+                    "ip": "10.0.0.8",
+                    "port": 4321,
+                    "key": "secret",
+                },
+            },
+        ]
+    )
+
+    with (
+        patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "_request_unlocked", request),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            AsyncMock(return_value=(stream_reader(), writer)),
+        ),
+    ):
+        upload = asyncio.create_task(art.upload(b"image", "jpg", "none"))
+        await writer.drain_started.wait()
+        assert art._uuidless_pending is not None
+        upload.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await upload
+
+    assert writer.closed
+    assert writer.waited_closed
+    assert art._uuidless_pending is None
+
+
+async def test_upload_completion_timeout_closes_websocket_and_cleans_pending():
+    art = make_art()
+    ws = FakeWebSocket([])
+    art.connection = ws
+    writer = FakeWriter()
+    request = AsyncMock(
+        side_effect=[
+            {"version": "4.3"},
+            {
+                "event": "ready_to_use",
+                "conn_info": {
+                    "ip": "10.0.0.8",
+                    "port": 4321,
+                    "key": "secret",
+                },
+            },
+        ]
+    )
+
+    with (
+        patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "_request_unlocked", request),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            AsyncMock(return_value=(stream_reader(), writer)),
+        ),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.ART_REQUEST_DEADLINE",
+            0.01,
+        ),
+        pytest.raises(TimeoutError),
+    ):
+        await art.upload(b"image", "jpg", "none")
+
+    assert ws.closed
+    assert art.connection is None
+    assert writer.closed
+    assert writer.waited_closed
+    assert art._uuidless_pending is None
+
+
+async def test_upload_api_097_sends_exact_binary_frame_and_correlates_result():
+    image = b"jpeg-image"
+    art = make_art()
+    binary_payload = None
+    ws = None
+
+    def on_send(payload):
+        nonlocal binary_payload
+        if not isinstance(payload, bytes):
+            return
+        binary_payload = payload
+        header_len = int.from_bytes(payload[:2], "big")
+        outer = json.loads(payload[2 : 2 + header_len])
+        inner = json.loads(outer["params"]["data"])
+        upload_id = inner["id"]
+        pending = art._pending.get(upload_id)
+        assert pending is not None
+        assert pending.expected_sub_event == "image_added"
+        assert ws is not None
+        ws.frames.put_nowait(
+            art_response(
+                event="image_added",
+                request_id=upload_id,
+                content_id="MY_F0100",
+            )
+        )
+
+    ws = FakeWebSocket(handshake_frames(), on_send=on_send)
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.connect",
+        AsyncMock(return_value=ws),
+    ):
+        upload = asyncio.create_task(art.upload(image, "jpg", "none"))
+        await wait_for_sent(ws, 1)
+        version_request = sent_art_request(ws, 0)
+        await ws.frames.put(
+            art_response(
+                request_id=version_request["request_id"], version="0.97"
+            )
+        )
+        assert await upload == "MY_F0100"
+
+    assert binary_payload is not None
+    header_len = int.from_bytes(binary_payload[:2], "big")
+    header = binary_payload[2 : 2 + header_len]
+    outer = json.loads(header)
+    inner = json.loads(outer["params"]["data"])
+    expected_inner = {
+        "request": "send_image",
+        "file_type": "JPEG",
+        "matte_id": "none",
+        "id": inner["id"],
+    }
+    expected_outer = {
+        "method": "ms.channel.emit",
+        "params": {
+            "data": json.dumps(expected_inner),
+            "to": "host",
+            "event": "art_app_request",
+        },
+    }
+    assert header == json.dumps(
+        expected_outer, separators=(",", ":")
+    ).encode()
+    assert binary_payload[2 + header_len :] == image
+    assert not art._pending
+    await art.close()
+
+
 async def test_open_ignores_broadcasts_captures_token_and_waits_for_ready():
     ws = FakeWebSocket(
         [
@@ -404,6 +868,27 @@ async def test_receiver_decodes_push_payload_for_callback():
 def handshake_frames():
     """Return a successful Art websocket handshake."""
     return [{"event": "ms.channel.connect"}, {"event": "ms.channel.ready"}]
+
+
+async def wait_for_sent(ws, count):
+    """Wait until the fake websocket records the expected send count."""
+    for _ in range(20):
+        if len(ws.sent) >= count:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"expected {count} websocket sends, got {len(ws.sent)}")
+
+
+def sent_art_request(ws, index):
+    """Decode one JSON Art request recorded by the websocket."""
+    return json.loads(json.loads(ws.sent[index])["params"]["data"])
+
+
+def art_response(**payload):
+    """Build a complete D2D websocket response frame."""
+    return json.dumps(
+        {"event": "d2d_service_message", "data": json.dumps(payload)}
+    )
 
 
 async def test_request_correlates_response_by_uuid():

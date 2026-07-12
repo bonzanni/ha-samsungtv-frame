@@ -5,6 +5,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Coroutine
 import contextlib
 from dataclasses import dataclass
+from datetime import datetime
 import json
 from typing import Any
 import uuid
@@ -32,6 +33,7 @@ from websockets.protocol import State
 from .const import (
     ART_CLOSE_DEADLINE,
     ART_CONNECT_DEADLINE,
+    ART_D2D_DEADLINE,
     ART_REQUEST_DEADLINE,
     CLIENT_NAME,
     DOMAIN,
@@ -327,6 +329,205 @@ class FrameArt(SamsungTVWSAsyncConnection):
             return await self.request("set_auto_rotation_status", **params)
         except ResponseError:
             return await self.request("set_slideshow_status", **params)
+
+    async def _open_d2d(
+        self, conn_info: dict[str, Any]
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Open a deadline-bounded D2D stream, optionally secured."""
+        kwargs = {}
+        if conn_info.get("secured"):
+            kwargs["ssl"] = self._ssl_context
+        async with asyncio.timeout(ART_D2D_DEADLINE):
+            return await asyncio.open_connection(
+                conn_info["ip"], int(conn_info["port"]), **kwargs
+            )
+
+    async def _read_d2d_file(
+        self, reader: asyncio.StreamReader
+    ) -> tuple[dict[str, Any], bytes]:
+        """Read one complete deadline-bounded D2D file frame."""
+        async with asyncio.timeout(ART_D2D_DEADLINE):
+            header_size = int.from_bytes(await reader.readexactly(4), "big")
+            header = json.loads(await reader.readexactly(header_size))
+            body = await reader.readexactly(int(header["fileLength"]))
+        return header, body
+
+    async def get_thumbnail(self, content_id: str) -> bytes | None:
+        """Download one thumbnail over a short-lived D2D stream."""
+        d2d_id = str(uuid.uuid4())
+        try:
+            payload = await self.request(
+                "get_thumbnail_list",
+                request_id=d2d_id,
+                content_id_list=[{"content_id": content_id}],
+                conn_info={
+                    "d2d_mode": "socket",
+                    "connection_id": helper.generate_connection_id(),
+                    "id": d2d_id,
+                },
+            )
+        except ResponseError:
+            return None
+
+        conn_info = payload.get("conn_info", {})
+        if isinstance(conn_info, str):
+            conn_info = json.loads(conn_info)
+        reader, writer = await self._open_d2d(conn_info)
+        try:
+            result = None
+            total = 1
+            current = -1
+            while current + 1 < total:
+                header, result = await self._read_d2d_file(reader)
+                current = int(header["num"])
+                total = int(header["total"])
+            return result
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def upload(self, data: bytes, file_type: str, matte: str) -> str:
+        """Upload image bytes as one serialized, non-retried transaction."""
+        async with self._operation_lock:
+            await self.start_listening()
+            try:
+                try:
+                    version = await self._request_unlocked(
+                        "api_version",
+                        expected_sub_event=None,
+                        request_id=None,
+                    )
+                except ResponseError:
+                    version = None
+                if (
+                    isinstance(version, dict)
+                    and version.get("version") == "0.97"
+                ):
+                    return await self._upload_ws_binary_unlocked(
+                        data, file_type, matte
+                    )
+                return await self._upload_d2d_unlocked(
+                    data, file_type, matte
+                )
+            except TimeoutError:
+                await self.close()
+                raise
+
+    async def _upload_d2d_unlocked(
+        self, data: bytes, file_type: str, matte: str
+    ) -> str:
+        """Upload through the TV's short-lived D2D stream."""
+        upload_id = str(uuid.uuid4())
+        normalized_type = file_type.lower()
+        if normalized_type == "jpeg":
+            normalized_type = "jpg"
+        ready = await self._request_unlocked(
+            "send_image",
+            expected_sub_event="ready_to_use",
+            request_id=upload_id,
+            file_type=normalized_type,
+            file_size=len(data),
+            image_date=datetime.now().strftime("%Y:%m:%d %H:%M:%S"),
+            matte_id=matte or "none",
+            portrait_matte_id=matte or "none",
+            conn_info={
+                "d2d_mode": "socket",
+                "connection_id": helper.generate_connection_id(),
+                "id": upload_id,
+            },
+        )
+
+        completion = _PendingResponse(
+            asyncio.get_running_loop().create_future(), "image_added"
+        )
+        self._uuidless_pending = completion
+        try:
+            conn_info = ready.get("conn_info", {})
+            if isinstance(conn_info, str):
+                conn_info = json.loads(conn_info)
+            header = json.dumps(
+                {
+                    "num": 0,
+                    "total": 1,
+                    "fileLength": len(data),
+                    "fileName": "image",
+                    "fileType": normalized_type,
+                    "secKey": conn_info["key"],
+                    "version": "0.0.1",
+                }
+            ).encode("ascii")
+            reader, writer = await self._open_d2d(conn_info)
+            del reader
+            try:
+                async with asyncio.timeout(ART_D2D_DEADLINE):
+                    writer.write(len(header).to_bytes(4, "big"))
+                    writer.write(header)
+                    writer.write(data)
+                    await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+            async with asyncio.timeout(ART_REQUEST_DEADLINE):
+                response = await completion.future
+            if response.get("event") == "error":
+                raise ResponseError("`send_image` request failed")
+            return str(response["content_id"])
+        finally:
+            if self._uuidless_pending is completion:
+                self._uuidless_pending = None
+            if not completion.future.done():
+                completion.future.cancel()
+
+    async def _upload_ws_binary_unlocked(
+        self, data: bytes, file_type: str, matte: str
+    ) -> str:
+        """Upload through the Art API 0.97 websocket binary format."""
+        upload_id = str(uuid.uuid4())
+        normalized_type = file_type.lower()
+        header_type = (
+            "JPEG"
+            if normalized_type in {"jpg", "jpeg"}
+            else normalized_type.upper()
+        )
+        inner = {
+            "request": "send_image",
+            "file_type": header_type,
+            "matte_id": matte or "none",
+            "id": upload_id,
+        }
+        outer = {
+            "method": "ms.channel.emit",
+            "params": {
+                "data": json.dumps(inner),
+                "to": "host",
+                "event": "art_app_request",
+            },
+        }
+        header = json.dumps(outer, separators=(",", ":")).encode("utf-8")
+        if len(header) > 0xFFFF:
+            raise ValueError("Upload header too large")
+        binary_payload = len(header).to_bytes(2, "big") + header + data
+
+        completion = _PendingResponse(
+            asyncio.get_running_loop().create_future(), "image_added"
+        )
+        self._pending[upload_id] = completion
+        try:
+            connection = self.connection
+            if connection is None:
+                raise ConnectionFailure("Art connection closed")
+            async with asyncio.timeout(ART_REQUEST_DEADLINE):
+                await connection.send(binary_payload)
+                response = await completion.future
+            if response.get("event") == "error":
+                raise ResponseError("`send_image` request failed")
+            return str(response["content_id"])
+        finally:
+            if self._pending.get(upload_id) is completion:
+                self._pending.pop(upload_id)
+            if not completion.future.done():
+                completion.future.cancel()
 
     async def _request_unlocked(
         self,
