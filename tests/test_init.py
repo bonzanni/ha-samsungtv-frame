@@ -34,6 +34,7 @@ async def test_setup_and_unload(hass, mock_device):
         }
 
     ssl_context = object()
+    mock_device.listener_alive = False
     mock_device.set_art_event_callback.side_effect = _capture_callback
     mock_device.async_device_info.side_effect = _device_info
     with (
@@ -71,6 +72,11 @@ async def test_setup_and_unload(hass, mock_device):
             == mock_device.async_restart_art_listener
         )
         mock_device.async_start_art_listener.assert_not_awaited()
+        assert all(
+            task_call.args[2] != "samsungtv_frame-listener-restart"
+            for task_call in create_background_task.call_args_list
+        )
+        mock_device.async_restart_art_listener.assert_not_awaited()
 
         create_background_task.reset_mock()
 

@@ -119,6 +119,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             self._app_fetch_warned = False
         elif (
             reachable
+            and self.data is not None
             and power_state == "on"
             and self.restart_listener is not None
             and not self.device.listener_alive

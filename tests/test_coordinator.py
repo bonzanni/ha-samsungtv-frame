@@ -291,7 +291,7 @@ async def test_push_art_on_during_standby_shutdown_stays_off(hass, mock_device):
     assert pushed.tv_mode is TvMode.OFF
 
 
-async def test_dead_receiver_task_triggers_restart(hass, mock_device):
+async def test_initial_poll_does_not_restart_dead_receiver(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False
     mock_device.listener_alive = False
@@ -299,6 +299,24 @@ async def test_dead_receiver_task_triggers_restart(hass, mock_device):
     coord.restart_listener = AsyncMock()
     await coord._async_update_data()
     await hass.async_block_till_done()
+
+    coord.restart_listener.assert_not_awaited()
+
+
+async def test_dead_receiver_task_triggers_restart_after_initial_poll(
+    hass, mock_device
+):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.listener_alive = True
+    coord = _make(hass, mock_device)
+    coord.restart_listener = AsyncMock()
+    coord.data = await coord._async_update_data()
+
+    mock_device.listener_alive = False
+    await coord._async_update_data()
+    await hass.async_block_till_done()
+
     coord.restart_listener.assert_awaited_once()
 
 
