@@ -352,6 +352,14 @@ class FrameArt(SamsungTVWSAsyncConnection):
             body = await reader.readexactly(int(header["fileLength"]))
         return header, body
 
+    async def _close_d2d_writer(self, writer: asyncio.StreamWriter) -> None:
+        """Close a D2D writer without allowing cleanup to mask transfer errors."""
+        with contextlib.suppress(Exception):
+            writer.close()
+        with contextlib.suppress(Exception, TimeoutError):
+            async with asyncio.timeout(ART_CLOSE_DEADLINE):
+                await writer.wait_closed()
+
     async def get_thumbnail(self, content_id: str) -> bytes | None:
         """Download one thumbnail over a short-lived D2D stream."""
         d2d_id = str(uuid.uuid4())
@@ -383,8 +391,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
                 total = int(header["total"])
             return result
         finally:
-            writer.close()
-            await writer.wait_closed()
+            await self._close_d2d_writer(writer)
 
     async def upload(self, data: bytes, file_type: str, matte: str) -> str:
         """Upload image bytes as one serialized, non-retried transaction."""
@@ -465,8 +472,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
                     writer.write(data)
                     await writer.drain()
             finally:
-                writer.close()
-                await writer.wait_closed()
+                await self._close_d2d_writer(writer)
 
             async with asyncio.timeout(ART_REQUEST_DEADLINE):
                 response = await completion.future

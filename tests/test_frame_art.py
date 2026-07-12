@@ -43,12 +43,21 @@ class FakeWebSocket:
 class FakeWriter:
     """Record stream writes and expose complete close semantics."""
 
-    def __init__(self, *, on_write=None, drain_error=None):
+    def __init__(
+        self,
+        *,
+        on_write=None,
+        drain_error=None,
+        wait_closed_delay=None,
+        wait_closed_error=None,
+    ):
         self.data = bytearray()
         self.closed = False
         self.waited_closed = False
         self.on_write = on_write
         self.drain_error = drain_error
+        self.wait_closed_delay = wait_closed_delay
+        self.wait_closed_error = wait_closed_error
 
     def write(self, data):
         self.data.extend(data)
@@ -64,13 +73,17 @@ class FakeWriter:
 
     async def wait_closed(self):
         self.waited_closed = True
+        if self.wait_closed_delay is not None:
+            await asyncio.sleep(self.wait_closed_delay)
+        if self.wait_closed_error is not None:
+            raise self.wait_closed_error
 
 
 class BlockingWriter(FakeWriter):
     """A complete writer whose drain can be cancelled while blocked."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self.drain_started = asyncio.Event()
         self.drain_release = asyncio.Event()
 
@@ -464,6 +477,57 @@ async def test_thumbnail_cancellation_propagates_and_closes_writer():
     assert writer.waited_closed
 
 
+async def test_thumbnail_writer_close_deadline_bounds_blocking_wait():
+    art = make_art()
+    writer = FakeWriter(wait_closed_delay=0.1)
+    art.request = AsyncMock(
+        return_value={"conn_info": {"ip": "10.0.0.8", "port": 4321}}
+    )
+    loop = asyncio.get_running_loop()
+
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            AsyncMock(
+                return_value=(stream_reader(d2d_file(body=b"jpeg")), writer)
+            ),
+        ),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+            0.005,
+        ),
+    ):
+        started = loop.time()
+        assert await art.get_thumbnail("MY_F0001") == b"jpeg"
+        elapsed = loop.time() - started
+
+    assert elapsed < 0.05
+    assert writer.closed
+    assert writer.waited_closed
+
+
+async def test_thumbnail_writer_close_failure_preserves_read_error():
+    art = make_art()
+    writer = FakeWriter(wait_closed_error=OSError("close failed"))
+    art.request = AsyncMock(
+        return_value={"conn_info": {"ip": "10.0.0.8", "port": 4321}}
+    )
+
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            AsyncMock(
+                return_value=(stream_reader(d2d_file(body=b"jpeg")[:-1]), writer)
+            ),
+        ),
+        pytest.raises(asyncio.IncompleteReadError),
+    ):
+        await art.get_thumbnail("MY_F0001")
+
+    assert writer.closed
+    assert writer.waited_closed
+
+
 async def test_upload_d2d_correlates_ready_and_pre_registers_completion():
     image = b"jpeg-image"
     completion_sent = False
@@ -627,6 +691,88 @@ async def test_upload_cancellation_cleans_completion_and_writer():
         with pytest.raises(asyncio.CancelledError):
             await upload
 
+    assert writer.closed
+    assert writer.waited_closed
+    assert art._uuidless_pending is None
+
+
+async def test_upload_writer_close_failure_preserves_drain_error():
+    art = make_art()
+    art.connection = FakeWebSocket([])
+    writer = FakeWriter(
+        drain_error=OSError("drain failed"),
+        wait_closed_error=RuntimeError("close failed"),
+    )
+    request = AsyncMock(
+        side_effect=[
+            {"version": "4.3"},
+            {
+                "event": "ready_to_use",
+                "conn_info": {
+                    "ip": "10.0.0.8",
+                    "port": 4321,
+                    "key": "secret",
+                },
+            },
+        ]
+    )
+
+    with (
+        patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "_request_unlocked", request),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            AsyncMock(return_value=(stream_reader(), writer)),
+        ),
+        pytest.raises(OSError, match="drain failed"),
+    ):
+        await art.upload(b"image", "jpg", "none")
+
+    assert writer.closed
+    assert writer.waited_closed
+    assert art._uuidless_pending is None
+
+
+async def test_upload_writer_close_deadline_preserves_cancellation():
+    art = make_art()
+    art.connection = FakeWebSocket([])
+    writer = BlockingWriter(wait_closed_delay=0.1)
+    request = AsyncMock(
+        side_effect=[
+            {"version": "4.3"},
+            {
+                "event": "ready_to_use",
+                "conn_info": {
+                    "ip": "10.0.0.8",
+                    "port": 4321,
+                    "key": "secret",
+                },
+            },
+        ]
+    )
+    loop = asyncio.get_running_loop()
+
+    with (
+        patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "_request_unlocked", request),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            AsyncMock(return_value=(stream_reader(), writer)),
+        ),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+            0.005,
+        ),
+    ):
+        upload = asyncio.create_task(art.upload(b"image", "jpg", "none"))
+        await writer.drain_started.wait()
+        started = loop.time()
+        upload.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await upload
+        elapsed = loop.time() - started
+
+    assert elapsed < 0.05
     assert writer.closed
     assert writer.waited_closed
     assert art._uuidless_pending is None
