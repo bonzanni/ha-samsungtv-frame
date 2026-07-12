@@ -151,11 +151,57 @@ async def test_restart_art_listener_reopens_same_adapter(device):
     art.start_listening.assert_awaited_once()
 
 
+async def test_restart_does_not_start_if_stop_lands_while_closing(device):
+    close_started = asyncio.Event()
+    release_restart_close = asyncio.Event()
+
+    async def close_art():
+        if not close_started.is_set():
+            close_started.set()
+            await release_restart_close.wait()
+
+    device._art.close = AsyncMock(side_effect=close_art)
+    device._art.start_listening = AsyncMock()
+    device._remote.close = AsyncMock()
+
+    restart = asyncio.create_task(device.async_restart_art_listener())
+    await close_started.wait()
+    stop = asyncio.create_task(device.async_stop())
+    while not device._stopped:
+        await asyncio.sleep(0)
+    release_restart_close.set()
+    await asyncio.gather(restart, stop)
+
+    device._art.start_listening.assert_not_awaited()
+
+
 async def test_stop_is_bounded_and_idempotent(device):
     device._remote.close = AsyncMock(side_effect=[TimeoutError, None])
     device._art.close = AsyncMock(side_effect=[TimeoutError, None])
     await asyncio.wait_for(device.async_stop(), timeout=0.1)
     await asyncio.wait_for(device.async_stop(), timeout=0.1)
+    assert device._stopped is True
+    assert device._remote.close.await_count == 2
+    assert device._art.close.await_count == 2
+
+
+async def test_stop_bounds_wedged_remote_close_and_is_idempotent(device):
+    never_finishes = asyncio.Event()
+
+    async def close_remote():
+        await never_finishes.wait()
+
+    device._remote.close = AsyncMock(side_effect=close_remote)
+    device._art.close = AsyncMock()
+
+    with patch(
+        "custom_components.samsungtv_frame.device.ART_CLOSE_DEADLINE",
+        0.01,
+        create=True,
+    ):
+        await asyncio.wait_for(device.async_stop(), timeout=0.1)
+        await asyncio.wait_for(device.async_stop(), timeout=0.1)
+
     assert device._stopped is True
     assert device._remote.close.await_count == 2
     assert device._art.close.await_count == 2

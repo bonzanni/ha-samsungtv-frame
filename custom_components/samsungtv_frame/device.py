@@ -17,6 +17,7 @@ from samsungtvws.remote import ChannelEmitCommand, SendRemoteKey
 from wakeonlan import send_magic_packet
 
 from .const import (
+    ART_CLOSE_DEADLINE,
     CLIENT_NAME,
     LOGGER,
     PORT_REST,
@@ -407,10 +408,19 @@ class FrameDevice:
         if self._stopped:
             return
         await self._art.close()
+        if self._stopped:
+            return
         await self._art.start_listening()
+
+    async def _async_close_remote(self) -> None:
+        """Close the remote without allowing shutdown to wedge indefinitely."""
+        async with asyncio.timeout(ART_CLOSE_DEADLINE):
+            await self._remote.close()
 
     async def async_stop(self) -> None:
         self._stopped = True
         await asyncio.gather(
-            self._remote.close(), self._art.close(), return_exceptions=True
+            self._async_close_remote(),
+            self._art.close(),
+            return_exceptions=True,
         )
