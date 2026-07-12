@@ -1,4 +1,5 @@
 # tests/test_device.py
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -8,7 +9,14 @@ from custom_components.samsungtv_frame.device import FrameDevice
 
 @pytest.fixture
 def device(hass):
-    return FrameDevice(hass, host="1.2.3.4", mac="A0:D0:5B:86:CE:B7", token="tok")
+    return FrameDevice(
+        hass,
+        host="1.2.3.4",
+        mac="A0:D0:5B:86:CE:B7",
+        token="tok",
+        ssl_context=MagicMock(),
+        task_factory=lambda coro, name: asyncio.create_task(coro, name=name),
+    )
 
 
 async def test_device_info_returns_device_dict(hass, device):
@@ -27,10 +35,8 @@ async def test_device_info_none_when_unreachable(hass, device):
 
 
 async def test_get_artmode_true(hass, device):
-    art = MagicMock()
-    art.get_artmode.return_value = "on"
-    with patch.object(device, "_art", art):
-        assert await device.async_get_artmode() is True
+    device._art.get_artmode = AsyncMock(return_value="on")
+    assert await device.async_get_artmode() is True
 
 
 async def test_turn_on_sends_magic_packet(hass, device):
@@ -40,127 +46,47 @@ async def test_turn_on_sends_magic_packet(hass, device):
     assert smp.call_args.args[0] == "A0:D0:5B:86:CE:B7"
 
 
-async def test_listener_uses_separate_connection(hass, device):
-    # The listener must use _art_listener, not _art, so that a prior
-    # get_artmode() call (which opens _art's websocket) doesn't prevent
-    # start_listening from running.
-    assert device._art is not device._art_listener
-
-    mock_art = MagicMock()
-    mock_listener = MagicMock()
-    device._art = mock_art
-    device._art_listener = mock_listener
-
-    await device.async_start_art_listener(lambda e, d: None)
-
-    mock_listener.start_listening.assert_called_once()
-    mock_art.start_listening.assert_not_called()
+async def test_get_artmode_retries_stale_failure_once(device):
+    device._art.get_artmode = AsyncMock(side_effect=[OSError("stale"), "on"])
+    device._art.close = AsyncMock()
+    assert await device.async_get_artmode() is True
+    device._art.close.assert_awaited_once()
 
 
-async def test_get_artmode_failure_resets_connection(hass, device):
-    art = MagicMock()
-    art.get_artmode.side_effect = OSError("dead socket")
-    with patch.object(device, "_art", art):
-        result = await device.async_get_artmode()
-    assert result is None
-    # One reset per attempt (initial call + the retry).
-    assert art.close.call_count == 2
+async def test_get_artmode_does_not_retry_timeout(device):
+    device._art.get_artmode = AsyncMock(side_effect=TimeoutError)
+    device._art.close = AsyncMock()
+    assert await device.async_get_artmode() is None
+    assert device._art.get_artmode.await_count == 1
+    device._art.close.assert_awaited_once()
 
 
 async def test_get_artmode_single_attempt_when_requested(hass, device):
     # attempts=1 is used while the TV reports standby (shutting down): the
     # art socket hangs until timeout there, so a retry only adds latency.
-    art = MagicMock()
-    art.get_artmode.side_effect = OSError("hanging socket")
-    with patch.object(device, "_art", art):
-        assert await device.async_get_artmode(attempts=1) is None
-    assert art.get_artmode.call_count == 1
-    art.close.assert_called_once()
-
-
-async def test_get_artmode_retries_once_after_reset(hass, device):
-    # First call hits the stale post-power-cycle connection; the retry (on a
-    # fresh connection) must resolve art mode within the same poll.
-    art = MagicMock()
-    art.get_artmode.side_effect = [OSError("stale socket"), "on"]
-    with patch.object(device, "_art", art):
-        assert await device.async_get_artmode() is True
-    art.close.assert_called_once()
+    device._art.get_artmode = AsyncMock(side_effect=OSError("hanging socket"))
+    device._art.close = AsyncMock()
+    assert await device.async_get_artmode(attempts=1) is None
+    assert device._art.get_artmode.await_count == 1
+    device._art.close.assert_awaited_once()
 
 
 async def test_set_artmode_failure_resets_connection_and_reraises(hass, device):
-    art = MagicMock()
-    art.set_artmode.side_effect = OSError("dead socket")
-    with patch.object(device, "_art", art):
-        with pytest.raises(OSError):
-            await device.async_set_artmode(True)
+    device._art.set_artmode = AsyncMock(side_effect=OSError("dead socket"))
+    device._art.close = AsyncMock()
+    with pytest.raises(OSError):
+        await device.async_set_artmode(True)
     # One reset after the initial failure, one after the failed retry.
-    assert art.close.call_count == 2
-    assert art.set_artmode.call_count == 2
+    assert device._art.close.await_count == 2
+    assert device._art.set_artmode.await_count == 2
 
 
 async def test_set_artmode_retries_once_on_stale_connection(hass, device):
-    art = MagicMock()
-    art.set_artmode.side_effect = [OSError("stale"), None]
-    with patch.object(device, "_art", art):
-        await device.async_set_artmode(True)
-    assert art.set_artmode.call_count == 2
-    art.close.assert_called_once()
-
-
-async def test_handshake_ignores_client_broadcasts(hass):
-    """The shim must make every samsungtvws handshake skip clientConnect /
-    clientDisconnect broadcasts instead of dying on them (production
-    livelock: any client joining/leaving during our handshake killed it)."""
-    from samsungtvws import async_connection, connection, event
-
-    for module in (event, connection, async_connection):
-        assert event.MS_CHANNEL_CLIENT_CONNECT_EVENT in module.IGNORE_EVENTS_AT_STARTUP
-        assert (
-            event.MS_CHANNEL_CLIENT_DISCONNECT_EVENT
-            in module.IGNORE_EVENTS_AT_STARTUP
-        )
-
-
-async def test_art_open_tolerates_broadcasts_before_ready(hass):
-    """The art-channel ready-wait must skip client broadcasts (a broadcast in
-    that single-frame slot killed the connect in production)."""
-    from samsungtvws.art import SamsungTVArt
-
-    art = SamsungTVArt("1.2.3.4", port=8002, name="x", timeout=1)
-    frames = [
-        ("ms.channel.clientDisconnect", {"event": "ms.channel.clientDisconnect"}),
-        ("ms.channel.clientConnect", {"event": "ms.channel.clientConnect"}),
-        ("ms.channel.ready", {"event": "ms.channel.ready"}),
-    ]
-    from samsungtvws.connection import SamsungTVWSConnection
-
-    with (
-        patch.object(SamsungTVWSConnection, "open", lambda self: None),
-        patch.object(art, "_recv_frame", side_effect=frames),
-        patch.object(art, "close") as close,
-    ):
-        art.connection = MagicMock()
-        result = art.open()
-    assert result is art.connection
-    close.assert_not_called()
-
-
-async def test_listener_connects_bounded_then_unbounded(hass, device):
-    from custom_components.samsungtv_frame.const import LISTENER_CONNECT_TIMEOUT
-
-    # Constructed with a bounded connect timeout (a no-timeout connect once
-    # wedged for hours holding the art lock)...
-    assert device._art_listener.timeout == LISTENER_CONNECT_TIMEOUT
-
-    # ...and after start_listening succeeds the timeout is removed so the
-    # recv loop can idle forever.
-    listener = MagicMock()
-    device._art_listener = listener
-    await device.async_start_art_listener(lambda e, d: None)
-    listener.start_listening.assert_called_once()
-    assert listener.timeout is None
-    listener.connection.settimeout.assert_called_once_with(None)
+    device._art.set_artmode = AsyncMock(side_effect=[OSError("stale"), None])
+    device._art.close = AsyncMock()
+    await device.async_set_artmode(True)
+    assert device._art.set_artmode.await_count == 2
+    device._art.close.assert_awaited_once()
 
 
 async def test_newest_token_none_when_unchanged(hass, device):
@@ -173,38 +99,66 @@ async def test_newest_token_surfaces_library_issued_token(hass, device):
     assert device.newest_token == "fresh-token"
 
 
-async def test_update_token_used_for_fresh_listener(hass, device):
+async def test_newest_token_reads_remote(hass, device):
+    device._art.token = "tok"
+    device._remote.token = "fresh-token"
+    assert device.newest_token == "fresh-token"
+
+
+async def test_update_token_is_used_by_both_persistent_clients(hass, device):
     device.update_token("fresh-token")
-    with patch(
-        "custom_components.samsungtv_frame.device.SamsungTVArt"
-    ) as mock_cls:
-        await device.async_restart_art_listener(lambda e, d: None)
-    assert mock_cls.call_args.kwargs["token"] == "fresh-token"
+    assert device._art.token == "fresh-token"
+    assert device._remote.token == "fresh-token"
+
+
+async def test_art_callback_and_start_are_loop_native(hass, device):
+    callback = AsyncMock()
+    device._art.set_event_callback = MagicMock()
+    device._art.start_listening = AsyncMock()
+    with patch.object(hass, "async_add_executor_job") as executor:
+        device.set_art_event_callback(callback)
+        await device.async_start_art_listener()
+    device._art.set_event_callback.assert_called_once_with(callback)
+    device._art.start_listening.assert_awaited_once()
+    executor.assert_not_called()
+
+
+async def test_listener_alive_delegates_to_art(device):
+    device._art.is_alive = MagicMock(return_value=True)
+    assert device.listener_alive is True
+    device._art.is_alive.assert_called_once_with()
 
 
 async def test_listener_not_restarted_after_stop(hass, device):
     """An in-flight restart finishing after unload must not resurrect a
     listener nothing will ever close."""
+    device._remote.close = AsyncMock()
+    device._art.close = AsyncMock()
+    device._art.start_listening = AsyncMock()
     await device.async_stop()
-    with patch(
-        "custom_components.samsungtv_frame.device.SamsungTVArt"
-    ) as mock_cls:
-        await device.async_restart_art_listener(lambda e, d: None)
-        await device.async_start_art_listener(lambda e, d: None)
-    mock_cls.assert_not_called()
+    await device.async_restart_art_listener()
+    await device.async_start_art_listener()
+    device._art.start_listening.assert_not_awaited()
 
 
-async def test_restart_art_listener_creates_fresh_instance(hass, device):
-    old = device._art_listener
-    with patch(
-        "custom_components.samsungtv_frame.device.SamsungTVArt"
-    ) as mock_cls:
-        mock_new = MagicMock()
-        mock_cls.return_value = mock_new
-        await device.async_restart_art_listener(lambda e, d: None)
-    assert device._art_listener is not old
-    assert device._art_listener is mock_new
-    mock_new.start_listening.assert_called_once()
+async def test_restart_art_listener_reopens_same_adapter(device):
+    art = device._art
+    art.close = AsyncMock()
+    art.start_listening = AsyncMock()
+    await device.async_restart_art_listener()
+    assert device._art is art
+    art.close.assert_awaited_once()
+    art.start_listening.assert_awaited_once()
+
+
+async def test_stop_is_bounded_and_idempotent(device):
+    device._remote.close = AsyncMock(side_effect=[TimeoutError, None])
+    device._art.close = AsyncMock(side_effect=[TimeoutError, None])
+    await asyncio.wait_for(device.async_stop(), timeout=0.1)
+    await asyncio.wait_for(device.async_stop(), timeout=0.1)
+    assert device._stopped is True
+    assert device._remote.close.await_count == 2
+    assert device._art.close.await_count == 2
 
 
 async def test_send_key_clicks_remote(hass, device):
@@ -215,34 +169,6 @@ async def test_send_key_clicks_remote(hass, device):
     cmds = remote.send_commands.call_args.args[0]
     assert cmds[0].params["DataOfCmd"] == "KEY_HOME"
     assert cmds[0].params["Cmd"] == "Click"
-
-
-async def test_wedged_art_call_deadline_closes_socket(hass, device):
-    """When the deadline fires (surfacing as TimeoutError), the socket must
-    be force-closed so the wedged library thread exits, and the call must
-    resolve as a normal failure — otherwise one wedged call blocks all
-    polling (seen live: HA setup hung 25+ minutes against a booting TV).
-
-    The asyncio.timeout firing itself cannot be exercised under the test
-    harness (frozen loop clock vs real-time executor); it is verified by the
-    plain-asyncio semantics of asyncio.timeout + run_in_executor.
-    """
-    art = MagicMock()
-    calls: list = []
-
-    async def _executor(func, *args):
-        calls.append(func)
-        if len(calls) == 1:
-            raise TimeoutError  # the deadline fired on the wedged call
-        return None
-
-    with (
-        patch.object(device, "_art", art),
-        patch.object(hass, "async_add_executor_job", side_effect=_executor),
-    ):
-        assert await device.async_get_artmode(attempts=1) is None
-    # the unwedge close (except-branch) plus the reset close both target _art.close
-    assert calls.count(art.close) >= 1
 
 
 async def test_rejected_remote_token_falls_back_to_tokenless(hass, device):
@@ -295,37 +221,70 @@ async def test_app_list_failure_returns_none(hass, device):
         assert await device.async_app_list() is None
 
 
-async def test_set_slideshow_falls_back_to_legacy_request(hass, device):
-    from samsungtvws.exceptions import ResponseError
-
-    art = MagicMock()
-    art.set_auto_rotation_status.side_effect = ResponseError("unsupported")
-    with patch.object(device, "_art", art):
-        await device.async_set_slideshow(60, True, "MY-C0002")
-    art.set_auto_rotation_status.assert_called_once_with(
-        duration=60, type=True, category_id="MY-C0002"
-    )
-    art.set_slideshow_status.assert_called_once_with(
-        duration=60, type=True, category_id="MY-C0002"
-    )
+async def test_set_slideshow_delegates_to_art(hass, device):
+    device._art.set_slideshow = AsyncMock()
+    await device.async_set_slideshow(60, True, "MY-C0002")
+    device._art.set_slideshow.assert_awaited_once_with(60, True, "MY-C0002")
 
 
 async def test_upload_art_returns_content_id(hass, device):
-    art = MagicMock()
-    art.upload.return_value = "MY_F0100"
-    with patch.object(device, "_art", art):
-        result = await device.async_upload_art(b"bytes", "jpg", "none")
+    device._art.upload = AsyncMock(return_value="MY_F0100")
+    result = await device.async_upload_art(b"bytes", "jpg", "none")
     assert result == "MY_F0100"
-    art.upload.assert_called_once_with(
-        b"bytes", matte="none", portrait_matte="none", file_type="jpg"
-    )
+    device._art.upload.assert_awaited_once_with(b"bytes", "jpg", "none")
+
+
+async def test_upload_is_never_retried(device):
+    device._art.upload = AsyncMock(side_effect=OSError("partial"))
+    device._art.close = AsyncMock()
+    with pytest.raises(OSError):
+        await device.async_upload_art(b"image", "jpg", "none")
+    device._art.upload.assert_awaited_once()
+    device._art.close.assert_awaited_once()
 
 
 async def test_get_current_art_returns_content_id(hass, device):
-    art = MagicMock()
-    art.get_current.return_value = {"content_id": "MY_F0034", "matte_id": "none"}
-    with patch.object(device, "_art", art):
-        assert await device.async_get_current_art() == "MY_F0034"
+    device._art.get_current = AsyncMock(
+        return_value={"content_id": "MY_F0034", "matte_id": "none"}
+    )
+    assert await device.async_get_current_art() == "MY_F0034"
+
+
+async def test_all_art_operations_stay_off_executor(hass, device):
+    device._art.get_artmode = AsyncMock(return_value="off")
+    device._art.set_artmode = AsyncMock()
+    device._art.get_current = AsyncMock(return_value={"content_id": "MY_F0001"})
+    device._art.get_brightness = AsyncMock(return_value=5)
+    device._art.set_brightness = AsyncMock()
+    device._art.select_image = AsyncMock()
+    device._art.upload = AsyncMock(return_value="MY_F0002")
+    device._art.delete = AsyncMock()
+    device._art.get_thumbnail = AsyncMock(return_value=b"jpeg")
+    device._art.change_matte = AsyncMock()
+    device._art.set_photo_filter = AsyncMock()
+    device._art.set_favourite = AsyncMock()
+    device._art.get_color_temperature = AsyncMock(return_value=3)
+    device._art.set_color_temperature = AsyncMock()
+    device._art.set_slideshow = AsyncMock()
+
+    with patch.object(hass, "async_add_executor_job") as executor:
+        await device.async_get_artmode()
+        await device.async_set_artmode(True)
+        await device.async_get_current_art()
+        await device.async_get_art_brightness()
+        await device.async_set_art_brightness(6)
+        await device.async_select_art("MY_F0001", True)
+        await device.async_upload_art(b"image", "jpg", "none")
+        await device.async_delete_art("MY_F0001")
+        await device.async_get_art_thumbnail("MY_F0001")
+        await device.async_change_matte("MY_F0001", "shadowbox_polar")
+        await device.async_set_photo_filter("MY_F0001", "ink")
+        await device.async_set_favourite("MY_F0001", True)
+        await device.async_get_color_temperature()
+        await device.async_set_color_temperature(4)
+        await device.async_set_slideshow(60, False, "MY-C0002")
+
+    executor.assert_not_called()
 
 
 def _mock_rendering_control(actions: dict) -> MagicMock:

@@ -1011,6 +1011,22 @@ async def test_receiver_decodes_push_payload_for_callback():
         await art.close()
 
 
+@pytest.mark.parametrize(
+    ("event", "data"),
+    [
+        ("ms.channel.clientConnect", "{}"),
+        ("d2d_service_message", None),
+        ("d2d_service_message", "not json{"),
+        ("d2d_service_message", '["not", "a", "dict"]'),
+    ],
+)
+async def test_dispatch_ignores_non_push_and_undecodable_payloads(event, data):
+    callback = AsyncMock()
+    art = make_art(callback=callback)
+    await art._dispatch_frame(event, {"event": event, "data": data})
+    callback.assert_not_awaited()
+
+
 def handshake_frames():
     """Return a successful Art websocket handshake."""
     return [{"event": "ms.channel.connect"}, {"event": "ms.channel.ready"}]
