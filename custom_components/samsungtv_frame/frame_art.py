@@ -218,10 +218,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
         payload = await self.request("get_artmode_settings")
         nested = payload.get("data")
         if isinstance(nested, str):
-            try:
-                nested_data = json.loads(nested)
-            except json.JSONDecodeError:
-                return payload
+            nested_data = json.loads(nested)
             for item in nested_data:
                 if item.get("item") == setting:
                     return item

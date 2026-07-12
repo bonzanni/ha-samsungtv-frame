@@ -104,12 +104,13 @@ async def test_get_artmode_settings_extracts_nested_setting():
     art.request.assert_awaited_once_with("get_artmode_settings")
 
 
-async def test_get_artmode_settings_preserves_unparseable_payload():
+async def test_get_artmode_settings_propagates_nested_json_error():
     art = make_art()
     payload = {"data": "not-json"}
     art.request = AsyncMock(return_value=payload)
 
-    assert await art.get_artmode_settings("brightness") is payload
+    with pytest.raises(json.JSONDecodeError):
+        await art.get_artmode_settings("brightness")
 
 
 @pytest.mark.parametrize(
