@@ -320,20 +320,21 @@ class FrameArt(SamsungTVWSAsyncConnection):
 
     async def close(self) -> None:
         """Cancel the receiver and close the websocket within a deadline."""
-        self._closing = True
-        receiver = self._recv_loop
-        self._recv_loop = None
-        if receiver is not None and receiver is not asyncio.current_task():
-            receiver.cancel()
-            with contextlib.suppress(asyncio.CancelledError, TimeoutError):
-                async with asyncio.timeout(ART_CLOSE_DEADLINE):
-                    await receiver
-        connection, self.connection = self.connection, None
-        if connection is not None:
-            with contextlib.suppress(Exception, TimeoutError):
-                async with asyncio.timeout(ART_CLOSE_DEADLINE):
-                    await connection.close()
-        self._fail_pending(ConnectionFailure("Art connection closed"))
+        async with self._lifecycle_lock:
+            self._closing = True
+            receiver = self._recv_loop
+            self._recv_loop = None
+            if receiver is not None and receiver is not asyncio.current_task():
+                receiver.cancel()
+                with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                    async with asyncio.timeout(ART_CLOSE_DEADLINE):
+                        await receiver
+            connection, self.connection = self.connection, None
+            if connection is not None:
+                with contextlib.suppress(Exception, TimeoutError):
+                    async with asyncio.timeout(ART_CLOSE_DEADLINE):
+                        await connection.close()
+            self._fail_pending(ConnectionFailure("Art connection closed"))
 
     def is_alive(self) -> bool:
         """Return whether both the websocket and receiver are active."""

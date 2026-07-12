@@ -388,3 +388,24 @@ async def test_close_is_idempotent():
     assert ws.closed
     assert art.connection is None
     assert art._recv_loop is None
+
+
+async def test_close_serializes_with_in_progress_open():
+    ws = FakeWebSocket([])
+    art = make_art()
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.connect",
+        AsyncMock(return_value=ws),
+    ):
+        open_task = asyncio.create_task(art.open())
+        await asyncio.sleep(0)
+        close_task = asyncio.create_task(art.close())
+        await asyncio.sleep(0)
+
+        await ws.frames.put(json.dumps({"event": "ms.channel.connect"}))
+        await ws.frames.put(json.dumps({"event": "ms.channel.ready"}))
+        opened, _ = await asyncio.gather(open_task, close_task)
+
+    assert opened is ws
+    assert ws.closed
+    assert art.connection is None
