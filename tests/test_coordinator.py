@@ -1,4 +1,5 @@
 # tests/test_coordinator.py
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.config_entries import ConfigEntry
@@ -290,7 +291,7 @@ async def test_push_art_on_during_standby_shutdown_stays_off(hass, mock_device):
     assert pushed.tv_mode is TvMode.OFF
 
 
-async def test_dead_listener_thread_triggers_restart(hass, mock_device):
+async def test_dead_receiver_task_triggers_restart(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False
     mock_device.listener_alive = False
@@ -504,13 +505,32 @@ async def test_art_event_go_to_standby_holds_but_refreshes(hass, mock_device):
         tv_mode=TvMode.ART_MODE,
         current_art=None,
     )
+    release_refresh = asyncio.Event()
+
+    async def _refresh():
+        await release_refresh.wait()
+
     with (
         patch.object(coord, "async_set_updated_data") as push,
-        patch.object(coord, "async_request_refresh", AsyncMock()) as refresh,
+        patch.object(
+            coord, "async_request_refresh", AsyncMock(side_effect=_refresh)
+        ) as refresh,
     ):
+        coord.handle_art_event("d2d_service_message", {"event": "go_to_standby"})
         coord.handle_art_event("d2d_service_message", {"event": "go_to_standby"})
         # Destination is ambiguous -> never a state change by itself...
         push.assert_not_called()
+        coord.config_entry.async_create_background_task.assert_called_once()
+        assert (
+            coord.config_entry.async_create_background_task.call_args.args[0] is hass
+        )
+        assert (
+            coord.config_entry.async_create_background_task.call_args.args[2]
+            == "samsungtv_frame-standby-refresh"
+        )
+        await asyncio.sleep(0)
+        refresh.assert_awaited_once()
+        release_refresh.set()
         await hass.async_block_till_done()
         # ...but it must trigger an immediate poll to resolve OFF fast.
         refresh.assert_awaited_once()

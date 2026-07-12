@@ -1,6 +1,7 @@
 """Config flow for Samsung Frame TV."""
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import voluptuous as vol
@@ -14,10 +15,9 @@ from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import format_mac
 from samsungtvws.async_rest import SamsungTVAsyncRest
-from samsungtvws.art import SamsungTVArt
+from samsungtvws.helper import get_ssl_context
 
 from .const import (
-    CLIENT_NAME,
     CONF_HOST,
     CONF_MAC,
     CONF_MODEL,
@@ -25,9 +25,10 @@ from .const import (
     DEFAULT_HEARTBEAT_SECONDS,
     DOMAIN,
     OPT_HEARTBEAT,
+    PAIRING_DEADLINE,
     PORT_REST,
-    PORT_WS,
 )
+from .frame_art import FrameArt
 
 
 class NotAFrameError(Exception):
@@ -50,17 +51,23 @@ async def validate_and_pair(hass, host: str) -> dict[str, Any]:
     if device.get("FrameTVSupport") != "true":
         raise NotAFrameError
 
-    def _pair() -> str | None:
-        art = SamsungTVArt(host, port=PORT_WS, name=CLIENT_NAME, timeout=30)
-        art.open()  # triggers on-TV Allow prompt; returns after acceptance
-        token = art.token
-        art.close()
-        return token
-
+    ssl_context = await hass.async_add_executor_job(get_ssl_context)
+    art = FrameArt(
+        host,
+        token=None,
+        ssl_context=ssl_context,
+        task_factory=None,
+        event_callback=None,
+        timeout=PAIRING_DEADLINE,
+    )
     try:
-        token = await hass.async_add_executor_job(_pair)
+        async with asyncio.timeout(PAIRING_DEADLINE):
+            await art.open()
+        token = art.token
     except Exception as err:  # noqa: BLE001
         raise CannotConnect from err
+    finally:
+        await art.close()
     return {
         CONF_MAC: format_mac(device.get("wifiMac", "")),
         CONF_TOKEN: token,

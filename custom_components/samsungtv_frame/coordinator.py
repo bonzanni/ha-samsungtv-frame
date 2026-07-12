@@ -58,6 +58,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         self._was_reachable = True
         self._wake_task: asyncio.Task | None = None
         self._listener_task: asyncio.Task | None = None
+        self._standby_refresh_task: asyncio.Task | None = None
         # Consecutive polls (reachable, power on) with a failed art query;
         # bounds the last-stable hold so a permanently broken art channel
         # surfaces as 'unknown' instead of freezing state forever.
@@ -81,8 +82,8 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         self._app_map_is_fallback = True
         self._app_fetch_attempts = 0
         self._app_fetch_countdown = 0
-        # Set by __init__.py once the initial art listener + bridge callback
-        # exist, so a power-cycle recovery can restart the SAME listener.
+        # Set by __init__.py after the native receiver callback is wired, so a
+        # power-cycle recovery can restart the same receiver task.
         self.restart_listener: Callable[[], Awaitable[None]] | None = None
 
     def _last_stable(self) -> TvMode:
@@ -122,7 +123,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             and self.restart_listener is not None
             and not self.device.listener_alive
         ):
-            # The recv thread died without an unreachable poll in between
+            # The receiver task died without an unreachable poll in between
             # (e.g. a brief WiFi blip the heartbeat never saw). Skipped in
             # standby: the TV is shutting down and a reconnect would hang.
             self._async_kick_listener_restart()
@@ -381,7 +382,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
 
     @callback
     def handle_art_event(self, event: str, data: Any) -> None:
-        """Loop-safe handler for pushed art events (see Task 5 bridge)."""
+        """Handle an unsolicited Art event on the Home Assistant loop."""
         LOGGER.debug("Art event: %s", data)
         sub = data.get("event") if isinstance(data, dict) else None
         if sub in ("art_mode_changed", "artmode_status"):
@@ -396,7 +397,17 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             # Never a state by itself (the destination is ambiguous), but a
             # strong hint the TV is shutting down: refresh now instead of
             # waiting out the heartbeat, so OFF lands in seconds.
-            self.hass.async_create_task(self.async_request_refresh())
+            if (
+                self._standby_refresh_task is None
+                or self._standby_refresh_task.done()
+            ):
+                self._standby_refresh_task = (
+                    self.config_entry.async_create_background_task(
+                        self.hass,
+                        self.async_request_refresh(),
+                        f"{DOMAIN}-standby-refresh",
+                    )
+                )
             return
         else:
             return

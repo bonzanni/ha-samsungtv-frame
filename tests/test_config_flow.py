@@ -1,11 +1,17 @@
 # tests/test_config_flow.py
-from unittest.mock import AsyncMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.samsungtv_frame.const import (
     CONF_HOST, CONF_MAC, CONF_MODEL, CONF_TOKEN, DOMAIN, OPT_HEARTBEAT,
+)
+from custom_components.samsungtv_frame.config_flow import (
+    CannotConnect,
+    validate_and_pair,
 )
 
 
@@ -20,6 +26,100 @@ def _existing_entry() -> MockConfigEntry:
         },
         unique_id="a0:d0:5b:86:ce:b7",
     )
+
+
+def _pairing_patches(hass, art, ssl_context):
+    rest = MagicMock()
+    rest.rest_device_info = AsyncMock(
+        return_value={
+            "device": {
+                "FrameTVSupport": "true",
+                "wifiMac": "A0:D0:5B:86:CE:B7",
+                "modelName": "QE65LS03BAUXXH",
+            }
+        }
+    )
+    return (
+        patch(
+            "custom_components.samsungtv_frame.config_flow.SamsungTVAsyncRest",
+            return_value=rest,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.config_flow.FrameArt",
+            return_value=art,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.config_flow.get_ssl_context",
+            return_value=ssl_context,
+        ),
+        patch.object(
+            hass,
+            "async_add_executor_job",
+            new=AsyncMock(side_effect=lambda func: func()),
+        ),
+    )
+
+
+async def test_pair_always_closes(hass):
+    ssl_context = object()
+    art = MagicMock(token="new-token")
+    art.open = AsyncMock()
+    art.close = AsyncMock()
+    art.start_listening = AsyncMock()
+    rest_patch, art_patch, ssl_patch, executor_patch = _pairing_patches(
+        hass, art, ssl_context
+    )
+    with (
+        rest_patch,
+        art_patch as art_cls,
+        ssl_patch as get_context,
+        executor_patch as executor,
+    ):
+        result = await validate_and_pair(hass, "1.2.3.4")
+
+    assert result[CONF_TOKEN] == "new-token"
+    executor.assert_awaited_once_with(get_context)
+    art_cls.assert_called_once_with(
+        "1.2.3.4",
+        token=None,
+        ssl_context=ssl_context,
+        task_factory=None,
+        event_callback=None,
+        timeout=30,
+    )
+    art.open.assert_awaited_once()
+    art.start_listening.assert_not_awaited()
+    art.close.assert_awaited_once()
+
+
+async def test_pair_open_failure_always_closes(hass):
+    art = MagicMock(token=None)
+    art.open = AsyncMock(side_effect=OSError("cannot open"))
+    art.close = AsyncMock()
+    rest_patch, art_patch, ssl_patch, executor_patch = _pairing_patches(
+        hass, art, object()
+    )
+    with rest_patch, art_patch, ssl_patch, executor_patch as executor:
+        with pytest.raises(CannotConnect):
+            await validate_and_pair(hass, "1.2.3.4")
+
+    assert executor.await_count == 1
+    art.close.assert_awaited_once()
+
+
+async def test_pair_cancellation_always_closes(hass):
+    art = MagicMock(token=None)
+    art.open = AsyncMock(side_effect=asyncio.CancelledError)
+    art.close = AsyncMock()
+    rest_patch, art_patch, ssl_patch, executor_patch = _pairing_patches(
+        hass, art, object()
+    )
+    with rest_patch, art_patch, ssl_patch, executor_patch as executor:
+        with pytest.raises(asyncio.CancelledError):
+            await validate_and_pair(hass, "1.2.3.4")
+
+    assert executor.await_count == 1
+    art.close.assert_awaited_once()
 
 
 async def test_user_flow_success(hass):
