@@ -69,8 +69,13 @@ UPNP_FAIL_WARN_COUNT = 6
 # loop restarts its socket timeout on every incoming frame and can otherwise
 # spin forever against a chatty-but-unresponsive (booting) TV.
 ART_CALL_DEADLINE = 20
-# The listener connects with a bounded timeout (a no-timeout connect wedged
-# for hours holding the art lock), then drops to no-timeout for the recv loop.
+# Async art transport deadlines.
+ART_CONNECT_DEADLINE = 10
+ART_REQUEST_DEADLINE = 20
+ART_D2D_DEADLINE = 20
+ART_CLOSE_DEADLINE = 5
+PAIRING_DEADLINE = 30
+# Retained until the sync listener facade is removed in a later task.
 LISTENER_CONNECT_TIMEOUT = 10
 LISTENER_START_DEADLINE = 30
 # One wedged call must never kill the coordinator: whole-poll deadline.
