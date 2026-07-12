@@ -181,6 +181,156 @@ class FrameArt(SamsungTVWSAsyncConnection):
                 **params,
             )
 
+    @staticmethod
+    def _on_off(value: bool | str) -> str:
+        """Normalize a boolean or on/off string for Art commands."""
+        if isinstance(value, bool):
+            return "on" if value else "off"
+        if isinstance(value, str) and value.lower() in {"on", "off"}:
+            return value.lower()
+        raise ValueError("Expected bool or 'on'/'off' string")
+
+    async def _get_value(
+        self, request: str, key: str = "value", **params: Any
+    ) -> Any:
+        """Return a response field when the Art response is a mapping."""
+        payload = await self.request(request, **params)
+        return payload.get(key) if isinstance(payload, dict) else payload
+
+    async def get_artmode(self) -> Any:
+        """Return the current Art Mode state."""
+        return await self._get_value("get_artmode_status")
+
+    async def set_artmode(self, value: bool | str) -> dict[str, Any]:
+        """Set the Art Mode state."""
+        return await self.request(
+            "set_artmode_status", value=self._on_off(value)
+        )
+
+    async def get_current(self) -> dict[str, Any]:
+        """Return the current artwork payload."""
+        return await self.request("get_current_artwork")
+
+    async def get_artmode_settings(
+        self, setting: str = ""
+    ) -> dict[str, Any]:
+        """Return all Art Mode settings or one nested setting entry."""
+        payload = await self.request("get_artmode_settings")
+        nested = payload.get("data")
+        if isinstance(nested, str):
+            try:
+                nested_data = json.loads(nested)
+            except json.JSONDecodeError:
+                return payload
+            for item in nested_data:
+                if item.get("item") == setting:
+                    return item
+        return payload
+
+    async def get_brightness(self) -> Any:
+        """Return the Art Mode brightness level."""
+        try:
+            payload = await self.get_artmode_settings("brightness")
+            return payload.get("value")
+        except ResponseError:
+            return await self._get_value("get_brightness")
+
+    async def set_brightness(self, value: Any) -> dict[str, Any]:
+        """Set the Art Mode brightness level."""
+        return await self.request("set_brightness", value=value)
+
+    async def get_color_temperature(self) -> Any:
+        """Return the Art Mode color temperature."""
+        try:
+            payload = await self.get_artmode_settings("color_temperature")
+            return payload.get("value")
+        except ResponseError:
+            return await self._get_value("get_color_temperature")
+
+    async def set_color_temperature(self, value: Any) -> dict[str, Any]:
+        """Set the Art Mode color temperature."""
+        return await self.request("set_color_temperature", value=value)
+
+    async def select_image(
+        self,
+        content_id: str,
+        category: str | None = None,
+        show: bool = True,
+    ) -> dict[str, Any]:
+        """Select an artwork and optionally show it immediately."""
+        return await self.request(
+            "select_image",
+            category_id=category,
+            content_id=content_id,
+            show=show,
+        )
+
+    async def delete(self, content_id: str) -> bool:
+        """Delete one artwork and validate the returned content id."""
+        content_id_list = [{"content_id": content_id}]
+        payload = await self.request(
+            "delete_image_list", content_id_list=content_id_list
+        )
+        if not isinstance(payload, dict):
+            return False
+        returned = payload.get("content_id_list")
+        if not returned:
+            return False
+        if isinstance(returned, str):
+            try:
+                returned = json.loads(returned)
+            except json.JSONDecodeError:
+                return False
+        return isinstance(returned, list) and returned == content_id_list
+
+    async def change_matte(
+        self,
+        content_id: str,
+        matte_id: str | None = None,
+        portrait_matte: str | None = None,
+    ) -> dict[str, Any]:
+        """Change an artwork's landscape and optional portrait matte."""
+        params = {
+            "content_id": content_id,
+            "matte_id": matte_id or "none",
+        }
+        if portrait_matte:
+            params["portrait_matte_id"] = portrait_matte
+        return await self.request("change_matte", **params)
+
+    async def set_photo_filter(
+        self, content_id: str, filter_id: str
+    ) -> dict[str, Any]:
+        """Set the photo filter for an artwork."""
+        return await self.request(
+            "set_photo_filter", content_id=content_id, filter_id=filter_id
+        )
+
+    async def set_favourite(
+        self, content_id: str, status: bool | str = "on"
+    ) -> dict[str, Any]:
+        """Set the favourite status for an artwork."""
+        return await self.request(
+            "change_favorite",
+            expected_sub_event="favorite_changed",
+            content_id=content_id,
+            status=self._on_off(status),
+        )
+
+    async def set_slideshow(
+        self, duration: int, shuffle: bool, category_id: str
+    ) -> dict[str, Any]:
+        """Configure slideshow playback, with the legacy command fallback."""
+        params = {
+            "value": str(duration) if duration > 0 else "off",
+            "category_id": category_id,
+            "type": "shuffleslideshow" if shuffle else "slideshow",
+        }
+        try:
+            return await self.request("set_auto_rotation_status", **params)
+        except ResponseError:
+            return await self.request("set_slideshow_status", **params)
+
     async def _request_unlocked(
         self,
         request: str,
