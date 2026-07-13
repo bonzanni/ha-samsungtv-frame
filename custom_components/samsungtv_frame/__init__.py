@@ -26,8 +26,8 @@ async def _async_stop_after_setup_failure(device: FrameDevice) -> None:
             ART_CONNECT_DEADLINE + ART_CLOSE_DEADLINE
         ):
             await device.async_stop()
-    except BaseException as err:  # noqa: BLE001 - preserve the setup error
-        LOGGER.warning("Device cleanup after setup failure did not finish: %s", err)
+    except BaseException:  # noqa: BLE001 - preserve the setup error
+        LOGGER.warning("Device cleanup after setup failure did not finish")
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> bool:
@@ -46,11 +46,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> boo
         task_factory=task_factory,
     )
     coordinator = FrameCoordinator(hass, entry, device)
-    device.set_art_event_callback(coordinator.handle_art_event)
-    device.set_art_session_state_callback(
-        coordinator.handle_art_session_state
-    )
     try:
+        device.set_art_event_callback(coordinator.handle_art_event)
+        device.set_art_session_state_callback(
+            coordinator.handle_art_session_state
+        )
+        device.set_remote_token_callback(coordinator.handle_remote_token)
+        device.set_remote_reauth_callback(coordinator.handle_remote_reauth)
         await device.async_start_art_session()
         await coordinator.async_config_entry_first_refresh()
         entry.runtime_data = coordinator
@@ -58,13 +60,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> boo
             entry, PLATFORMS
         )
     except BaseException:
-        try:
-            device.set_art_session_state_callback(None)
-        except BaseException as err:  # noqa: BLE001 - preserve setup error
-            LOGGER.warning(
-                "Could not clear Art session callback after setup failure: %s",
-                err,
-            )
+        callbacks = (
+            ("Art session", device.set_art_session_state_callback),
+            ("remote token", device.set_remote_token_callback),
+            ("remote reauthorization", device.set_remote_reauth_callback),
+        )
+        for name, setter in callbacks:
+            try:
+                setter(None)
+            except BaseException:  # noqa: BLE001 - preserve setup error
+                LOGGER.warning(
+                    "Could not clear %s callback after setup failure",
+                    name,
+                )
         await _async_stop_after_setup_failure(device)
         raise
     return True
@@ -74,6 +82,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> bo
     """Unload a config entry."""
     coordinator = entry.runtime_data
     coordinator.device.set_art_session_state_callback(None)
+    coordinator.device.set_remote_token_callback(None)
+    coordinator.device.set_remote_reauth_callback(None)
     try:
         unloaded = await hass.config_entries.async_unload_platforms(
             entry, PLATFORMS
@@ -82,10 +92,22 @@ async def async_unload_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> bo
         coordinator.device.set_art_session_state_callback(
             coordinator.handle_art_session_state
         )
+        coordinator.device.set_remote_token_callback(
+            coordinator.handle_remote_token
+        )
+        coordinator.device.set_remote_reauth_callback(
+            coordinator.handle_remote_reauth
+        )
         raise
     if not unloaded:
         coordinator.device.set_art_session_state_callback(
             coordinator.handle_art_session_state
+        )
+        coordinator.device.set_remote_token_callback(
+            coordinator.handle_remote_token
+        )
+        coordinator.device.set_remote_reauth_callback(
+            coordinator.handle_remote_reauth
         )
         return False
     await coordinator.device.async_stop()

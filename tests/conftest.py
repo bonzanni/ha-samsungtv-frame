@@ -31,6 +31,8 @@ def mock_device() -> MagicMock:
     device.art_session_state = ArtSessionState.STOPPED
     device.observe_art_power = MagicMock()
     device.set_art_session_state_callback = MagicMock()
+    device.set_remote_token_callback = MagicMock()
+    device.set_remote_reauth_callback = MagicMock()
     device.async_start_art_session = AsyncMock()
     device.async_set_artmode = AsyncMock()
     device.async_turn_on = AsyncMock()

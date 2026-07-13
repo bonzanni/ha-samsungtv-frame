@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -10,7 +11,6 @@ from async_upnp_client.client import UpnpDevice, UpnpService
 from async_upnp_client.client_factory import UpnpFactory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from samsungtvws.async_remote import SamsungTVWSAsyncRemote
 from samsungtvws.async_rest import SamsungTVAsyncRest
 from samsungtvws.command import SamsungTVCommand
 from samsungtvws.exceptions import ConnectionFailure, ResponseError
@@ -19,11 +19,9 @@ from wakeonlan import send_magic_packet
 
 from .const import (
     ART_CLOSE_DEADLINE,
-    CLIENT_NAME,
     DOMAIN,
     LOGGER,
     PORT_REST,
-    PORT_WS,
 )
 from .art_session import (
     ArtSession,
@@ -32,6 +30,7 @@ from .art_session import (
     StateCallback,
 )
 from .frame_art import ArtEventCallback, FrameArt, TaskFactory
+from .frame_remote import FrameRemote, RemotePairingRequired
 
 _RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
 _DMR_URL = "http://{host}:9197/dmr"
@@ -54,13 +53,14 @@ class FrameDevice:
         self._host = host
         self._mac = mac
         self._token = token
+        self._ssl_context = ssl_context
         self._task_factory = task_factory
         # _rest is created lazily on first async_device_info call: aiohttp's connector
         # requires a running event loop, so we cannot create it here in __init__ (which
         # may be called from a sync context, e.g. in tests).
         self._rest: SamsungTVAsyncRest | None = None
-        self._remote = SamsungTVWSAsyncRemote(
-            host, token=token, port=PORT_WS, name=CLIENT_NAME, timeout=8
+        self._remote: FrameRemote | None = (
+            self._create_remote(token) if token else None
         )
         self._art = FrameArt(
             host,
@@ -81,10 +81,8 @@ class FrameDevice:
         # UPnP DMR device (RenderingControl) — created lazily, dropped on
         # failure so a TV power cycle just triggers a fresh description fetch.
         self._upnp_device: UpnpDevice | None = None
-        # Set once the remote channel rejects the stored token (see
-        # _maybe_drop_rejected_remote_token); stays tokenless until a real
-        # remote token is granted and captured.
-        self._remote_tokenless = False
+        self._remote_token_callback: Callable[[str], None] | None = None
+        self._remote_reauth_callback: Callable[[], None] | None = None
         # True after any successful remote-channel operation this run. The
         # background app-list fetch is gated on it: a remote connect can make
         # the TV pop an authorization prompt (e.g. after a power cycle wiped
@@ -133,23 +131,49 @@ class FrameDevice:
 
     @property
     def newest_token(self) -> str | None:
-        """A token the TV issued that differs from the one we hold, if any.
+        """A remote-issued token that differs from the one we hold, if any.
 
-        Pairing on this TV granted access by client name without issuing a
-        token, but a token can still appear later on either persistent
-        connection; surface it so the coordinator can persist it.
+        The remote channel owns the canonical credential. Art-channel values
+        are deliberately ignored by this heartbeat compatibility path.
         """
-        for client in (self._art, self._remote):
-            token = getattr(client, "token", None)
-            if token and token != self._token:
-                return token
-        return None
+        remote = self._remote
+        if remote is None:
+            return None
+        token = remote.token
+        return token if token and token != self._token else None
+
+    def _create_remote(self, token: str) -> FrameRemote:
+        """Create a credentialed remote; callers must supply a token."""
+        return FrameRemote(
+            self._host,
+            token=token,
+            ssl_context=self._ssl_context,
+            timeout=8,
+        )
 
     def update_token(self, token: str) -> None:
         """Adopt a newly issued token for all future (re)connections."""
+        if not token:
+            return
+        remote = self._remote
+        if remote is None:
+            remote = self._create_remote(token)
         self._token = token
         self._art.token = token
-        self._remote.token = token
+        remote.token = token
+        self._remote = remote
+
+    def set_remote_token_callback(
+        self, callback: Callable[[str], None] | None
+    ) -> None:
+        """Replace the synchronous remote-token persistence callback."""
+        self._remote_token_callback = callback
+
+    def set_remote_reauth_callback(
+        self, callback: Callable[[], None] | None
+    ) -> None:
+        """Replace the foreground remote reauthorization callback."""
+        self._remote_reauth_callback = callback
 
     def _ensure_rest(self) -> SamsungTVAsyncRest:
         if self._rest is None:
@@ -162,8 +186,8 @@ class FrameDevice:
     async def async_device_info(self) -> dict[str, Any] | None:
         try:
             info = await self._ensure_rest().rest_device_info()
-        except Exception as err:  # noqa: BLE001 - library raises broad connection types
-            LOGGER.debug("REST device info failed for %s: %s", self._host, err)
+        except Exception:  # noqa: BLE001 - library raises broad connection types
+            LOGGER.debug("REST device info request failed")
             return None
         return info.get("device") if info else None
 
@@ -186,8 +210,8 @@ class FrameDevice:
             mute = await rc.action("GetMute").async_call(
                 InstanceID=0, Channel="Master"
             )
-        except Exception as err:  # noqa: BLE001
-            LOGGER.debug("UPnP volume query failed: %s", err)
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("UPnP volume query failed")
             self._upnp_device = None
             return None, None
         return vol["CurrentVolume"] / 100, bool(mute["CurrentMute"])
@@ -216,8 +240,8 @@ class FrameDevice:
         """Status payload for one app ({visible, running, ...}), or None."""
         try:
             return await self._ensure_rest().rest_app_status(app_id)
-        except Exception as err:  # noqa: BLE001
-            LOGGER.debug("REST app status failed for %s: %s", app_id, err)
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("REST app status request failed")
             return None
 
     async def _async_art_read(
@@ -308,8 +332,8 @@ class FrameDevice:
             return None
         try:
             return await self._art.get_thumbnail(content_id)
-        except Exception as err:  # noqa: BLE001
-            LOGGER.debug("thumbnail fetch failed for %s: %s", content_id, err)
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Thumbnail fetch failed")
             return None
 
     async def async_change_matte(self, content_id: str, matte_id: str) -> None:
@@ -373,38 +397,39 @@ class FrameDevice:
 
     async def async_app_list(self) -> list[dict[str, Any]] | None:
         """Installed apps, or None (not supported on all TVs / TV not ready)."""
+        remote = self._remote
+        if remote is None:
+            return None
         try:
-            apps = await self._remote.app_list()
-        except Exception as err:  # noqa: BLE001
-            LOGGER.debug("app_list failed: %s", err)
-            self._maybe_drop_rejected_remote_token(err)
+            apps = await remote.app_list()
+        except RemotePairingRequired:
+            self.remote_confirmed = False
+            return None
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Remote app-list request failed")
             return None
         self.remote_confirmed = True
+        self._capture_remote_token()
         return apps
 
-    def _maybe_drop_rejected_remote_token(self, err: Exception) -> None:
-        """Fall back to a tokenless remote client when the token is rejected.
-
-        The remote channel answers a connect carrying a token it does not
-        recognize (e.g. one issued on the art channel) with an instant
-        ``ms.channel.timeOut`` and never shows the on-TV Allow prompt.
-        Reconnecting without a token makes the prompt render (while the TV
-        shows normal content); once granted, the TV issues a proper remote
-        token which the coordinator's capture persists into the entry.
-        """
-        if self._remote_tokenless or "ms.channel.timeOut" not in str(err):
+    def _capture_remote_token(self) -> None:
+        """Synchronously persist a changed canonical remote token."""
+        remote = self._remote
+        if remote is None:
             return
-        self._remote_tokenless = True
-        LOGGER.warning(
-            "The TV rejected the stored token on the remote-control channel; "
-            "retrying without a token — accept the Allow prompt on the TV "
-            "(it only renders while the TV is showing normal content)"
-        )
-        # Generous timeout: each tokenless connect holds the on-TV Allow
-        # prompt open for this long, giving the user a real chance to react.
-        self._remote = SamsungTVWSAsyncRemote(
-            self._host, token=None, port=PORT_WS, name=CLIENT_NAME, timeout=30
-        )
+        token = remote.token
+        if (
+            token
+            and token != self._token
+            and self._remote_token_callback is not None
+        ):
+            self._remote_token_callback(token)
+
+    def _request_remote_reauth(self) -> None:
+        """Signal that a foreground operation needs TV authorization."""
+        self.remote_confirmed = False
+        if self._remote_reauth_callback is not None:
+            self._remote_reauth_callback()
 
     async def _async_remote_commands(self, commands: list[SamsungTVCommand]) -> None:
         """Send on the persistent remote; reset once if the connection is stale.
@@ -413,17 +438,29 @@ class FrameDevice:
         invalidated when the TV power-cycles; the first send after a cycle
         fails, so close and retry once before giving up.
         """
+        remote = self._remote
+        if remote is None:
+            self._request_remote_reauth()
+            raise RemotePairingRequired("Remote authorization required")
         try:
-            await self._remote.send_commands(commands)
-        except Exception as err:  # noqa: BLE001
-            LOGGER.debug("remote send failed, retrying on a fresh connection: %s", err)
-            self._maybe_drop_rejected_remote_token(err)
+            await remote.send_commands(commands)
+        except RemotePairingRequired:
+            self._request_remote_reauth()
+            raise
+        except Exception:  # noqa: BLE001
+            LOGGER.debug(
+                "Remote send failed; retrying once on a fresh connection"
+            )
+            with contextlib.suppress(Exception, TimeoutError):
+                async with asyncio.timeout(ART_CLOSE_DEADLINE):
+                    await remote.close()
             try:
-                await self._remote.close()
-            except Exception:  # noqa: BLE001
-                pass
-            await self._remote.send_commands(commands)
+                await remote.send_commands(commands)
+            except RemotePairingRequired:
+                self._request_remote_reauth()
+                raise
         self.remote_confirmed = True
+        self._capture_remote_token()
 
     def set_art_event_callback(self, callback: ArtEventCallback) -> None:
         """Set the loop-native callback receiving unsolicited Art events."""
@@ -431,8 +468,11 @@ class FrameDevice:
 
     async def _async_close_remote(self) -> None:
         """Close the remote without allowing shutdown to wedge indefinitely."""
+        remote = self._remote
+        if remote is None:
+            return
         async with asyncio.timeout(ART_CLOSE_DEADLINE):
-            await self._remote.close()
+            await remote.close()
 
     async def async_stop(self) -> None:
         """Join the one task-factory-owned terminal shutdown."""

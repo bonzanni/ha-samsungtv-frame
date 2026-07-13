@@ -373,22 +373,32 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         self.async_update_listeners()
 
     @callback
-    def _async_capture_token(self) -> None:
-        """Persist a token the TV issued after pairing, if one appeared.
-
-        Pairing granted access by client name without issuing a token; if the
-        TV hands one out on any later connection, store it in the config entry
-        so reconnects (and TV-side grant loss) don't depend on the name grant.
-        """
-        token = self.device.newest_token
-        if token is None or token == self.config_entry.data.get(CONF_TOKEN):
+    def handle_remote_token(self, token: str) -> None:
+        """Adopt and persist a changed canonical remote token."""
+        if not token or token == self.config_entry.data.get(CONF_TOKEN):
             return
         self.device.update_token(token)
         self.hass.config_entries.async_update_entry(
             self.config_entry,
             data={**self.config_entry.data, CONF_TOKEN: token},
         )
-        LOGGER.info("Captured a newly issued TV token into the config entry")
+        LOGGER.info("Captured a newly issued remote credential")
+
+    @callback
+    def handle_remote_reauth(self) -> None:
+        """Start Home Assistant reauthorization for this entry."""
+        self.config_entry.async_start_reauth(self.hass)
+
+    @callback
+    def _async_capture_token(self) -> None:
+        """Persist a remote token observed by the heartbeat safety net.
+
+        Foreground operations capture first; this path only covers a remote
+        token that became visible outside the immediate command lifecycle.
+        """
+        token = self.device.newest_token
+        if token is not None:
+            self.handle_remote_token(token)
 
     @callback
     def async_notify_turn_on(self) -> None:
@@ -452,7 +462,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
     @callback
     def handle_art_event(self, event: str, data: Any) -> None:
         """Handle an unsolicited Art event on the Home Assistant loop."""
-        LOGGER.debug("Art event: %s", data)
+        LOGGER.debug("Art event received")
         sub = data.get("event") if isinstance(data, dict) else None
         if sub in ("art_mode_changed", "artmode_status"):
             value = data.get("value") or data.get("status")

@@ -39,14 +39,39 @@ async def test_setup_and_unload(hass, mock_device):
         assert setup_order == ["event-callback"]
         setup_order.append("state-callback")
 
-    async def _start_session():
+    def _capture_token_callback(_callback):
+        if _callback is None:
+            setup_order.append("token-clear")
+            return
         assert setup_order == ["event-callback", "state-callback"]
+        setup_order.append("token-callback")
+
+    def _capture_reauth_callback(_callback):
+        if _callback is None:
+            setup_order.append("reauth-clear")
+            return
+        assert setup_order == [
+            "event-callback",
+            "state-callback",
+            "token-callback",
+        ]
+        setup_order.append("reauth-callback")
+
+    async def _start_session():
+        assert setup_order == [
+            "event-callback",
+            "state-callback",
+            "token-callback",
+            "reauth-callback",
+        ]
         setup_order.append("session-start")
 
     async def _device_info():
         assert setup_order == [
             "event-callback",
             "state-callback",
+            "token-callback",
+            "reauth-callback",
             "session-start",
         ]
         setup_order.append("first-refresh")
@@ -61,6 +86,12 @@ async def test_setup_and_unload(hass, mock_device):
     mock_device.set_art_event_callback.side_effect = _capture_event_callback
     mock_device.set_art_session_state_callback.side_effect = (
         _capture_state_callback
+    )
+    mock_device.set_remote_token_callback.side_effect = (
+        _capture_token_callback
+    )
+    mock_device.set_remote_reauth_callback.side_effect = (
+        _capture_reauth_callback
     )
     mock_device.async_start_art_session.side_effect = _start_session
     mock_device.async_device_info.side_effect = _device_info
@@ -97,10 +128,18 @@ async def test_setup_and_unload(hass, mock_device):
         mock_device.set_art_session_state_callback.assert_called_once_with(
             entry.runtime_data.handle_art_session_state
         )
+        mock_device.set_remote_token_callback.assert_called_once_with(
+            entry.runtime_data.handle_remote_token
+        )
+        mock_device.set_remote_reauth_callback.assert_called_once_with(
+            entry.runtime_data.handle_remote_reauth
+        )
         mock_device.async_start_art_session.assert_awaited_once()
         assert setup_order == [
             "event-callback",
             "state-callback",
+            "token-callback",
+            "reauth-callback",
             "session-start",
             "first-refresh",
         ]
@@ -125,6 +164,8 @@ async def test_setup_and_unload(hass, mock_device):
             mock_device.set_art_session_state_callback.call_args_list[-1]
             == call(None)
         )
+        assert mock_device.set_remote_token_callback.call_args_list[-1] == call(None)
+        assert mock_device.set_remote_reauth_callback.call_args_list[-1] == call(None)
 
 
 async def test_setup_tv_off_arms_session_without_art_io(hass, mock_device):
@@ -156,7 +197,7 @@ async def test_setup_tv_off_arms_session_without_art_io(hass, mock_device):
 
 
 async def test_setup_start_failure_clears_callback_and_bounds_cleanup(
-    hass, mock_device
+    hass, mock_device, caplog
 ):
     entry = _make_entry()
     cleanup_started = asyncio.Event()
@@ -164,6 +205,15 @@ async def test_setup_start_failure_clears_callback_and_bounds_cleanup(
     never_finishes = asyncio.Event()
     start_error = RuntimeError("session start failed")
     mock_device.async_start_art_session.side_effect = start_error
+    private_value = "private-remote-credential"
+
+    def _fail_token_callback_clear(callback):
+        if callback is None:
+            raise RuntimeError(private_value)
+
+    mock_device.set_remote_token_callback.side_effect = (
+        _fail_token_callback_clear
+    )
 
     async def _wedged_stop():
         cleanup_started.set()
@@ -210,6 +260,9 @@ async def test_setup_start_failure_clears_callback_and_bounds_cleanup(
         mock_device.set_art_session_state_callback.call_args_list[-1]
         == call(None)
     )
+    assert mock_device.set_remote_token_callback.call_args_list[-1] == call(None)
+    assert mock_device.set_remote_reauth_callback.call_args_list[-1] == call(None)
+    assert private_value not in caplog.text
 
 
 async def test_setup_first_refresh_failure_clears_callback_and_bounds_cleanup(
@@ -272,6 +325,8 @@ async def test_setup_first_refresh_failure_clears_callback_and_bounds_cleanup(
         mock_device.set_art_session_state_callback.call_args_list[-1]
         == call(None)
     )
+    assert mock_device.set_remote_token_callback.call_args_list[-1] == call(None)
+    assert mock_device.set_remote_reauth_callback.call_args_list[-1] == call(None)
 
 
 async def test_setup_platform_forward_failure_cleans_device_session(
@@ -343,6 +398,8 @@ async def test_setup_platform_forward_failure_cleans_device_session(
         mock_device.set_art_session_state_callback.call_args_list[-1]
         == call(None)
     )
+    assert mock_device.set_remote_token_callback.call_args_list[-1] == call(None)
+    assert mock_device.set_remote_reauth_callback.call_args_list[-1] == call(None)
     assert entry.runtime_data is forwarded_runtime[0]
 
 
@@ -359,6 +416,14 @@ async def test_unload_removes_state_callback_before_platforms_and_stop(
         assert callback is None
         order.append("state-clear")
 
+    def _set_token_callback(callback):
+        assert callback is None
+        order.append("token-clear")
+
+    def _set_reauth_callback(callback):
+        assert callback is None
+        order.append("reauth-clear")
+
     async def _unload_platforms(_entry, _platforms):
         order.append("platform-unload")
         return True
@@ -367,6 +432,8 @@ async def test_unload_removes_state_callback_before_platforms_and_stop(
         order.append("device-stop")
 
     mock_device.set_art_session_state_callback.side_effect = _set_callback
+    mock_device.set_remote_token_callback.side_effect = _set_token_callback
+    mock_device.set_remote_reauth_callback.side_effect = _set_reauth_callback
     mock_device.async_stop.side_effect = _stop
     with patch.object(
         hass.config_entries,
@@ -375,8 +442,16 @@ async def test_unload_removes_state_callback_before_platforms_and_stop(
     ):
         assert await async_unload_entry(hass, entry)
 
-    assert order == ["state-clear", "platform-unload", "device-stop"]
+    assert order == [
+        "state-clear",
+        "token-clear",
+        "reauth-clear",
+        "platform-unload",
+        "device-stop",
+    ]
     mock_device.set_art_session_state_callback.assert_called_once_with(None)
+    mock_device.set_remote_token_callback.assert_called_once_with(None)
+    mock_device.set_remote_reauth_callback.assert_called_once_with(None)
 
 
 async def test_unload_restores_state_callback_when_platform_unload_fails(
@@ -398,6 +473,14 @@ async def test_unload_restores_state_callback_when_platform_unload_fails(
     assert mock_device.set_art_session_state_callback.call_args_list == [
         call(None),
         call(callback),
+    ]
+    assert mock_device.set_remote_token_callback.call_args_list == [
+        call(None),
+        call(coordinator.handle_remote_token),
+    ]
+    assert mock_device.set_remote_reauth_callback.call_args_list == [
+        call(None),
+        call(coordinator.handle_remote_reauth),
     ]
     mock_device.async_stop.assert_not_awaited()
 
@@ -426,5 +509,13 @@ async def test_unload_restores_state_callback_when_platform_unload_raises(
     assert mock_device.set_art_session_state_callback.call_args_list == [
         call(None),
         call(callback),
+    ]
+    assert mock_device.set_remote_token_callback.call_args_list == [
+        call(None),
+        call(coordinator.handle_remote_token),
+    ]
+    assert mock_device.set_remote_reauth_callback.call_args_list == [
+        call(None),
+        call(coordinator.handle_remote_reauth),
     ]
     mock_device.async_stop.assert_not_awaited()

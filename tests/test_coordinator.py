@@ -1,12 +1,20 @@
 # tests/test_coordinator.py
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, SOURCE_REAUTH
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.samsungtv_frame.art_session import ArtSessionState
-from custom_components.samsungtv_frame.const import ART_FAIL_UNKNOWN_COUNT
+from custom_components.samsungtv_frame.const import (
+    ART_FAIL_UNKNOWN_COUNT,
+    CONF_HOST,
+    CONF_MAC,
+    CONF_TOKEN,
+    DOMAIN,
+)
 from custom_components.samsungtv_frame.coordinator import FrameCoordinator
 from custom_components.samsungtv_frame.models import FrameData, TvMode
 
@@ -156,7 +164,9 @@ async def test_art_event_reads_status_key(hass, mock_device):
     assert coord.data.tv_mode is TvMode.ART_MODE
 
 
-async def test_art_event_unknown_subevent_no_push(hass, mock_device):
+async def test_art_event_unknown_subevent_no_push(hass, mock_device, caplog):
+    caplog.set_level(logging.DEBUG, logger="custom_components.samsungtv_frame")
+    private_value = "private-art-payload"
     coord = _make(hass, mock_device)
     coord.data = FrameData(
         reachable=True,
@@ -166,8 +176,13 @@ async def test_art_event_unknown_subevent_no_push(hass, mock_device):
         current_art=None,
     )
     with patch.object(coord, "async_set_updated_data") as push:
-        coord.handle_art_event("d2d_service_message", {"event": "some_other_event"})
+        coord.handle_art_event(
+            "d2d_service_message",
+            {"event": "some_other_event", "private": private_value},
+        )
         push.assert_not_called()
+    assert private_value not in caplog.text
+    assert "Art event received" in caplog.text
 
 
 async def test_off_resets_art_mode(hass, mock_device):
@@ -1266,6 +1281,73 @@ async def test_reachable_heartbeat_captures_token_while_art_unavailable(
     update.assert_called_once()
     assert update.call_args.kwargs["data"]["token"] == "fresh-token"
     _assert_art_getter_count(mock_device, 0)
+
+
+def test_handle_remote_token_adopts_clients_before_updating_entry(
+    hass, mock_device
+):
+    coord = _make(hass, mock_device)
+    coord.config_entry.data = {CONF_TOKEN: "old-token"}
+    order: list[str] = []
+    mock_device.update_token.side_effect = lambda token: order.append("device")
+
+    def _update_entry(entry, *, data):
+        assert entry is coord.config_entry
+        assert data[CONF_TOKEN] == "new-token"
+        order.append("entry")
+
+    with patch.object(
+        hass.config_entries,
+        "async_update_entry",
+        side_effect=_update_entry,
+    ) as update:
+        coord.handle_remote_token("new-token")
+
+    assert order == ["device", "entry"]
+    mock_device.update_token.assert_called_once_with("new-token")
+    update.assert_called_once()
+
+
+@pytest.mark.parametrize("token", ["", "old-token"])
+def test_handle_remote_token_ignores_missing_or_unchanged(
+    hass, mock_device, token
+):
+    coord = _make(hass, mock_device)
+    coord.config_entry.data = {CONF_TOKEN: "old-token"}
+
+    with patch.object(hass.config_entries, "async_update_entry") as update:
+        coord.handle_remote_token(token)
+
+    mock_device.update_token.assert_not_called()
+    update.assert_not_called()
+
+
+async def test_duplicate_remote_reauth_is_suppressed_by_home_assistant(
+    hass, mock_device
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Frame TV",
+        data={
+            CONF_HOST: "1.2.3.4",
+            CONF_MAC: "A0:D0:5B:86:CE:B7",
+            CONF_TOKEN: "tok",
+        },
+        unique_id="a0:d0:5b:86:ce:b7",
+    )
+    entry.add_to_hass(hass)
+    coord = FrameCoordinator(hass, entry, mock_device)
+
+    coord.handle_remote_reauth()
+    coord.handle_remote_reauth()
+    await hass.async_block_till_done()
+
+    reauth_flows = [
+        flow
+        for flow in hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+        if flow["context"]["source"] == SOURCE_REAUTH
+    ]
+    assert len(reauth_flows) == 1
 
 
 async def test_poll_no_token_update_when_none_issued(hass, mock_device):
