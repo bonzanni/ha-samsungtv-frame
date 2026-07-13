@@ -13,6 +13,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from samsungtvws.async_remote import SamsungTVWSAsyncRemote
 from samsungtvws.async_rest import SamsungTVAsyncRest
 from samsungtvws.command import SamsungTVCommand
+from samsungtvws.exceptions import ConnectionFailure
 from samsungtvws.remote import ChannelEmitCommand, SendRemoteKey
 from wakeonlan import send_magic_packet
 
@@ -177,6 +178,8 @@ class FrameDevice:
         retry: bool = True,
     ) -> Any:
         """Run an Art operation, retrying one ordinary stale failure."""
+        if self._stopped:
+            raise ConnectionFailure("Art device is stopped")
         try:
             return await operation()
         except TimeoutError:
@@ -186,6 +189,8 @@ class FrameDevice:
             await self._art.close()
             if not retry:
                 raise
+            if self._stopped:
+                raise ConnectionFailure("Art device is stopped")
             try:
                 return await operation()
             except Exception:
@@ -199,6 +204,8 @@ class FrameDevice:
         # Callers pass attempts=1 when the TV is shutting down (its art socket
         # hangs until timeout, so a retry only doubles the poll latency).
         for attempt in range(1, attempts + 1):
+            if self._stopped:
+                return None
             try:
                 value = await self._art.get_artmode()
             except TimeoutError:
@@ -264,6 +271,8 @@ class FrameDevice:
 
         Store artworks (SAM-*) are DRM-refused by the TV and yield None.
         """
+        if self._stopped:
+            return None
         try:
             return await self._art.get_thumbnail(content_id)
         except Exception as err:  # noqa: BLE001

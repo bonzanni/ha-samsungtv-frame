@@ -92,6 +92,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
         self._lifecycle_lock = asyncio.Lock()
         self._pending: dict[str, _PendingResponse] = {}
         self._uuidless_pending: _PendingResponse | None = None
+        self._transfer_tasks: set[asyncio.Task[Any]] = set()
         self._closing = False
 
     async def open(self) -> ClientConnection:
@@ -361,65 +362,95 @@ class FrameArt(SamsungTVWSAsyncConnection):
             async with asyncio.timeout(ART_CLOSE_DEADLINE):
                 await writer.wait_closed()
 
+    def _track_transfer(self) -> asyncio.Task[Any] | None:
+        """Register the current transfer task before its first await."""
+        if self._closing:
+            raise ConnectionFailure("Art connection is closing")
+        task = asyncio.current_task()
+        if task is not None:
+            self._transfer_tasks.add(task)
+        return task
+
+    def _untrack_transfer(self, task: asyncio.Task[Any] | None) -> None:
+        """Remove a completed or cancelled transfer task."""
+        if task is not None:
+            self._transfer_tasks.discard(task)
+
+    @staticmethod
+    def _consume_or_cancel_future(future: asyncio.Future[Any]) -> None:
+        """Finish an abandoned waiter without an unretrieved exception."""
+        if not future.done():
+            future.cancel()
+        elif not future.cancelled():
+            future.exception()
+
     async def get_thumbnail(self, content_id: str) -> bytes | None:
         """Download one thumbnail over a short-lived D2D stream."""
-        d2d_id = str(uuid.uuid4())
+        transfer = self._track_transfer()
         try:
-            payload = await self.request(
-                "get_thumbnail_list",
-                request_id=d2d_id,
-                content_id_list=[{"content_id": content_id}],
-                conn_info={
-                    "d2d_mode": "socket",
-                    "connection_id": helper.generate_connection_id(),
-                    "id": d2d_id,
-                },
-            )
-        except ResponseError:
-            return None
+            d2d_id = str(uuid.uuid4())
+            try:
+                payload = await self.request(
+                    "get_thumbnail_list",
+                    request_id=d2d_id,
+                    content_id_list=[{"content_id": content_id}],
+                    conn_info={
+                        "d2d_mode": "socket",
+                        "connection_id": helper.generate_connection_id(),
+                        "id": d2d_id,
+                    },
+                )
+            except ResponseError:
+                return None
 
-        conn_info = payload.get("conn_info", {})
-        if isinstance(conn_info, str):
-            conn_info = json.loads(conn_info)
-        reader, writer = await self._open_d2d(conn_info)
-        try:
-            result = None
-            total = 1
-            current = -1
-            while current + 1 < total:
-                header, result = await self._read_d2d_file(reader)
-                current = int(header["num"])
-                total = int(header["total"])
-            return result
+            conn_info = payload.get("conn_info", {})
+            if isinstance(conn_info, str):
+                conn_info = json.loads(conn_info)
+            reader, writer = await self._open_d2d(conn_info)
+            try:
+                result = None
+                total = 1
+                current = -1
+                while current + 1 < total:
+                    header, result = await self._read_d2d_file(reader)
+                    current = int(header["num"])
+                    total = int(header["total"])
+                return result
+            finally:
+                await self._close_d2d_writer(writer)
         finally:
-            await self._close_d2d_writer(writer)
+            self._untrack_transfer(transfer)
 
     async def upload(self, data: bytes, file_type: str, matte: str) -> str:
         """Upload image bytes as one serialized, non-retried transaction."""
-        async with self._operation_lock:
-            await self.start_listening()
-            try:
+        transfer = self._track_transfer()
+        try:
+            async with self._operation_lock:
+                await self.start_listening()
                 try:
-                    version = await self._request_unlocked(
-                        "api_version",
-                        expected_sub_event=None,
-                        request_id=None,
-                    )
-                except ResponseError:
-                    version = None
-                if (
-                    isinstance(version, dict)
-                    and version.get("version") == "0.97"
-                ):
-                    return await self._upload_ws_binary_unlocked(
+                    try:
+                        version = await self._request_unlocked(
+                            "api_version",
+                            expected_sub_event=None,
+                            request_id=None,
+                        )
+                    except ResponseError:
+                        version = None
+                    if (
+                        isinstance(version, dict)
+                        and version.get("version") == "0.97"
+                    ):
+                        return await self._upload_ws_binary_unlocked(
+                            data, file_type, matte
+                        )
+                    return await self._upload_d2d_unlocked(
                         data, file_type, matte
                     )
-                return await self._upload_d2d_unlocked(
-                    data, file_type, matte
-                )
-            except TimeoutError:
-                await self.close()
-                raise
+                except TimeoutError:
+                    await self.close()
+                    raise
+        finally:
+            self._untrack_transfer(transfer)
 
     async def _upload_d2d_unlocked(
         self, data: bytes, file_type: str, matte: str
@@ -483,8 +514,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
         finally:
             if self._uuidless_pending is completion:
                 self._uuidless_pending = None
-            if not completion.future.done():
-                completion.future.cancel()
+            self._consume_or_cancel_future(completion.future)
 
     async def _upload_ws_binary_unlocked(
         self, data: bytes, file_type: str, matte: str
@@ -533,8 +563,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
         finally:
             if self._pending.get(upload_id) is completion:
                 self._pending.pop(upload_id)
-            if not completion.future.done():
-                completion.future.cancel()
+            self._consume_or_cancel_future(completion.future)
 
     async def _request_unlocked(
         self,
@@ -563,9 +592,9 @@ class FrameArt(SamsungTVWSAsyncConnection):
             if connection is None:
                 raise ConnectionFailure("Art connection closed")
             command = ArtChannelEmitCommand.art_app_request(payload)
-            await self._send_command(connection, command, 0)
             try:
                 async with asyncio.timeout(ART_REQUEST_DEADLINE):
+                    await self._send_command(connection, command, 0)
                     response = await future
             except TimeoutError:
                 await self.close()
@@ -591,6 +620,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
                 self._pending.pop(correlation_id)
             if self._uuidless_pending is pending:
                 self._uuidless_pending = None
+            self._consume_or_cancel_future(future)
 
     async def _receive_loop(self) -> None:
         """Receive and dispatch each websocket frame exactly once."""
@@ -623,7 +653,9 @@ class FrameArt(SamsungTVWSAsyncConnection):
             return
 
         sub_event = payload.get("event")
-        message_id = payload.get("request_id", payload.get("id"))
+        message_id = payload.get("request_id")
+        if not isinstance(message_id, str) or not message_id:
+            message_id = payload.get("id")
         pending = (
             self._pending.get(message_id) if isinstance(message_id, str) else None
         )
@@ -677,22 +709,45 @@ class FrameArt(SamsungTVWSAsyncConnection):
                 future.set_exception(error)
 
     async def close(self) -> None:
-        """Cancel the receiver and close the websocket within a deadline."""
+        """Cancel owned tasks and close the websocket within a deadline."""
         async with self._lifecycle_lock:
             self._closing = True
-            receiver = self._recv_loop
-            self._recv_loop = None
-            if receiver is not None and receiver is not asyncio.current_task():
-                receiver.cancel()
-                with contextlib.suppress(asyncio.CancelledError, TimeoutError):
-                    async with asyncio.timeout(ART_CLOSE_DEADLINE):
-                        await receiver
-            connection, self.connection = self.connection, None
-            if connection is not None:
-                with contextlib.suppress(Exception, TimeoutError):
-                    async with asyncio.timeout(ART_CLOSE_DEADLINE):
-                        await connection.close()
-            self._fail_pending(ConnectionFailure("Art connection closed"))
+            try:
+                current = asyncio.current_task()
+                transfers = [
+                    task
+                    for task in self._transfer_tasks
+                    if task is not current and not task.done()
+                ]
+                for task in transfers:
+                    task.cancel()
+                if transfers:
+                    with contextlib.suppress(
+                        asyncio.CancelledError, TimeoutError
+                    ):
+                        async with asyncio.timeout(ART_CLOSE_DEADLINE):
+                            await asyncio.gather(
+                                *transfers, return_exceptions=True
+                            )
+                    self._transfer_tasks.difference_update(transfers)
+
+                receiver = self._recv_loop
+                self._recv_loop = None
+                if receiver is not None and receiver is not current:
+                    receiver.cancel()
+                    with contextlib.suppress(
+                        asyncio.CancelledError, TimeoutError
+                    ):
+                        async with asyncio.timeout(ART_CLOSE_DEADLINE):
+                            await receiver
+                connection, self.connection = self.connection, None
+                if connection is not None:
+                    with contextlib.suppress(Exception, TimeoutError):
+                        async with asyncio.timeout(ART_CLOSE_DEADLINE):
+                            await connection.close()
+                self._fail_pending(ConnectionFailure("Art connection closed"))
+            finally:
+                self._closing = False
 
     def is_alive(self) -> bool:
         """Return whether both the websocket and receiver are active."""

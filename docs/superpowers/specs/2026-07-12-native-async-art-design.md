@@ -1,7 +1,7 @@
 # Native Async Art Transport — Design
 
-**Date:** 2026-07-12  
-**Status:** Approved for implementation  
+**Date:** 2026-07-12
+**Status:** Approved for implementation
 **Release:** `v0.6.7`
 
 ## Goal

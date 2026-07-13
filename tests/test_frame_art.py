@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -481,6 +482,50 @@ async def test_thumbnail_cancellation_propagates_and_closes_writer():
     assert writer.waited_closed
 
 
+async def test_close_cancels_blocked_thumbnail_and_cleans_writer():
+    art = make_art()
+    writer = FakeWriter()
+    art.request = AsyncMock(
+        return_value={"conn_info": {"ip": "10.0.0.8", "port": 4321}}
+    )
+    open_connection = AsyncMock(
+        return_value=(stream_reader(eof=False), writer)
+    )
+    thumbnail = None
+
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            open_connection,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+            0.01,
+        ),
+    ):
+        thumbnail = asyncio.create_task(art.get_thumbnail("MY_F0001"))
+        while not open_connection.await_count:
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        started = asyncio.get_running_loop().time()
+        try:
+            await asyncio.wait_for(art.close(), timeout=0.05)
+            elapsed = asyncio.get_running_loop().time() - started
+            assert thumbnail.done()
+            with pytest.raises(asyncio.CancelledError):
+                await thumbnail
+        finally:
+            if not thumbnail.done():
+                thumbnail.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await thumbnail
+
+    assert elapsed < 0.05
+    assert writer.closed
+    assert writer.waited_closed
+    assert not art._transfer_tasks
+
+
 async def test_thumbnail_writer_close_deadline_bounds_blocking_wait():
     art = make_art()
     writer = FakeWriter(wait_closed_delay=0.1)
@@ -698,6 +743,59 @@ async def test_upload_cancellation_cleans_completion_and_writer():
     assert writer.closed
     assert writer.waited_closed
     assert art._uuidless_pending is None
+
+
+async def test_close_cancels_blocked_upload_and_cleans_writer():
+    art = make_art()
+    art.connection = FakeWebSocket([])
+    writer = BlockingWriter()
+    request = AsyncMock(
+        side_effect=[
+            {"version": "4.3"},
+            {
+                "event": "ready_to_use",
+                "conn_info": {
+                    "ip": "10.0.0.8",
+                    "port": 4321,
+                    "key": "secret",
+                },
+            },
+        ]
+    )
+
+    with (
+        patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "_request_unlocked", request),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            AsyncMock(return_value=(stream_reader(), writer)),
+        ),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+            0.01,
+        ),
+    ):
+        upload = asyncio.create_task(art.upload(b"image", "jpg", "none"))
+        await writer.drain_started.wait()
+        started = asyncio.get_running_loop().time()
+        try:
+            await asyncio.wait_for(art.close(), timeout=0.05)
+            elapsed = asyncio.get_running_loop().time() - started
+            assert upload.done()
+            with pytest.raises(asyncio.CancelledError):
+                await upload
+        finally:
+            writer.drain_release.set()
+            if not upload.done():
+                try:
+                    await upload
+                except (Exception, asyncio.CancelledError):
+                    pass
+
+    assert elapsed < 0.05
+    assert writer.closed
+    assert writer.waited_closed
+    assert not art._transfer_tasks
 
 
 async def test_upload_writer_close_failure_preserves_drain_error():
@@ -1117,6 +1215,33 @@ async def test_request_correlates_response_by_uuid():
         await art.close()
 
 
+async def test_request_falls_back_to_id_when_request_id_is_null():
+    ws = FakeWebSocket(handshake_frames())
+    art = make_art()
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            AsyncMock(return_value=ws),
+        ),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.ART_REQUEST_DEADLINE",
+            0.01,
+        ),
+    ):
+        request_task = asyncio.create_task(art.request("get_artmode_status"))
+        await wait_for_sent(ws, 1)
+        request_id = sent_art_request(ws, 0)["id"]
+        await ws.frames.put(
+            art_response(request_id=None, id=request_id, value="on")
+        )
+        assert await request_task == {
+            "request_id": None,
+            "id": request_id,
+            "value": "on",
+        }
+        await art.close()
+
+
 async def test_request_correlates_uuidless_expected_sub_event():
     ws = FakeWebSocket(handshake_frames())
     art = make_art()
@@ -1333,6 +1458,86 @@ async def test_request_timeout_closes_transport():
     assert ws.closed
     assert art.connection is None
     assert not art._pending
+
+
+async def test_request_deadline_includes_blocked_websocket_send():
+    art = make_art()
+    ws = FakeWebSocket([])
+    art.connection = ws
+    send_started = asyncio.Event()
+    never_release = asyncio.Event()
+
+    async def blocked_send(*_args):
+        send_started.set()
+        await never_release.wait()
+
+    with (
+        patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "_send_command", side_effect=blocked_send),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.ART_REQUEST_DEADLINE",
+            0.01,
+        ),
+        pytest.raises(TimeoutError),
+    ):
+        await asyncio.wait_for(
+            art.request("get_artmode_status"), timeout=0.05
+        )
+
+    assert send_started.is_set()
+    assert ws.closed
+    assert art.connection is None
+    assert not art._pending
+
+
+async def test_close_during_send_retrieves_failed_pending_future():
+    art = make_art()
+    art.connection = FakeWebSocket([])
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    exception_contexts = []
+    previous_handler = loop.get_exception_handler()
+
+    async def blocked_send(*_args):
+        send_started.set()
+        await release_send.wait()
+        raise OSError("send failed after close")
+
+    request_task = None
+    loop.set_exception_handler(
+        lambda _loop, context: exception_contexts.append(context)
+    )
+    try:
+        with (
+            patch.object(art, "start_listening", AsyncMock()),
+            patch.object(art, "_send_command", side_effect=blocked_send),
+        ):
+            request_task = asyncio.create_task(
+                art.request("get_artmode_status")
+            )
+            await send_started.wait()
+            await art.close()
+            release_send.set()
+            with pytest.raises(OSError, match="send failed after close"):
+                await request_task
+            request_task = None
+            gc.collect()
+            await asyncio.sleep(0)
+    finally:
+        release_send.set()
+        if request_task is not None and not request_task.done():
+            request_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request_task
+        loop.set_exception_handler(previous_handler)
+
+    assert not art._pending
+    assert not [
+        context
+        for context in exception_contexts
+        if context.get("message") == "Future exception was never retrieved"
+    ]
 
 
 async def test_close_is_idempotent():

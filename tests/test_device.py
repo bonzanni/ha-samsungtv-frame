@@ -3,6 +3,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from samsungtvws.exceptions import ConnectionFailure
 
 from custom_components.samsungtv_frame.device import FrameDevice
 
@@ -51,6 +52,81 @@ async def test_get_artmode_retries_stale_failure_once(device):
     device._art.close = AsyncMock()
     assert await device.async_get_artmode() is True
     device._art.close.assert_awaited_once()
+
+
+async def test_get_artmode_does_not_retry_when_stop_lands_during_failure(device):
+    first_call_started = asyncio.Event()
+    release_first_call = asyncio.Event()
+
+    async def get_artmode():
+        if device._art.get_artmode.await_count == 1:
+            first_call_started.set()
+            await release_first_call.wait()
+            raise OSError("shutdown closed the socket")
+        await device._art.start_listening()
+        return "on"
+
+    device._art.get_artmode = AsyncMock(side_effect=get_artmode)
+    device._art.start_listening = AsyncMock()
+    device._art.close = AsyncMock()
+    device._remote.close = AsyncMock()
+
+    getter = asyncio.create_task(device.async_get_artmode())
+    await first_call_started.wait()
+    await device.async_stop()
+    release_first_call.set()
+
+    assert await getter is None
+    device._art.get_artmode.assert_awaited_once()
+    device._art.start_listening.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("method", "args", "delegate"),
+    [
+        ("async_get_artmode", (), "get_artmode"),
+        ("async_get_current_art", (), "get_current"),
+        ("async_get_art_brightness", (), "get_brightness"),
+        ("async_get_art_thumbnail", ("MY_F0001",), "get_thumbnail"),
+        ("async_get_color_temperature", (), "get_color_temperature"),
+    ],
+)
+async def test_art_getters_return_none_without_opening_after_stop(
+    device, method, args, delegate
+):
+    device._stopped = True
+    operation = AsyncMock()
+    setattr(device._art, delegate, operation)
+
+    assert await getattr(device, method)(*args) is None
+    operation.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("method", "args", "delegate"),
+    [
+        ("async_set_artmode", (True,), "set_artmode"),
+        ("async_set_art_brightness", (6,), "set_brightness"),
+        ("async_select_art", ("MY_F0001", True), "select_image"),
+        ("async_upload_art", (b"image", "jpg", "none"), "upload"),
+        ("async_delete_art", ("MY_F0001",), "delete"),
+        ("async_change_matte", ("MY_F0001", "none"), "change_matte"),
+        ("async_set_photo_filter", ("MY_F0001", "ink"), "set_photo_filter"),
+        ("async_set_favourite", ("MY_F0001", True), "set_favourite"),
+        ("async_set_color_temperature", (4,), "set_color_temperature"),
+        ("async_set_slideshow", (60, False, "MY-C0002"), "set_slideshow"),
+    ],
+)
+async def test_art_mutations_fail_without_opening_after_stop(
+    device, method, args, delegate
+):
+    device._stopped = True
+    operation = AsyncMock()
+    setattr(device._art, delegate, operation)
+
+    with pytest.raises(ConnectionFailure, match="stopped"):
+        await getattr(device, method)(*args)
+    operation.assert_not_awaited()
 
 
 async def test_get_artmode_does_not_retry_timeout(device):
