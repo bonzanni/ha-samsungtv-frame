@@ -13,7 +13,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from samsungtvws.async_remote import SamsungTVWSAsyncRemote
 from samsungtvws.async_rest import SamsungTVAsyncRest
 from samsungtvws.command import SamsungTVCommand
-from samsungtvws.exceptions import ConnectionFailure
+from samsungtvws.exceptions import ConnectionFailure, ResponseError
 from samsungtvws.remote import ChannelEmitCommand, SendRemoteKey
 from wakeonlan import send_magic_packet
 
@@ -228,6 +228,8 @@ class FrameDevice:
             return None
         try:
             return await operation()
+        except ResponseError:
+            return None
         except Exception as err:  # noqa: BLE001
             await self._art_session.async_connection_failed(err)
             return None
@@ -244,6 +246,8 @@ class FrameDevice:
             raise ConnectionFailure("Art session is unavailable")
         try:
             return await operation()
+        except ResponseError:
+            raise
         except Exception as err:  # noqa: BLE001
             await self._art_session.async_connection_failed(err)
             raise

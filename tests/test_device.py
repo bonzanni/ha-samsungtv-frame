@@ -4,7 +4,7 @@ from inspect import signature
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from samsungtvws.exceptions import ConnectionFailure
+from samsungtvws.exceptions import ConnectionFailure, ResponseError
 
 from custom_components.samsungtv_frame.art_session import (
     ArtSessionState,
@@ -145,6 +145,17 @@ async def test_ready_operation_failure_is_reported_to_session(device):
     device._art_session.async_connection_failed.assert_awaited_once_with(error)
 
 
+async def test_ready_art_read_response_error_keeps_session_ready(device):
+    error = ResponseError("command rejected")
+    device._art.get_artmode = AsyncMock(side_effect=error)
+
+    assert await device.async_get_artmode() is None
+
+    device._art.get_artmode.assert_awaited_once_with()
+    device._art_session.async_ensure_ready.assert_not_awaited()
+    device._art_session.async_connection_failed.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     ("method", "args", "delegate"),
     [
@@ -225,6 +236,21 @@ async def test_user_mutation_failure_is_not_retried(device):
     )
     device._art.set_artmode.assert_awaited_once_with(True)
     device._art_session.async_connection_failed.assert_awaited_once_with(error)
+
+
+async def test_user_mutation_response_error_keeps_session_ready(device):
+    error = ResponseError("command rejected")
+    device._art.set_artmode = AsyncMock(side_effect=error)
+
+    with pytest.raises(ResponseError) as raised:
+        await device.async_set_artmode(True)
+
+    assert raised.value is error
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.USER
+    )
+    device._art.set_artmode.assert_awaited_once_with(True)
+    device._art_session.async_connection_failed.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

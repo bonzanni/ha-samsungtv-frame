@@ -52,7 +52,7 @@ on every heartbeat; healthy state remains push-driven with periodic reconciliati
 the existing socket. No configuration migration is required when upgrading.
 
 Art commands, push events, thumbnails, uploads, pairing, and shutdown use cancellable
-async I/O. No configuration migration is required when upgrading to 0.6.7.
+async I/O.
 
 ## Setup
 Settings → Devices & Services → Add Integration → "Samsung Frame TV" → enter the IP.
