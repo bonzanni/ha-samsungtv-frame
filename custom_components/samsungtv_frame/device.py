@@ -20,9 +20,16 @@ from wakeonlan import send_magic_packet
 from .const import (
     ART_CLOSE_DEADLINE,
     CLIENT_NAME,
+    DOMAIN,
     LOGGER,
     PORT_REST,
     PORT_WS,
+)
+from .art_session import (
+    ArtSession,
+    ArtSessionState,
+    ArtSessionTrigger,
+    StateCallback,
 )
 from .frame_art import ArtEventCallback, FrameArt, TaskFactory
 
@@ -47,6 +54,7 @@ class FrameDevice:
         self._host = host
         self._mac = mac
         self._token = token
+        self._task_factory = task_factory
         # _rest is created lazily on first async_device_info call: aiohttp's connector
         # requires a running event loop, so we cannot create it here in __init__ (which
         # may be called from a sync context, e.g. in tests).
@@ -61,10 +69,15 @@ class FrameDevice:
             task_factory=task_factory,
             event_callback=None,
         )
+        self._art_session = ArtSession(
+            self._art,
+            task_factory=task_factory,
+        )
         # Once stopped (entry unload), no listener may be (re)started — an
         # in-flight restart task finishing after unload would otherwise
         # resurrect a connection nothing will ever close.
         self._stopped = False
+        self._stop_task: asyncio.Task[None] | None = None
         # UPnP DMR device (RenderingControl) — created lazily, dropped on
         # failure so a TV power cycle just triggers a fresh description fetch.
         self._upnp_device: UpnpDevice | None = None
@@ -81,6 +94,42 @@ class FrameDevice:
     @property
     def host(self) -> str:
         return self._host
+
+    @property
+    def art_ready(self) -> bool:
+        """Return whether the supervised Art receiver is ready."""
+        return self._art_session.ready
+
+    @property
+    def art_generation(self) -> int:
+        """Return the current successful Art transport generation."""
+        return self._art_session.generation
+
+    @property
+    def art_session_state(self) -> ArtSessionState:
+        """Return the supervised Art lifecycle state."""
+        return self._art_session.state
+
+    def observe_art_power(
+        self,
+        reachable: bool,
+        power_state: str | None,
+        reachable_edge: bool,
+    ) -> None:
+        """Synchronously pass a power observation to the Art session."""
+        self._art_session.observe_power(
+            reachable, power_state, reachable_edge
+        )
+
+    def set_art_session_state_callback(
+        self, callback: StateCallback | None
+    ) -> None:
+        """Replace the Art session state callback."""
+        self._art_session.set_state_callback(callback)
+
+    async def async_start_art_session(self) -> None:
+        """Arm supervised Art recovery without opening the transport."""
+        await self._art_session.async_start()
 
     @property
     def newest_token(self) -> str | None:
@@ -171,84 +220,66 @@ class FrameDevice:
             LOGGER.debug("REST app status failed for %s: %s", app_id, err)
             return None
 
-    async def _async_art_command(
-        self,
-        operation: Callable[[], Awaitable[Any]],
-        *,
-        retry: bool = True,
+    async def _async_art_read(
+        self, operation: Callable[[], Awaitable[Any]]
     ) -> Any:
-        """Run an Art operation, retrying one ordinary stale failure."""
-        if self._stopped:
-            raise ConnectionFailure("Art device is stopped")
+        """Run one background read only on an already-ready session."""
+        if self._stopped or not self._art_session.ready:
+            return None
         try:
             return await operation()
-        except TimeoutError:
-            await self._art.close()
+        except Exception as err:  # noqa: BLE001
+            await self._art_session.async_connection_failed(err)
+            return None
+
+    async def _async_art_mutation(
+        self, operation: Callable[[], Awaitable[Any]]
+    ) -> Any:
+        """Run one user mutation after one session-owned readiness probe."""
+        if self._stopped:
+            raise ConnectionFailure("Art device is stopped")
+        if not await self._art_session.async_ensure_ready(
+            ArtSessionTrigger.USER
+        ):
+            raise ConnectionFailure("Art session is unavailable")
+        try:
+            return await operation()
+        except Exception as err:  # noqa: BLE001
+            await self._art_session.async_connection_failed(err)
             raise
-        except Exception:
-            await self._art.close()
-            if not retry:
-                raise
-            if self._stopped:
-                raise ConnectionFailure("Art device is stopped")
-            try:
-                return await operation()
-            except Exception:
-                await self._art.close()
-                raise
 
     async def async_get_artmode(self, attempts: int = 2) -> bool | None:
-        # Two attempts by default: the first call after a TV power cycle hits
-        # the stale cached connection and fails; the reset makes the retry
-        # reconnect, so the poll still resolves art mode in the same cycle.
-        # Callers pass attempts=1 when the TV is shutting down (its art socket
-        # hangs until timeout, so a retry only doubles the poll latency).
-        for attempt in range(1, attempts + 1):
-            if self._stopped:
-                return None
-            try:
-                value = await self._art.get_artmode()
-            except TimeoutError:
-                LOGGER.debug("get_artmode hit the deadline (attempt %s)", attempt)
-                await self._art.close()
-                return None
-            except Exception as err:  # noqa: BLE001
-                LOGGER.debug("get_artmode failed (attempt %s): %s", attempt, err)
-                await self._art.close()
-                continue
-            return value == "on"
-        return None
+        """Return Art Mode state without opening or retrying the session."""
+        del attempts  # Temporary Task 4 compatibility argument.
+        value = await self._async_art_read(self._art.get_artmode)
+        if value is None:
+            return None
+        return value == "on"
 
     async def async_set_artmode(self, on: bool) -> None:
-        await self._async_art_command(lambda: self._art.set_artmode(on))
+        await self._async_art_mutation(lambda: self._art.set_artmode(on))
 
     async def async_get_current_art(self) -> str | None:
         """Content id of the artwork currently selected, or None."""
-        try:
-            current = await self._async_art_command(self._art.get_current)
-        except Exception as err:  # noqa: BLE001
-            LOGGER.debug("get_current failed: %s", err)
-            return None
+        current = await self._async_art_read(self._art.get_current)
         if isinstance(current, dict):
             return current.get("content_id")
         return None
 
     async def async_get_art_brightness(self) -> int | None:
-        try:
-            value = await self._async_art_command(self._art.get_brightness)
-        except Exception as err:  # noqa: BLE001
-            LOGGER.debug("get_brightness failed: %s", err)
-            return None
+        value = await self._async_art_read(self._art.get_brightness)
         try:
             return int(value)
         except (TypeError, ValueError):
             return None
 
     async def async_set_art_brightness(self, value: int) -> None:
-        await self._async_art_command(lambda: self._art.set_brightness(value))
+        await self._async_art_mutation(
+            lambda: self._art.set_brightness(value)
+        )
 
     async def async_select_art(self, content_id: str, show: bool) -> None:
-        await self._async_art_command(
+        await self._async_art_mutation(
             lambda: self._art.select_image(content_id, None, show)
         )
 
@@ -256,22 +287,21 @@ class FrameDevice:
         self, data: bytes, file_type: str, matte: str
     ) -> str:
         """Upload image bytes; returns the TV-assigned content id."""
-
-        # No auto-retry: a retry after a partially-completed upload could
-        # duplicate the artwork. Reset the connection so the next call heals.
-        return await self._async_art_command(
-            lambda: self._art.upload(data, file_type, matte), retry=False
+        return await self._async_art_mutation(
+            lambda: self._art.upload(data, file_type, matte)
         )
 
     async def async_delete_art(self, content_id: str) -> None:
-        await self._async_art_command(lambda: self._art.delete(content_id))
+        await self._async_art_mutation(
+            lambda: self._art.delete(content_id)
+        )
 
     async def async_get_art_thumbnail(self, content_id: str) -> bytes | None:
         """JPEG thumbnail bytes for an artwork, or None.
 
         Store artworks (SAM-*) are DRM-refused by the TV and yield None.
         """
-        if self._stopped:
+        if self._stopped or not self._art_session.ready:
             return None
         try:
             return await self._art.get_thumbnail(content_id)
@@ -280,35 +310,31 @@ class FrameDevice:
             return None
 
     async def async_change_matte(self, content_id: str, matte_id: str) -> None:
-        await self._async_art_command(
+        await self._async_art_mutation(
             lambda: self._art.change_matte(content_id, matte_id)
         )
 
     async def async_set_photo_filter(self, content_id: str, filter_id: str) -> None:
-        await self._async_art_command(
+        await self._async_art_mutation(
             lambda: self._art.set_photo_filter(content_id, filter_id)
         )
 
     async def async_set_favourite(self, content_id: str, favourite: bool) -> None:
-        await self._async_art_command(
+        await self._async_art_mutation(
             lambda: self._art.set_favourite(content_id, favourite)
         )
 
     async def async_get_color_temperature(self) -> int | None:
-        try:
-            value = await self._async_art_command(
-                self._art.get_color_temperature
-            )
-        except Exception as err:  # noqa: BLE001
-            LOGGER.debug("get_color_temperature failed: %s", err)
-            return None
+        value = await self._async_art_read(
+            self._art.get_color_temperature
+        )
         try:
             return int(value)
         except (TypeError, ValueError):
             return None
 
     async def async_set_color_temperature(self, value: int) -> None:
-        await self._async_art_command(
+        await self._async_art_mutation(
             lambda: self._art.set_color_temperature(value)
         )
 
@@ -316,7 +342,7 @@ class FrameDevice:
         self, duration: int, shuffle: bool, category_id: str
     ) -> None:
         """Configure the art slideshow."""
-        await self._async_art_command(
+        await self._async_art_mutation(
             lambda: self._art.set_slideshow(duration, shuffle, category_id)
         )
 
@@ -402,22 +428,23 @@ class FrameDevice:
 
     @property
     def listener_alive(self) -> bool:
-        """Whether the native Art receiver is currently running."""
-        return self._art.is_alive()
+        """Temporary compatibility alias for supervised Art readiness."""
+        return self.art_ready
 
     async def async_start_art_listener(self) -> None:
+        """Temporarily arm and request one session-owned background probe."""
         if self._stopped:
             return
-        await self._art.start_listening()
+        await self._art_session.async_start()
+        if self._stopped:
+            return
+        await self._art_session.async_ensure_ready(
+            ArtSessionTrigger.BACKGROUND
+        )
 
     async def async_restart_art_listener(self) -> None:
-        """Close and restart the same native Art adapter."""
-        if self._stopped:
-            return
-        await self._art.close()
-        if self._stopped:
-            return
-        await self._art.start_listening()
+        """Temporary compatibility shim for session-owned recovery."""
+        await self.async_start_art_listener()
 
     async def _async_close_remote(self) -> None:
         """Close the remote without allowing shutdown to wedge indefinitely."""
@@ -425,10 +452,50 @@ class FrameDevice:
             await self._remote.close()
 
     async def async_stop(self) -> None:
+        """Join the one task-factory-owned terminal shutdown."""
+        while True:
+            task = self._stop_task
+            if task is not None and task.done() and (
+                task.cancelled() or task.exception() is not None
+            ):
+                self._stop_task = None
+                task = None
+            if task is None:
+                coroutine = self._async_stop_once()
+                try:
+                    task = self._task_factory(
+                        coroutine, f"{DOMAIN}-device-stop"
+                    )
+                except BaseException:
+                    coroutine.close()
+                    raise
+                self._stop_task = task
+                self._stopped = True
+            try:
+                await asyncio.shield(task)
+                return
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+                if task.cancelled():
+                    if self._stop_task is task:
+                        self._stop_task = None
+                    continue
+                raise
+
+    async def _async_stop_once(self) -> None:
+        """Stop the Art session and remote exactly once."""
         self._stopped = True
-        self._art.stop()
-        await asyncio.gather(
+        completion = asyncio.gather(
+            self._art_session.async_stop(),
             self._async_close_remote(),
-            self._art.close(),
             return_exceptions=True,
         )
+        while True:
+            try:
+                await asyncio.shield(completion)
+                return
+            except asyncio.CancelledError:
+                if completion.cancelled():
+                    raise

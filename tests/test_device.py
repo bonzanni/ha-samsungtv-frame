@@ -5,19 +5,55 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from samsungtvws.exceptions import ConnectionFailure
 
+from custom_components.samsungtv_frame.art_session import (
+    ArtSessionState,
+    ArtSessionTrigger,
+)
 from custom_components.samsungtv_frame.device import FrameDevice
 
 
 @pytest.fixture
 def device(hass):
-    return FrameDevice(
+    task_calls = []
+
+    def task_factory(coro, name):
+        task_calls.append(name)
+        return asyncio.create_task(coro, name=name)
+
+    device = FrameDevice(
         hass,
         host="1.2.3.4",
         mac="A0:D0:5B:86:CE:B7",
         token="tok",
         ssl_context=MagicMock(),
-        task_factory=lambda coro, name: asyncio.create_task(coro, name=name),
+        task_factory=task_factory,
     )
+    session = MagicMock()
+    session.ready = True
+    session.generation = 3
+    session.state = ArtSessionState.READY
+    session.async_start = AsyncMock()
+    session.async_ensure_ready = AsyncMock(return_value=True)
+    session.async_connection_failed = AsyncMock()
+    session.async_stop = AsyncMock()
+    device._art_session = session
+    device._test_task_factory_calls = task_calls
+    return device
+
+
+def test_device_constructs_art_session(hass):
+    task_factory = MagicMock()
+    device = FrameDevice(
+        hass,
+        host="1.2.3.4",
+        mac="A0:D0:5B:86:CE:B7",
+        token="tok",
+        ssl_context=MagicMock(),
+        task_factory=task_factory,
+    )
+
+    assert device._art_session._art is device._art
+    assert device._art_session._task_factory is task_factory
 
 
 async def test_device_info_returns_device_dict(hass, device):
@@ -47,63 +83,65 @@ async def test_turn_on_sends_magic_packet(hass, device):
     assert smp.call_args.args[0] == "A0:D0:5B:86:CE:B7"
 
 
-async def test_get_artmode_retries_stale_failure_once(device):
-    device._art.get_artmode = AsyncMock(side_effect=[OSError("stale"), "on"])
-    device._art.close = AsyncMock()
-    assert await device.async_get_artmode() is True
-    device._art.close.assert_awaited_once()
+async def test_background_art_getter_returns_none_without_session_open(device):
+    device._art_session.ready = False
+    device._art.get_artmode = AsyncMock()
+
+    assert await device.async_get_artmode() is None
+
+    device._art_session.async_ensure_ready.assert_not_awaited()
+    device._art.get_artmode.assert_not_awaited()
 
 
-async def test_get_artmode_does_not_retry_when_stop_lands_during_failure(device):
-    first_call_started = asyncio.Event()
-    release_first_call = asyncio.Event()
-
-    async def get_artmode():
-        if device._art.get_artmode.await_count == 1:
-            first_call_started.set()
-            await release_first_call.wait()
-            raise OSError("shutdown closed the socket")
-        await device._art.start_listening()
-        return "on"
-
-    device._art.get_artmode = AsyncMock(side_effect=get_artmode)
-    device._art.start_listening = AsyncMock()
-    device._art.close = AsyncMock()
-    device._remote.close = AsyncMock()
-
-    getter = asyncio.create_task(device.async_get_artmode())
-    await first_call_started.wait()
-    await device.async_stop()
-    release_first_call.set()
-
-    assert await getter is None
-    device._art.get_artmode.assert_awaited_once()
-    device._art.start_listening.assert_not_awaited()
-
-
-async def test_mutation_queued_before_stop_cannot_reopen_after_lock_release(
-    device,
+@pytest.mark.parametrize(
+    ("method", "args", "delegate"),
+    [
+        ("async_get_artmode", (), "get_artmode"),
+        ("async_get_current_art", (), "get_current"),
+        ("async_get_art_brightness", (), "get_brightness"),
+        ("async_get_art_thumbnail", ("MY_F0001",), "get_thumbnail"),
+        ("async_get_color_temperature", (), "get_color_temperature"),
+    ],
+)
+async def test_background_art_getters_never_ensure_or_open(
+    device, method, args, delegate
 ):
-    facade_check_passed = asyncio.Event()
-    original_set_artmode = device._art.set_artmode
+    device._art_session.ready = False
+    operation = AsyncMock()
+    setattr(device._art, delegate, operation)
 
-    async def queued_set_artmode(on):
-        facade_check_passed.set()
-        return await original_set_artmode(on)
+    assert await getattr(device, method)(*args) is None
+    device._art_session.async_ensure_ready.assert_not_awaited()
+    operation.assert_not_awaited()
 
-    device._art.set_artmode = queued_set_artmode
-    device._art.start_listening = AsyncMock()
-    device._remote.close = AsyncMock()
 
-    await device._art._operation_lock.acquire()
-    mutation = asyncio.create_task(device.async_set_artmode(True))
-    await facade_check_passed.wait()
-    await device.async_stop()
-    device._art._operation_lock.release()
+@pytest.mark.parametrize(
+    ("method", "delegate"),
+    [
+        ("async_get_artmode", "get_artmode"),
+        ("async_get_current_art", "get_current"),
+        ("async_get_art_brightness", "get_brightness"),
+        ("async_get_color_temperature", "get_color_temperature"),
+    ],
+)
+async def test_ready_art_getter_failure_is_reported_once(
+    device, method, delegate
+):
+    error = OSError("lost")
+    operation = AsyncMock(side_effect=error)
+    setattr(device._art, delegate, operation)
 
-    with pytest.raises(ConnectionFailure, match="stopped"):
-        await mutation
-    device._art.start_listening.assert_not_awaited()
+    assert await getattr(device, method)() is None
+    operation.assert_awaited_once()
+    device._art_session.async_connection_failed.assert_awaited_once_with(error)
+
+
+async def test_ready_operation_failure_is_reported_to_session(device):
+    error = OSError("lost")
+    device._art.get_artmode = AsyncMock(side_effect=error)
+
+    assert await device.async_get_artmode() is None
+    device._art_session.async_connection_failed.assert_awaited_once_with(error)
 
 
 @pytest.mark.parametrize(
@@ -155,39 +193,149 @@ async def test_art_mutations_fail_without_opening_after_stop(
 
 
 async def test_get_artmode_does_not_retry_timeout(device):
-    device._art.get_artmode = AsyncMock(side_effect=TimeoutError)
-    device._art.close = AsyncMock()
+    error = TimeoutError()
+    device._art.get_artmode = AsyncMock(side_effect=error)
     assert await device.async_get_artmode() is None
-    assert device._art.get_artmode.await_count == 1
-    device._art.close.assert_awaited_once()
+    device._art.get_artmode.assert_awaited_once()
+    device._art_session.async_connection_failed.assert_awaited_once_with(error)
 
 
-async def test_get_artmode_single_attempt_when_requested(hass, device):
-    # attempts=1 is used while the TV reports standby (shutting down): the
-    # art socket hangs until timeout there, so a retry only adds latency.
-    device._art.get_artmode = AsyncMock(side_effect=OSError("hanging socket"))
-    device._art.close = AsyncMock()
-    assert await device.async_get_artmode(attempts=1) is None
-    assert device._art.get_artmode.await_count == 1
-    device._art.close.assert_awaited_once()
+async def test_get_artmode_legacy_attempts_argument_is_ignored(hass, device):
+    error = OSError("hanging socket")
+    device._art.get_artmode = AsyncMock(side_effect=error)
+    assert await device.async_get_artmode(attempts=99) is None
+    device._art.get_artmode.assert_awaited_once()
+    device._art_session.async_connection_failed.assert_awaited_once_with(error)
 
 
-async def test_set_artmode_failure_resets_connection_and_reraises(hass, device):
-    device._art.set_artmode = AsyncMock(side_effect=OSError("dead socket"))
-    device._art.close = AsyncMock()
-    with pytest.raises(OSError):
-        await device.async_set_artmode(True)
-    # One reset after the initial failure, one after the failed retry.
-    assert device._art.close.await_count == 2
-    assert device._art.set_artmode.await_count == 2
+async def test_user_mutation_requests_one_user_probe_and_executes_once(device):
+    device._art.set_artmode = AsyncMock()
 
-
-async def test_set_artmode_retries_once_on_stale_connection(hass, device):
-    device._art.set_artmode = AsyncMock(side_effect=[OSError("stale"), None])
-    device._art.close = AsyncMock()
     await device.async_set_artmode(True)
-    assert device._art.set_artmode.await_count == 2
-    device._art.close.assert_awaited_once()
+
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.USER
+    )
+    device._art.set_artmode.assert_awaited_once_with(True)
+
+
+async def test_user_mutation_failure_is_not_retried(device):
+    error = OSError("dead socket")
+    device._art.set_artmode = AsyncMock(side_effect=error)
+
+    with pytest.raises(OSError) as raised:
+        await device.async_set_artmode(True)
+
+    assert raised.value is error
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.USER
+    )
+    device._art.set_artmode.assert_awaited_once_with(True)
+    device._art_session.async_connection_failed.assert_awaited_once_with(error)
+
+
+@pytest.mark.parametrize(
+    ("method", "args", "delegate", "delegate_args"),
+    [
+        ("async_set_artmode", (True,), "set_artmode", (True,)),
+        ("async_set_art_brightness", (6,), "set_brightness", (6,)),
+        (
+            "async_select_art",
+            ("MY_F0001", True),
+            "select_image",
+            ("MY_F0001", None, True),
+        ),
+        (
+            "async_upload_art",
+            (b"image", "jpg", "none"),
+            "upload",
+            (b"image", "jpg", "none"),
+        ),
+        ("async_delete_art", ("MY_F0001",), "delete", ("MY_F0001",)),
+        (
+            "async_change_matte",
+            ("MY_F0001", "none"),
+            "change_matte",
+            ("MY_F0001", "none"),
+        ),
+        (
+            "async_set_photo_filter",
+            ("MY_F0001", "ink"),
+            "set_photo_filter",
+            ("MY_F0001", "ink"),
+        ),
+        (
+            "async_set_favourite",
+            ("MY_F0001", True),
+            "set_favourite",
+            ("MY_F0001", True),
+        ),
+        (
+            "async_set_color_temperature",
+            (4,),
+            "set_color_temperature",
+            (4,),
+        ),
+        (
+            "async_set_slideshow",
+            (60, False, "MY-C0002"),
+            "set_slideshow",
+            (60, False, "MY-C0002"),
+        ),
+    ],
+)
+async def test_all_art_mutations_ensure_user_and_execute_once(
+    device, method, args, delegate, delegate_args
+):
+    operation = AsyncMock(return_value="MY_F0100")
+    setattr(device._art, delegate, operation)
+
+    await getattr(device, method)(*args)
+
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.USER
+    )
+    operation.assert_awaited_once_with(*delegate_args)
+
+
+@pytest.mark.parametrize(
+    ("method", "args", "delegate"),
+    [
+        ("async_set_artmode", (True,), "set_artmode"),
+        ("async_set_art_brightness", (6,), "set_brightness"),
+        ("async_select_art", ("MY_F0001", True), "select_image"),
+        ("async_upload_art", (b"image", "jpg", "none"), "upload"),
+        ("async_delete_art", ("MY_F0001",), "delete"),
+        ("async_change_matte", ("MY_F0001", "none"), "change_matte"),
+        (
+            "async_set_photo_filter",
+            ("MY_F0001", "ink"),
+            "set_photo_filter",
+        ),
+        ("async_set_favourite", ("MY_F0001", True), "set_favourite"),
+        ("async_set_color_temperature", (4,), "set_color_temperature"),
+        (
+            "async_set_slideshow",
+            (60, False, "MY-C0002"),
+            "set_slideshow",
+        ),
+    ],
+)
+async def test_unavailable_art_mutations_do_not_execute(
+    device, method, args, delegate
+):
+    device._art_session.async_ensure_ready.return_value = False
+    operation = AsyncMock()
+    setattr(device._art, delegate, operation)
+
+    with pytest.raises(ConnectionFailure, match="Art session is unavailable"):
+        await getattr(device, method)(*args)
+
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.USER
+    )
+    operation.assert_not_awaited()
+    device._art_session.async_connection_failed.assert_not_awaited()
 
 
 async def test_newest_token_none_when_unchanged(hass, device):
@@ -220,92 +368,233 @@ async def test_art_callback_and_start_are_loop_native(hass, device):
         device.set_art_event_callback(callback)
         await device.async_start_art_listener()
     device._art.set_event_callback.assert_called_once_with(callback)
-    device._art.start_listening.assert_awaited_once()
+    device._art_session.async_start.assert_awaited_once()
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.BACKGROUND
+    )
+    device._art.start_listening.assert_not_awaited()
     executor.assert_not_called()
 
 
-async def test_listener_alive_delegates_to_art(device):
-    device._art.is_alive = MagicMock(return_value=True)
+async def test_art_session_facade_properties_and_delegates(device):
+    callback = MagicMock()
+
+    assert device.art_ready is True
+    assert device.art_generation == 3
+    assert device.art_session_state is ArtSessionState.READY
+
+    device.set_art_session_state_callback(callback)
+    device._art_session.set_state_callback.assert_called_once_with(callback)
+    device.set_art_session_state_callback(None)
+    device._art_session.set_state_callback.assert_called_with(None)
+
+    await device.async_start_art_session()
+    device._art_session.async_start.assert_awaited_once()
+
+
+def test_observe_art_power_delegates_without_awaiting_network(device):
+    device.observe_art_power(True, "on", True)
+    device._art_session.observe_power.assert_called_once_with(
+        True, "on", True
+    )
+
+
+async def test_listener_alive_delegates_to_art_ready(device):
     assert device.listener_alive is True
-    device._art.is_alive.assert_called_once_with()
 
 
 async def test_listener_not_restarted_after_stop(hass, device):
     """An in-flight restart finishing after unload must not resurrect a
     listener nothing will ever close."""
     device._remote.close = AsyncMock()
-    device._art.close = AsyncMock()
     device._art.start_listening = AsyncMock()
     await device.async_stop()
     await device.async_restart_art_listener()
     await device.async_start_art_listener()
     device._art.start_listening.assert_not_awaited()
+    device._art_session.async_start.assert_not_awaited()
+    device._art_session.async_ensure_ready.assert_not_awaited()
 
 
-async def test_restart_art_listener_reopens_same_adapter(device):
-    art = device._art
-    art.close = AsyncMock()
-    art.start_listening = AsyncMock()
-    await device.async_restart_art_listener()
-    assert device._art is art
-    art.close.assert_awaited_once()
-    art.start_listening.assert_awaited_once()
-
-
-async def test_restart_does_not_start_if_stop_lands_while_closing(device):
-    close_started = asyncio.Event()
-    release_restart_close = asyncio.Event()
-
-    async def close_art():
-        if not close_started.is_set():
-            close_started.set()
-            await release_restart_close.wait()
-
-    device._art.close = AsyncMock(side_effect=close_art)
+async def test_legacy_listener_shims_arm_and_background_ensure(device):
+    device._art.close = AsyncMock()
     device._art.start_listening = AsyncMock()
-    device._remote.close = AsyncMock()
-
-    restart = asyncio.create_task(device.async_restart_art_listener())
-    await close_started.wait()
-    stop = asyncio.create_task(device.async_stop())
-    while not device._stopped:
-        await asyncio.sleep(0)
-    release_restart_close.set()
-    await asyncio.gather(restart, stop)
-
+    await device.async_restart_art_listener()
+    device._art_session.async_start.assert_awaited_once()
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.BACKGROUND
+    )
+    device._art.close.assert_not_awaited()
     device._art.start_listening.assert_not_awaited()
 
 
-async def test_stop_is_bounded_and_idempotent(device):
-    device._remote.close = AsyncMock(side_effect=[TimeoutError, None])
-    device._art.close = AsyncMock(side_effect=[TimeoutError, None])
-    await asyncio.wait_for(device.async_stop(), timeout=0.1)
-    await asyncio.wait_for(device.async_stop(), timeout=0.1)
-    assert device._stopped is True
-    assert device._remote.close.await_count == 2
-    assert device._art.close.await_count == 2
+async def test_device_stop_stops_session_and_remote_once(device):
+    release_shutdown = asyncio.Event()
+    session_started = asyncio.Event()
+    remote_started = asyncio.Event()
 
-
-async def test_stop_bounds_wedged_remote_close_and_is_idempotent(device):
-    never_finishes = asyncio.Event()
+    async def stop_session():
+        session_started.set()
+        await release_shutdown.wait()
 
     async def close_remote():
-        await never_finishes.wait()
+        remote_started.set()
+        await release_shutdown.wait()
 
+    device._art_session.async_stop = AsyncMock(side_effect=stop_session)
     device._remote.close = AsyncMock(side_effect=close_remote)
-    device._art.close = AsyncMock()
+
+    cancelled_waiter = asyncio.create_task(device.async_stop())
+    surviving_waiter = None
+    try:
+        await asyncio.wait_for(session_started.wait(), timeout=0.05)
+        await asyncio.wait_for(remote_started.wait(), timeout=0.05)
+        surviving_waiter = asyncio.create_task(device.async_stop())
+        await asyncio.sleep(0)
+
+        cancelled_waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled_waiter
+        assert not surviving_waiter.done()
+    finally:
+        release_shutdown.set()
+        await asyncio.gather(
+            cancelled_waiter,
+            *([surviving_waiter] if surviving_waiter is not None else []),
+            return_exceptions=True,
+        )
+
+    await device.async_stop()
+
+    device._art_session.async_stop.assert_awaited_once()
+    device._remote.close.assert_awaited_once()
+    assert device._stopped is True
+    assert len(device._test_task_factory_calls) == 1
+
+
+@pytest.mark.parametrize("concurrent_action", ["listener", "mutation"])
+async def test_stop_admission_closes_before_owner_first_runs(
+    device, concurrent_action
+):
+    release_owner = asyncio.Event()
+    owner_created = asyncio.Event()
+
+    def delayed_task_factory(coroutine, name):
+        async def run_later():
+            await release_owner.wait()
+            await coroutine
+
+        task = asyncio.create_task(run_later(), name=name)
+        owner_created.set()
+        return task
+
+    device._task_factory = delayed_task_factory
+    device._art.set_artmode = AsyncMock()
+    stop_waiter = asyncio.create_task(device.async_stop())
+    await owner_created.wait()
+
+    try:
+        if concurrent_action == "listener":
+            await device.async_start_art_listener()
+            device._art_session.async_start.assert_not_awaited()
+            device._art_session.async_ensure_ready.assert_not_awaited()
+        else:
+            with pytest.raises(ConnectionFailure, match="stopped"):
+                await device.async_set_artmode(True)
+            device._art.set_artmode.assert_not_awaited()
+        assert device._stopped is True
+    finally:
+        release_owner.set()
+        await asyncio.gather(stop_waiter, return_exceptions=True)
+
+
+async def test_cancelled_stop_owner_finishes_shared_cleanup(device):
+    release_shutdown = asyncio.Event()
+    session_started = asyncio.Event()
+    remote_started = asyncio.Event()
+
+    async def stop_session():
+        session_started.set()
+        await release_shutdown.wait()
+
+    async def close_remote():
+        remote_started.set()
+        await release_shutdown.wait()
+
+    device._art_session.async_stop = AsyncMock(side_effect=stop_session)
+    device._remote.close = AsyncMock(side_effect=close_remote)
+    first_waiter = asyncio.create_task(device.async_stop())
+    await session_started.wait()
+    await remote_started.wait()
+    owner = device._stop_task
+    assert owner is not None
+
+    owner.cancel()
+    await asyncio.sleep(0)
+    release_shutdown.set()
+    first_result = await asyncio.gather(
+        first_waiter, return_exceptions=True
+    )
+    second_result = await asyncio.wait_for(
+        asyncio.gather(device.async_stop(), return_exceptions=True),
+        timeout=0.1,
+    )
+
+    assert first_result == [None]
+    assert second_result == [None]
+    device._art_session.async_stop.assert_awaited_once()
+    device._remote.close.assert_awaited_once()
+
+
+async def test_stop_recovers_if_owner_is_cancelled_before_start(device):
+    task_factory_calls = 0
+
+    def cancel_first_owner(coroutine, name):
+        nonlocal task_factory_calls
+        task_factory_calls += 1
+        task = asyncio.create_task(coroutine, name=name)
+        if task_factory_calls == 1:
+            task.cancel()
+        return task
+
+    device._task_factory = cancel_first_owner
+    device._remote.close = AsyncMock()
+
+    await asyncio.wait_for(device.async_stop(), timeout=0.1)
+
+    assert task_factory_calls == 2
+    device._art_session.async_stop.assert_awaited_once()
+    device._remote.close.assert_awaited_once()
+
+
+async def test_stop_task_factory_failure_does_not_close_admission(device):
+    def broken_task_factory(_coroutine, _name):
+        raise RuntimeError("factory failed")
+
+    device._task_factory = broken_task_factory
+    device._remote.close = AsyncMock()
+    with pytest.raises(RuntimeError, match="factory failed"):
+        await device.async_stop()
+
+    assert device._stopped is False
+    assert device._stop_task is None
+    device._art_session.async_stop.assert_not_awaited()
+    device._remote.close.assert_not_awaited()
+
+
+async def test_stop_bounds_wedged_remote_close_once(device):
+    never_finishes = asyncio.Event()
+    device._remote.close = AsyncMock(side_effect=never_finishes.wait)
 
     with patch(
         "custom_components.samsungtv_frame.device.ART_CLOSE_DEADLINE",
         0.01,
-        create=True,
     ):
         await asyncio.wait_for(device.async_stop(), timeout=0.1)
         await asyncio.wait_for(device.async_stop(), timeout=0.1)
 
-    assert device._stopped is True
-    assert device._remote.close.await_count == 2
-    assert device._art.close.await_count == 2
+    device._art_session.async_stop.assert_awaited_once()
+    device._remote.close.assert_awaited_once()
 
 
 async def test_send_key_clicks_remote(hass, device):
@@ -381,13 +670,32 @@ async def test_upload_art_returns_content_id(hass, device):
     device._art.upload.assert_awaited_once_with(b"bytes", "jpg", "none")
 
 
-async def test_upload_is_never_retried(device):
-    device._art.upload = AsyncMock(side_effect=OSError("partial"))
-    device._art.close = AsyncMock()
-    with pytest.raises(OSError):
+async def test_upload_failure_is_not_retried(device):
+    error = OSError("partial")
+    device._art.upload = AsyncMock(side_effect=error)
+
+    with pytest.raises(OSError) as raised:
         await device.async_upload_art(b"image", "jpg", "none")
+
+    assert raised.value is error
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.USER
+    )
     device._art.upload.assert_awaited_once()
-    device._art.close.assert_awaited_once()
+    device._art_session.async_connection_failed.assert_awaited_once_with(error)
+
+
+async def test_unavailable_upload_is_not_attempted(device):
+    device._art_session.async_ensure_ready.return_value = False
+    device._art.upload = AsyncMock()
+
+    with pytest.raises(ConnectionFailure, match="Art session is unavailable"):
+        await device.async_upload_art(b"image", "jpg", "none")
+
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.USER
+    )
+    device._art.upload.assert_not_awaited()
 
 
 async def test_get_current_art_returns_content_id(hass, device):
@@ -437,6 +745,8 @@ async def test_thumbnail_d2d_failure_does_not_reset_or_retry(device, caplog):
     device._art.request.assert_awaited_once()
     device._art._open_d2d.assert_awaited_once()
     device._art.close.assert_not_awaited()
+    device._art_session.async_ensure_ready.assert_not_awaited()
+    device._art_session.async_connection_failed.assert_not_awaited()
     assert "thumbnail fetch failed for MY_F0001" in caplog.text
 
 

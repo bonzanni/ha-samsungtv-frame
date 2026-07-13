@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from custom_components.samsungtv_frame.art_session import ArtSessionState
+
 pytest_plugins = ["pytest_homeassistant_custom_component"]
 
 
@@ -24,6 +26,12 @@ def mock_device() -> MagicMock:
     )
     device.async_get_artmode = AsyncMock(return_value=False)
     device.set_art_event_callback = MagicMock()
+    device.art_ready = False
+    device.art_generation = 0
+    device.art_session_state = ArtSessionState.STOPPED
+    device.observe_art_power = MagicMock()
+    device.set_art_session_state_callback = MagicMock()
+    device.async_start_art_session = AsyncMock()
     device.async_set_artmode = AsyncMock()
     device.async_turn_on = AsyncMock()
     device.async_turn_off = AsyncMock()

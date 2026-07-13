@@ -215,7 +215,8 @@ class FrameArt(SamsungTVWSAsyncConnection):
         """Send one serialized Art request and await its correlated response."""
         async with self._operation_lock:
             self._raise_if_stopped()
-            await self.start_listening()
+            if not self.is_alive():
+                raise ConnectionFailure("Art session is not ready")
             return await self._request_unlocked(
                 request,
                 expected_sub_event=expected_sub_event,
@@ -465,7 +466,8 @@ class FrameArt(SamsungTVWSAsyncConnection):
         try:
             async with self._operation_lock:
                 self._raise_if_stopped()
-                await self.start_listening()
+                if not self.is_alive():
+                    raise ConnectionFailure("Art session is not ready")
                 try:
                     try:
                         version = await self._request_unlocked(

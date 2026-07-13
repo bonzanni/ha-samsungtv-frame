@@ -139,6 +139,83 @@ def make_art(*, callback=None, **kwargs):
     )
 
 
+async def test_request_does_not_open_when_receiver_is_not_ready():
+    art = make_art()
+    start = AsyncMock()
+
+    with patch.object(art, "start_listening", start):
+        with pytest.raises(
+            ConnectionFailure, match="^Art session is not ready$"
+        ):
+            await art.request("get_artmode_status")
+
+    start.assert_not_awaited()
+
+
+async def test_upload_does_not_open_when_receiver_is_not_ready():
+    art = make_art()
+    start = AsyncMock()
+    request = AsyncMock()
+    d2d_upload = AsyncMock()
+    binary_upload = AsyncMock()
+
+    with (
+        patch.object(art, "start_listening", start),
+        patch.object(art, "_request_unlocked", request),
+        patch.object(art, "_upload_d2d_unlocked", d2d_upload),
+        patch.object(art, "_upload_ws_binary_unlocked", binary_upload),
+        pytest.raises(
+            ConnectionFailure, match="^Art session is not ready$"
+        ),
+    ):
+        await art.upload(b"image", "jpg", "none")
+
+    start.assert_not_awaited()
+    request.assert_not_awaited()
+    d2d_upload.assert_not_awaited()
+    binary_upload.assert_not_awaited()
+
+
+@pytest.mark.parametrize("operation_name", ["request", "upload"])
+async def test_art_operation_rechecks_readiness_inside_operation_lock(
+    operation_name,
+):
+    art = make_art()
+    ready = True
+    art.is_alive = MagicMock(side_effect=lambda: ready)
+    start = AsyncMock()
+    request = AsyncMock(return_value={"version": "4.3"})
+    d2d_upload = AsyncMock(return_value="MY_F0001")
+
+    await art._operation_lock.acquire()
+    with (
+        patch.object(art, "start_listening", start),
+        patch.object(art, "_request_unlocked", request),
+        patch.object(art, "_upload_d2d_unlocked", d2d_upload),
+    ):
+        if operation_name == "request":
+            operation = asyncio.create_task(
+                art.request("get_artmode_status")
+            )
+        else:
+            operation = asyncio.create_task(
+                art.upload(b"image", "jpg", "none")
+            )
+        await asyncio.sleep(0)
+        assert not operation.done()
+
+        ready = False
+        art._operation_lock.release()
+        with pytest.raises(
+            ConnectionFailure, match="^Art session is not ready$"
+        ):
+            await operation
+
+    start.assert_not_awaited()
+    request.assert_not_awaited()
+    d2d_upload.assert_not_awaited()
+
+
 async def test_artmode_commands_normalize_values_and_reject_invalid_input():
     art = make_art()
     art.request = AsyncMock(return_value={"value": "on"})
@@ -611,6 +688,7 @@ async def test_upload_d2d_correlates_ready_and_pre_registers_completion():
             open_connection,
         ),
     ):
+        await art.start_listening()
         upload = asyncio.create_task(art.upload(image, "jpeg", "none"))
         await wait_for_sent(ws, 1)
         version_request = sent_art_request(ws, 0)
@@ -708,6 +786,7 @@ async def test_upload_d2d_completion_accepts_echoed_upload_id(
             0.01,
         ),
     ):
+        await art.start_listening()
         upload = asyncio.create_task(art.upload(b"image", "jpg", "none"))
         await wait_for_sent(ws, 1)
         version_request = sent_art_request(ws, 0)
@@ -768,6 +847,7 @@ async def test_upload_d2d_completion_rejects_other_client_id(
                 AsyncMock(return_value=(stream_reader(), writer)),
             ),
         ):
+            await art.start_listening()
             upload = asyncio.create_task(
                 art.upload(b"image", "jpg", "none")
             )
@@ -857,6 +937,7 @@ async def test_upload_d2d_does_not_retry_failed_drain_and_closes_writer():
 
     with (
         patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "is_alive", return_value=True),
         patch.object(art, "_request_unlocked", request),
         patch(
             "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
@@ -893,6 +974,7 @@ async def test_upload_cancellation_cleans_completion_and_writer():
 
     with (
         patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "is_alive", return_value=True),
         patch.object(art, "_request_unlocked", request),
         patch(
             "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
@@ -931,6 +1013,7 @@ async def test_close_cancels_blocked_upload_and_cleans_writer():
 
     with (
         patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "is_alive", return_value=True),
         patch.object(art, "_request_unlocked", request),
         patch(
             "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
@@ -987,6 +1070,7 @@ async def test_upload_writer_close_failure_preserves_drain_error():
 
     with (
         patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "is_alive", return_value=True),
         patch.object(art, "_request_unlocked", request),
         patch(
             "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
@@ -1022,6 +1106,7 @@ async def test_upload_writer_close_deadline_preserves_cancellation():
 
     with (
         patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "is_alive", return_value=True),
         patch.object(art, "_request_unlocked", request),
         patch(
             "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
@@ -1067,6 +1152,7 @@ async def test_upload_completion_timeout_closes_websocket_and_cleans_pending():
 
     with (
         patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "is_alive", return_value=True),
         patch.object(art, "_request_unlocked", request),
         patch(
             "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
@@ -1119,6 +1205,7 @@ async def test_upload_api_097_sends_exact_binary_frame_and_correlates_result():
         "custom_components.samsungtv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
+        await art.start_listening()
         upload = asyncio.create_task(art.upload(image, "jpg", "none"))
         await wait_for_sent(ws, 1)
         version_request = sent_art_request(ws, 0)
@@ -1571,6 +1658,7 @@ async def test_request_correlates_response_by_uuid():
         "custom_components.samsungtv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
+        await art.start_listening()
         request_task = asyncio.create_task(art.request("get_artmode_status"))
         await asyncio.sleep(0)
         outer = json.loads(ws.sent[-1])
@@ -1604,6 +1692,7 @@ async def test_request_falls_back_to_id_when_request_id_is_null():
             0.01,
         ),
     ):
+        await art.start_listening()
         request_task = asyncio.create_task(art.request("get_artmode_status"))
         await wait_for_sent(ws, 1)
         request_id = sent_art_request(ws, 0)["id"]
@@ -1625,6 +1714,7 @@ async def test_request_correlates_uuidless_expected_sub_event():
         "custom_components.samsungtv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
+        await art.start_listening()
         request_task = asyncio.create_task(
             art.request(
                 "get_artmode_status", expected_sub_event="artmode_status"
@@ -1652,6 +1742,7 @@ async def test_request_translates_error_payload():
         "custom_components.samsungtv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
+        await art.start_listening()
         request_task = asyncio.create_task(art.request("get_artmode_status"))
         await asyncio.sleep(0)
         inner = json.loads(json.loads(ws.sent[-1])["params"]["data"])
@@ -1688,6 +1779,7 @@ async def test_push_and_request_response_coexist():
         "custom_components.samsungtv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
+        await art.start_listening()
         request_task = asyncio.create_task(art.request("get_artmode_status"))
         await asyncio.sleep(0)
         inner = json.loads(json.loads(ws.sent[-1])["params"]["data"])
@@ -1740,6 +1832,7 @@ async def test_callback_exception_does_not_interrupt_pending_request(
         "custom_components.samsungtv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
+        await art.start_listening()
         request_task = asyncio.create_task(art.request("get_artmode_status"))
         try:
             await wait_for_sent(ws, 1)
@@ -1778,6 +1871,7 @@ async def test_receiver_disconnect_fails_pending_request():
         "custom_components.samsungtv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
+        await art.start_listening()
         request_task = asyncio.create_task(art.request("get_artmode_status"))
         await asyncio.sleep(0)
         await ws.frames.put(ConnectionFailure("lost"))
@@ -1794,6 +1888,7 @@ async def test_request_cancellation_removes_pending_registration():
         "custom_components.samsungtv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
+        await art.start_listening()
         request_task = asyncio.create_task(
             art.request(
                 "get_artmode_status", expected_sub_event="artmode_status"
@@ -1810,7 +1905,10 @@ async def test_request_cancellation_removes_pending_registration():
 
 async def test_request_connection_loss_before_send_removes_registration():
     art = make_art()
-    with patch.object(art, "start_listening", AsyncMock()):
+    with (
+        patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "is_alive", return_value=True),
+    ):
         with pytest.raises(ConnectionFailure, match="Art connection closed"):
             await art.request(
                 "get_artmode_status", expected_sub_event="artmode_status"
@@ -1830,6 +1928,7 @@ async def test_request_timeout_closes_transport():
         patch("custom_components.samsungtv_frame.frame_art.ART_REQUEST_DEADLINE", 0.01),
         pytest.raises(TimeoutError),
     ):
+        await art.start_listening()
         await art.request("get_artmode_status")
     assert ws.closed
     assert art.connection is None
@@ -1849,6 +1948,7 @@ async def test_request_deadline_includes_blocked_websocket_send():
 
     with (
         patch.object(art, "start_listening", AsyncMock()),
+        patch.object(art, "is_alive", return_value=True),
         patch.object(art, "_send_command", side_effect=blocked_send),
         patch(
             "custom_components.samsungtv_frame.frame_art.ART_REQUEST_DEADLINE",
@@ -1887,6 +1987,7 @@ async def test_close_during_send_retrieves_failed_pending_future():
     try:
         with (
             patch.object(art, "start_listening", AsyncMock()),
+            patch.object(art, "is_alive", return_value=True),
             patch.object(art, "_send_command", side_effect=blocked_send),
         ):
             request_task = asyncio.create_task(
