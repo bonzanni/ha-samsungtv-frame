@@ -737,6 +737,100 @@ async def test_upload_d2d_completion_accepts_echoed_upload_id(
     await art.close()
 
 
+@pytest.mark.parametrize(
+    ("wrong_event", "wrong_fields"),
+    [
+        ("image_added", {"content_id": "OTHER_CLIENT_IMAGE"}),
+        ("error", {"error_code": 99}),
+    ],
+)
+async def test_upload_d2d_completion_rejects_other_client_id(
+    wrong_event, wrong_fields
+):
+    callback = AsyncMock()
+    art = make_art(callback=callback)
+    ws = FakeWebSocket(handshake_frames())
+    d2d_write_started = asyncio.Event()
+    writer = FakeWriter(on_write=lambda _data: d2d_write_started.set())
+    upload = None
+
+    try:
+        with (
+            patch(
+                "custom_components.samsungtv_frame.frame_art.connect",
+                AsyncMock(return_value=ws),
+            ),
+            patch(
+                "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+                AsyncMock(return_value=(stream_reader(), writer)),
+            ),
+        ):
+            upload = asyncio.create_task(
+                art.upload(b"image", "jpg", "none")
+            )
+            await wait_for_sent(ws, 1)
+            version_request = sent_art_request(ws, 0)
+            await ws.frames.put(
+                art_response(
+                    request_id=version_request["request_id"],
+                    version="4.3",
+                )
+            )
+
+            await wait_for_sent(ws, 2)
+            upload_id = sent_art_request(ws, 1)["request_id"]
+            await ws.frames.put(
+                art_response(
+                    event="ready_to_use",
+                    request_id=upload_id,
+                    conn_info={
+                        "ip": "10.0.0.8",
+                        "port": 4321,
+                        "key": "secret",
+                    },
+                )
+            )
+            await d2d_write_started.wait()
+
+            wrong_payload = {
+                "event": wrong_event,
+                "request_id": "other-client-upload",
+                **wrong_fields,
+            }
+            await ws.frames.put(art_response(**wrong_payload))
+            for _ in range(20):
+                if callback.await_count or upload.done():
+                    break
+                await asyncio.sleep(0)
+
+            assert not upload.done()
+            callback.assert_awaited_once_with(
+                "d2d_service_message", wrong_payload
+            )
+
+            await ws.frames.put(
+                art_response(
+                    event="image_added",
+                    request_id=upload_id,
+                    content_id="MY_F0102",
+                )
+            )
+            assert await upload == "MY_F0102"
+    finally:
+        if upload is not None:
+            if not upload.done():
+                upload.cancel()
+            try:
+                await upload
+            except BaseException:
+                pass
+        await art.close()
+
+    assert writer.closed
+    assert writer.waited_closed
+    assert art._uuidless_pending is None
+
+
 async def test_upload_d2d_does_not_retry_failed_drain_and_closes_writer():
     art = make_art()
     art.connection = FakeWebSocket([])
