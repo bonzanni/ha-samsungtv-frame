@@ -1,13 +1,21 @@
 # tests/test_config_flow.py
 import asyncio
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.config_entries import SOURCE_REAUTH
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.samsungtv_frame.const import (
-    CONF_HOST, CONF_MAC, CONF_MODEL, CONF_TOKEN, DOMAIN, OPT_HEARTBEAT,
+    CONF_HOST,
+    CONF_MAC,
+    CONF_MODEL,
+    CONF_TOKEN,
+    DOMAIN,
+    OPT_HEARTBEAT,
+    PAIRING_DEADLINE,
 )
 from custom_components.samsungtv_frame.config_flow import (
     CannotConnect,
@@ -28,7 +36,8 @@ def _existing_entry() -> MockConfigEntry:
     )
 
 
-def _pairing_patches(hass, art, ssl_context):
+@contextmanager
+def pairing_patches(hass, *, remote, art, ssl_context):
     rest = MagicMock()
     rest.rest_device_info = AsyncMock(
         return_value={
@@ -39,15 +48,19 @@ def _pairing_patches(hass, art, ssl_context):
             }
         }
     )
-    return (
+    with (
         patch(
             "custom_components.samsungtv_frame.config_flow.SamsungTVAsyncRest",
             return_value=rest,
         ),
         patch(
+            "custom_components.samsungtv_frame.config_flow.FrameRemote",
+            return_value=remote,
+        ),
+        patch(
             "custom_components.samsungtv_frame.config_flow.FrameArt",
             return_value=art,
-        ),
+        ) as art_constructor,
         patch(
             "custom_components.samsungtv_frame.config_flow.get_ssl_context",
             return_value=ssl_context,
@@ -57,68 +70,116 @@ def _pairing_patches(hass, art, ssl_context):
             "async_add_executor_job",
             new=AsyncMock(side_effect=lambda func: func()),
         ),
-    )
-
-
-async def test_pair_always_closes(hass):
-    ssl_context = object()
-    art = MagicMock(token="new-token")
-    art.open = AsyncMock()
-    art.close = AsyncMock()
-    art.start_listening = AsyncMock()
-    rest_patch, art_patch, ssl_patch, executor_patch = _pairing_patches(
-        hass, art, ssl_context
-    )
-    with (
-        rest_patch,
-        art_patch as art_cls,
-        ssl_patch as get_context,
-        executor_patch as executor,
     ):
+        yield art_constructor
+
+
+async def test_pair_remote_token_is_used_to_validate_art(hass):
+    ssl_context = object()
+    remote = MagicMock(
+        token="remote-token", open=AsyncMock(), close=AsyncMock()
+    )
+    art = MagicMock(
+        token="ignored-art-token", open=AsyncMock(), close=AsyncMock()
+    )
+    with pairing_patches(
+        hass, remote=remote, art=art, ssl_context=ssl_context
+    ) as art_constructor:
         result = await validate_and_pair(hass, "1.2.3.4")
 
-    assert result[CONF_TOKEN] == "new-token"
-    executor.assert_awaited_once_with(get_context)
-    art_cls.assert_called_once_with(
+    assert result[CONF_TOKEN] == "remote-token"
+    remote.open.assert_awaited_once()
+    art_constructor.assert_called_once_with(
         "1.2.3.4",
-        token=None,
+        token="remote-token",
         ssl_context=ssl_context,
         task_factory=None,
         event_callback=None,
-        timeout=30,
+        timeout=PAIRING_DEADLINE,
     )
     art.open.assert_awaited_once()
-    art.start_listening.assert_not_awaited()
+    remote.close.assert_awaited_once()
     art.close.assert_awaited_once()
 
 
-async def test_pair_open_failure_always_closes(hass):
-    art = MagicMock(token=None)
-    art.open = AsyncMock(side_effect=OSError("cannot open"))
-    art.close = AsyncMock()
-    rest_patch, art_patch, ssl_patch, executor_patch = _pairing_patches(
-        hass, art, object()
-    )
-    with rest_patch, art_patch, ssl_patch, executor_patch as executor:
+async def test_pair_missing_remote_token_fails_before_art(hass):
+    remote = MagicMock(token=None, open=AsyncMock(), close=AsyncMock())
+    art = MagicMock(open=AsyncMock(), close=AsyncMock())
+    with pairing_patches(
+        hass, remote=remote, art=art, ssl_context=object()
+    ) as art_constructor:
         with pytest.raises(CannotConnect):
             await validate_and_pair(hass, "1.2.3.4")
 
-    assert executor.await_count == 1
-    art.close.assert_awaited_once()
+    art_constructor.assert_not_called()
+    remote.close.assert_awaited_once()
 
 
-async def test_pair_cancellation_always_closes(hass):
-    art = MagicMock(token=None)
-    art.open = AsyncMock(side_effect=asyncio.CancelledError)
-    art.close = AsyncMock()
-    rest_patch, art_patch, ssl_patch, executor_patch = _pairing_patches(
-        hass, art, object()
+@pytest.mark.parametrize(
+    ("failed_client", "error", "expected_error"),
+    [
+        pytest.param(
+            "remote", OSError("cannot open remote"), CannotConnect, id="remote-error"
+        ),
+        pytest.param(
+            "remote",
+            asyncio.CancelledError(),
+            asyncio.CancelledError,
+            id="remote-cancelled",
+        ),
+        pytest.param(
+            "art", OSError("cannot open art"), CannotConnect, id="art-error"
+        ),
+        pytest.param(
+            "art",
+            asyncio.CancelledError(),
+            asyncio.CancelledError,
+            id="art-cancelled",
+        ),
+    ],
+)
+async def test_pair_open_failure_closes_created_clients(
+    hass, failed_client, error, expected_error
+):
+    remote = MagicMock(
+        token="remote-token", open=AsyncMock(), close=AsyncMock()
     )
-    with rest_patch, art_patch, ssl_patch, executor_patch as executor:
-        with pytest.raises(asyncio.CancelledError):
+    art = MagicMock(open=AsyncMock(), close=AsyncMock())
+    if failed_client == "remote":
+        remote.open.side_effect = error
+    else:
+        art.open.side_effect = error
+
+    with pairing_patches(
+        hass, remote=remote, art=art, ssl_context=object()
+    ) as art_constructor:
+        with pytest.raises(expected_error):
             await validate_and_pair(hass, "1.2.3.4")
 
-    assert executor.await_count == 1
+    remote.close.assert_awaited_once()
+    if failed_client == "remote":
+        art_constructor.assert_not_called()
+        art.close.assert_not_awaited()
+    else:
+        art_constructor.assert_called_once()
+        art.close.assert_awaited_once()
+
+
+async def test_pair_close_errors_do_not_mask_success(hass):
+    remote = MagicMock(
+        token="remote-token",
+        open=AsyncMock(),
+        close=AsyncMock(side_effect=OSError("cannot close remote")),
+    )
+    art = MagicMock(
+        open=AsyncMock(),
+        close=AsyncMock(side_effect=OSError("cannot close art")),
+    )
+    with pairing_patches(hass, remote=remote, art=art, ssl_context=object()):
+        result = await validate_and_pair(hass, "1.2.3.4")
+
+    assert result[CONF_TOKEN] == "remote-token"
+    remote.close.assert_awaited_once()
     art.close.assert_awaited_once()
 
 
@@ -177,15 +238,13 @@ async def test_user_flow_cannot_connect(hass):
     assert result["errors"] == {"base": "cannot_connect"}
 
 
-async def test_reconfigure_updates_host_keeps_token(hass):
+async def test_reconfigure_updates_host_and_canonical_token(hass):
     entry = _existing_entry()
     entry.add_to_hass(hass)
     with patch(
         "custom_components.samsungtv_frame.config_flow.validate_and_pair",
         new=AsyncMock(return_value={
-            # Re-pairing an already-granted client returns token None; the
-            # stored token must survive.
-            CONF_MAC: "A0:D0:5B:86:CE:B7", CONF_TOKEN: None,
+            CONF_MAC: "A0:D0:5B:86:CE:B7", CONF_TOKEN: "remote-token",
             CONF_MODEL: "QE65LS03BAUXXH",
         }),
     ), patch(
@@ -199,7 +258,58 @@ async def test_reconfigure_updates_host_keeps_token(hass):
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
     assert entry.data[CONF_HOST] == "5.6.7.8"
+    assert entry.data[CONF_TOKEN] == "remote-token"
+
+
+async def test_reauth_updates_canonical_token_and_schedules_reload(hass):
+    entry = _existing_entry()
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.samsungtv_frame.config_flow.validate_and_pair",
+        new=AsyncMock(return_value={
+            CONF_MAC: "A0:D0:5B:86:CE:B7",
+            CONF_TOKEN: "remote-token",
+            CONF_MODEL: "QE65LS03BAUXXH",
+        }),
+    ), patch.object(hass.config_entries, "async_schedule_reload") as schedule_reload:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=entry.data,
+        )
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "reauth_confirm"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {}
+        )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert entry.data[CONF_TOKEN] == "remote-token"
+    schedule_reload.assert_called_once_with(entry.entry_id)
+
+
+async def test_reauth_cannot_connect_keeps_stored_token(hass):
+    entry = _existing_entry()
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.samsungtv_frame.config_flow.validate_and_pair",
+        new=AsyncMock(side_effect=CannotConnect),
+    ), patch.object(hass.config_entries, "async_schedule_reload") as schedule_reload:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=entry.data,
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {}
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+    assert result["errors"] == {"base": "cannot_connect"}
     assert entry.data[CONF_TOKEN] == "tok"
+    schedule_reload.assert_not_called()
 
 
 async def test_reconfigure_rejects_different_tv(hass):
@@ -208,7 +318,9 @@ async def test_reconfigure_rejects_different_tv(hass):
     with patch(
         "custom_components.samsungtv_frame.config_flow.validate_and_pair",
         new=AsyncMock(return_value={
-            CONF_MAC: "00:11:22:33:44:55", CONF_TOKEN: None, CONF_MODEL: "OTHER",
+            CONF_MAC: "00:11:22:33:44:55",
+            CONF_TOKEN: "remote-token",
+            CONF_MODEL: "OTHER",
         }),
     ):
         result = await entry.start_reconfigure_flow(hass)

@@ -3,13 +3,17 @@
     "step": {
       "user": {
         "title": "Samsung Frame TV",
-        "description": "Enter the TV's IP address. Accept the 'Allow' prompt on the TV when it appears.",
+        "description": "Make sure the TV is showing normal TV or app content (not Art Mode). Enter the TV's IP address, then approve the 'Allow' prompt on the TV when it appears.",
         "data": {"host": "IP address"}
       },
       "reconfigure": {
         "title": "Reconfigure Samsung Frame TV",
         "description": "Update the TV's IP address.",
         "data": {"host": "IP address"}
+      },
+      "reauth_confirm": {
+        "title": "Reauthorize Samsung Frame TV",
+        "description": "Make sure the TV is showing normal TV or app content (not Art Mode). Continue, then approve the 'Allow' prompt on the TV when it appears."
       }
     },
     "error": {
@@ -18,6 +22,7 @@
     },
     "abort": {
       "already_configured": "This TV is already configured.",
+      "reauth_successful": "Reauthorization was successful.",
       "unique_id_mismatch": "The device at this address is a different TV.",
       "reconfigure_successful": "Reconfiguration was successful."
     }

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 import voluptuous as vol
@@ -27,8 +28,10 @@ from .const import (
     OPT_HEARTBEAT,
     PAIRING_DEADLINE,
     PORT_REST,
+    REMOTE_CLOSE_DEADLINE,
 )
 from .frame_art import FrameArt
+from .frame_remote import FrameRemote, RemotePairingRequired
 
 
 class NotAFrameError(Exception):
@@ -37,6 +40,15 @@ class NotAFrameError(Exception):
 
 class CannotConnect(Exception):
     """Could not reach the TV."""
+
+
+async def _async_close_pairing_client(client: Any | None) -> None:
+    """Close a temporary pairing client without replacing the flow result."""
+    if client is None:
+        return
+    with contextlib.suppress(Exception, TimeoutError):
+        async with asyncio.timeout(REMOTE_CLOSE_DEADLINE):
+            await client.close()
 
 
 async def validate_and_pair(hass, host: str) -> dict[str, Any]:
@@ -52,22 +64,36 @@ async def validate_and_pair(hass, host: str) -> dict[str, Any]:
         raise NotAFrameError
 
     ssl_context = await hass.async_add_executor_job(get_ssl_context)
-    art = FrameArt(
+    remote = FrameRemote(
         host,
         token=None,
         ssl_context=ssl_context,
-        task_factory=None,
-        event_callback=None,
         timeout=PAIRING_DEADLINE,
     )
+    art = None
     try:
         async with asyncio.timeout(PAIRING_DEADLINE):
+            await remote.open()
+        token = remote.token
+        if not token:
+            raise CannotConnect
+        art = FrameArt(
+            host,
+            token=token,
+            ssl_context=ssl_context,
+            task_factory=None,
+            event_callback=None,
+            timeout=PAIRING_DEADLINE,
+        )
+        async with asyncio.timeout(PAIRING_DEADLINE):
             await art.open()
-        token = art.token
+    except RemotePairingRequired as err:
+        raise CannotConnect from err
     except Exception as err:  # noqa: BLE001
         raise CannotConnect from err
     finally:
-        await art.close()
+        await _async_close_pairing_client(art)
+        await _async_close_pairing_client(remote)
     return {
         CONF_MAC: format_mac(device.get("wifiMac", "")),
         CONF_TOKEN: token,
@@ -85,6 +111,41 @@ class SamsungFrameConfigFlow(ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(config_entry: ConfigEntry) -> FrameOptionsFlow:
         return FrameOptionsFlow()
 
+    async def async_step_reauth(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Start reauthorization for an existing config entry."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Pair again and replace the stored canonical token."""
+        entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                paired = await validate_and_pair(self.hass, entry.data[CONF_HOST])
+            except NotAFrameError:
+                errors["base"] = "not_a_frame"
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            else:
+                await self.async_set_unique_id(format_mac(paired[CONF_MAC]))
+                self._abort_if_unique_id_mismatch()
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data_updates={
+                        CONF_TOKEN: paired[CONF_TOKEN],
+                        CONF_MODEL: paired[CONF_MODEL],
+                    },
+                )
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({}),
+            errors=errors,
+        )
+
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -101,12 +162,11 @@ class SamsungFrameConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 await self.async_set_unique_id(format_mac(paired[CONF_MAC]))
                 self._abort_if_unique_id_mismatch()
-                # Keep the stored token: re-pairing an already-granted client
-                # returns None, which must not clobber a captured token.
                 return self.async_update_reload_and_abort(
                     entry,
                     data_updates={
                         CONF_HOST: user_input[CONF_HOST],
+                        CONF_TOKEN: paired[CONF_TOKEN],
                         CONF_MODEL: paired[CONF_MODEL],
                     },
                 )
