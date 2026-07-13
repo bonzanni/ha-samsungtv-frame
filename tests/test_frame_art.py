@@ -668,6 +668,75 @@ async def test_upload_d2d_correlates_ready_and_pre_registers_completion():
     await art.close()
 
 
+@pytest.mark.parametrize("correlation_key", ["request_id", "id"])
+async def test_upload_d2d_completion_accepts_echoed_upload_id(
+    correlation_key,
+):
+    art = make_art()
+    ws = FakeWebSocket(handshake_frames())
+    completion_sent = False
+
+    def on_write(_data):
+        nonlocal completion_sent
+        if completion_sent:
+            return
+        completion_sent = True
+        upload_id = sent_art_request(ws, 1)["request_id"]
+        ws.frames.put_nowait(
+            art_response(
+                event="image_added",
+                content_id="MY_F0101",
+                **{correlation_key: upload_id},
+            )
+        )
+
+    writer = FakeWriter(on_write=on_write)
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            AsyncMock(return_value=ws),
+        ),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            AsyncMock(return_value=(stream_reader(), writer)),
+        ),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.ART_REQUEST_DEADLINE",
+            0.01,
+        ),
+    ):
+        upload = asyncio.create_task(art.upload(b"image", "jpg", "none"))
+        await wait_for_sent(ws, 1)
+        version_request = sent_art_request(ws, 0)
+        await ws.frames.put(
+            art_response(
+                request_id=version_request["request_id"], version="4.3"
+            )
+        )
+
+        await wait_for_sent(ws, 2)
+        send_image = sent_art_request(ws, 1)
+        upload_id = send_image["request_id"]
+        await ws.frames.put(
+            art_response(
+                event="ready_to_use",
+                request_id=upload_id,
+                conn_info={
+                    "ip": "10.0.0.8",
+                    "port": 4321,
+                    "key": "secret",
+                },
+            )
+        )
+
+        assert await upload == "MY_F0101"
+
+    assert writer.closed
+    assert writer.waited_closed
+    assert art._uuidless_pending is None
+    await art.close()
+
+
 async def test_upload_d2d_does_not_retry_failed_drain_and_closes_writer():
     art = make_art()
     art.connection = FakeWebSocket([])

@@ -53,6 +53,7 @@ class _PendingResponse:
 
     future: asyncio.Future[dict[str, Any]]
     expected_sub_event: str | None
+    accept_any_id: bool = False
 
 
 _HANDSHAKE_BROADCASTS = {
@@ -492,7 +493,9 @@ class FrameArt(SamsungTVWSAsyncConnection):
         )
 
         completion = _PendingResponse(
-            asyncio.get_running_loop().create_future(), "image_added"
+            asyncio.get_running_loop().create_future(),
+            "image_added",
+            accept_any_id=True,
         )
         self._uuidless_pending = completion
         try:
@@ -683,9 +686,14 @@ class FrameArt(SamsungTVWSAsyncConnection):
                 pending.future.set_result(payload)
             return
 
-        uuidless = self._uuidless_pending if message_id is None else None
-        if uuidless is not None and (
-            sub_event == "error" or sub_event == uuidless.expected_sub_event
+        uuidless = self._uuidless_pending
+        if (
+            uuidless is not None
+            and (message_id is None or uuidless.accept_any_id)
+            and (
+                sub_event == "error"
+                or sub_event == uuidless.expected_sub_event
+            )
         ):
             if not uuidless.future.done():
                 uuidless.future.set_result(payload)
