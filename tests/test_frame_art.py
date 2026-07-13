@@ -1084,6 +1084,75 @@ async def test_open_is_idempotent():
     connect_mock.assert_awaited_once()
 
 
+async def test_open_rejects_permanent_stop_without_connecting():
+    art = make_art()
+    connect_mock = AsyncMock()
+    art.stop()
+
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            connect_mock,
+        ),
+        pytest.raises(ConnectionFailure, match="stopped"),
+    ):
+        await art.open()
+
+    connect_mock.assert_not_awaited()
+    assert art.connection is None
+
+
+async def test_open_queued_on_lifecycle_lock_rechecks_permanent_stop():
+    art = make_art()
+    ws = FakeWebSocket(handshake_frames())
+    connect_mock = AsyncMock(return_value=ws)
+
+    await art._lifecycle_lock.acquire()
+    open_task = asyncio.create_task(art.open())
+    await asyncio.sleep(0)
+    art.stop()
+    art._lifecycle_lock.release()
+
+    try:
+        with (
+            patch(
+                "custom_components.samsungtv_frame.frame_art.connect",
+                connect_mock,
+            ),
+            pytest.raises(ConnectionFailure, match="stopped"),
+        ):
+            await open_task
+    finally:
+        await art.close()
+
+    connect_mock.assert_not_awaited()
+    assert art.connection is None
+
+
+async def test_open_stop_during_handshake_closes_local_socket_before_publish():
+    art = make_art()
+    ws = FakeWebSocket([])
+    connect_mock = AsyncMock(return_value=ws)
+
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.connect", connect_mock
+    ):
+        open_task = asyncio.create_task(art.open())
+        while not connect_mock.await_count:
+            await asyncio.sleep(0)
+        art.stop()
+        await ws.frames.put(json.dumps({"event": "ms.channel.connect"}))
+        await ws.frames.put(json.dumps({"event": "ms.channel.ready"}))
+
+        try:
+            with pytest.raises(ConnectionFailure, match="stopped"):
+                await open_task
+            assert ws.closed
+            assert art.connection is None
+        finally:
+            await art.close()
+
+
 async def test_start_listening_is_idempotent():
     ws = FakeWebSocket(
         [{"event": "ms.channel.connect"}, {"event": "ms.channel.ready"}]

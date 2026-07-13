@@ -99,6 +99,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
     async def open(self) -> ClientConnection:
         """Open the websocket and complete its bounded two-stage handshake."""
         async with self._lifecycle_lock:
+            self._raise_if_stopped()
             if self.connection is not None:
                 return self.connection
 
@@ -117,6 +118,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
                         **kwargs,
                     )
                     await self._wait_for_handshake(websocket)
+                    self._raise_if_stopped()
                 self.connection = websocket
                 return websocket
             except BaseException:
