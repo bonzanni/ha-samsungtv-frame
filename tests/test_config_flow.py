@@ -1,6 +1,8 @@
 # tests/test_config_flow.py
 import asyncio
+import json
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,6 +22,13 @@ from custom_components.samsungtv_frame.const import (
 from custom_components.samsungtv_frame.config_flow import (
     CannotConnect,
     validate_and_pair,
+)
+
+
+RECONFIGURE_PAIRING_DESCRIPTION = (
+    "Make sure the TV is showing normal TV or app content (not Art Mode). "
+    "Enter the TV's new IP address, then approve the 'Allow' prompt on the TV "
+    "when it appears."
 )
 
 
@@ -312,6 +321,33 @@ async def test_reauth_cannot_connect_keeps_stored_token(hass):
     schedule_reload.assert_not_called()
 
 
+async def test_reauth_rejects_different_tv_without_updating_entry(hass):
+    entry = _existing_entry()
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.samsungtv_frame.config_flow.validate_and_pair",
+        new=AsyncMock(return_value={
+            CONF_MAC: "00:11:22:33:44:55",
+            CONF_TOKEN: "remote-token",
+            CONF_MODEL: "OTHER",
+        }),
+    ), patch.object(hass.config_entries, "async_schedule_reload") as schedule_reload:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=entry.data,
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {}
+        )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "unique_id_mismatch"
+    assert entry.data[CONF_TOKEN] == "tok"
+    assert entry.data[CONF_MODEL] == "QE65LS03BAUXXH"
+    schedule_reload.assert_not_called()
+
+
 async def test_reconfigure_rejects_different_tv(hass):
     entry = _existing_entry()
     entry.add_to_hass(hass)
@@ -330,6 +366,22 @@ async def test_reconfigure_rejects_different_tv(hass):
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "unique_id_mismatch"
     assert entry.data[CONF_HOST] == "1.2.3.4"
+
+
+@pytest.mark.parametrize(
+    "resource_path",
+    [
+        "custom_components/samsungtv_frame/strings.json",
+        "custom_components/samsungtv_frame/translations/en.json",
+    ],
+)
+def test_reconfigure_pairing_copy_requires_normal_content_and_allow(resource_path):
+    resource = json.loads(Path(resource_path).read_text())
+
+    assert (
+        resource["config"]["step"]["reconfigure"]["description"]
+        == RECONFIGURE_PAIRING_DESCRIPTION
+    )
 
 
 async def test_options_flow_sets_heartbeat(hass):

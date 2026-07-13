@@ -8,7 +8,7 @@
       },
       "reconfigure": {
         "title": "Reconfigure Samsung Frame TV",
-        "description": "Update the TV's IP address.",
+        "description": "Make sure the TV is showing normal TV or app content (not Art Mode). Enter the TV's new IP address, then approve the 'Allow' prompt on the TV when it appears.",
         "data": {"host": "IP address"}
       },
       "reauth_confirm": {
