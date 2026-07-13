@@ -94,6 +94,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
         self._uuidless_pending: _PendingResponse | None = None
         self._transfer_tasks: set[asyncio.Task[Any]] = set()
         self._closing = False
+        self._stopped = False
 
     async def open(self) -> ClientConnection:
         """Open the websocket and complete its bounded two-stage handshake."""
@@ -153,6 +154,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
 
     async def start_listening(self) -> None:
         """Open and start the sole HA-owned websocket receiver."""
+        self._raise_if_stopped()
         if self._task_factory is None:
             raise RuntimeError("A task factory is required to start the receiver")
         await self.open()
@@ -167,6 +169,15 @@ class FrameArt(SamsungTVWSAsyncConnection):
         """Replace the callback receiving unsolicited Art events."""
         self._event_callback = callback
 
+    def stop(self) -> None:
+        """Permanently prevent this adapter from opening another connection."""
+        self._stopped = True
+
+    def _raise_if_stopped(self) -> None:
+        """Reject work that crossed the permanent shutdown boundary."""
+        if self._stopped:
+            raise ConnectionFailure("Art connection is stopped")
+
     async def request(
         self,
         request: str,
@@ -177,6 +188,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
     ) -> dict[str, Any]:
         """Send one serialized Art request and await its correlated response."""
         async with self._operation_lock:
+            self._raise_if_stopped()
             await self.start_listening()
             return await self._request_unlocked(
                 request,
@@ -426,6 +438,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
         transfer = self._track_transfer()
         try:
             async with self._operation_lock:
+                self._raise_if_stopped()
                 await self.start_listening()
                 try:
                     try:

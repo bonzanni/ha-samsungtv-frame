@@ -426,6 +426,7 @@ class FrameDevice:
 
     async def async_stop(self) -> None:
         self._stopped = True
+        self._art.stop()
         await asyncio.gather(
             self._async_close_remote(),
             self._art.close(),

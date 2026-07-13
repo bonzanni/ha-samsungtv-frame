@@ -81,6 +81,31 @@ async def test_get_artmode_does_not_retry_when_stop_lands_during_failure(device)
     device._art.start_listening.assert_not_awaited()
 
 
+async def test_mutation_queued_before_stop_cannot_reopen_after_lock_release(
+    device,
+):
+    facade_check_passed = asyncio.Event()
+    original_set_artmode = device._art.set_artmode
+
+    async def queued_set_artmode(on):
+        facade_check_passed.set()
+        return await original_set_artmode(on)
+
+    device._art.set_artmode = queued_set_artmode
+    device._art.start_listening = AsyncMock()
+    device._remote.close = AsyncMock()
+
+    await device._art._operation_lock.acquire()
+    mutation = asyncio.create_task(device.async_set_artmode(True))
+    await facade_check_passed.wait()
+    await device.async_stop()
+    device._art._operation_lock.release()
+
+    with pytest.raises(ConnectionFailure, match="stopped"):
+        await mutation
+    device._art.start_listening.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     ("method", "args", "delegate"),
     [
