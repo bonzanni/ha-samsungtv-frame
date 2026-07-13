@@ -2,19 +2,22 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import timedelta
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from .art_session import ArtSessionState
 from .const import (
     APP_FETCH_MAX_ATTEMPTS,
     APP_FETCH_POLL_SPACING,
     ART_FAIL_UNKNOWN_COUNT,
-    DEFAULT_APP_MAP,
+    ART_RECONCILE_SECONDS,
     CONF_TOKEN,
+    DEFAULT_APP_MAP,
     DEFAULT_HEARTBEAT_SECONDS,
     DOMAIN,
     LOGGER,
@@ -55,9 +58,16 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         self._current_art: str | None = None
         self._art_brightness: int | None = None
         self._art_color_temp: int | None = None
+        self._art_generation = -1
+        self._next_art_reconcile = 0.0
+        self._clock = time.monotonic
+        self._art_mode_revision = 0
+        self._current_art_revision = 0
+        self._art_live_push_revision = 0
+        self._latest_rest_power_state: str | None = None
         self._was_reachable = True
         self._wake_task: asyncio.Task | None = None
-        self._listener_task: asyncio.Task | None = None
+        self._art_ready_refresh_task: asyncio.Task | None = None
         self._standby_refresh_task: asyncio.Task | None = None
         # Consecutive polls (reachable, power on) with a failed art query;
         # bounds the last-stable hold so a permanently broken art channel
@@ -82,9 +92,6 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         self._app_map_is_fallback = True
         self._app_fetch_attempts = 0
         self._app_fetch_countdown = 0
-        # Set by __init__.py after the native receiver callback is wired, so a
-        # power-cycle recovery can restart the same receiver task.
-        self.restart_listener: Callable[[], Awaitable[None]] | None = None
 
     def _last_stable(self) -> TvMode:
         if self.data is not None and self.data.tv_mode is not TvMode.UNKNOWN:
@@ -106,66 +113,66 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         info = await self.device.async_device_info()
         reachable = info is not None
         power_state = info.get("PowerState") if info else None
+        self._latest_rest_power_state = power_state
 
         was_reachable = self._was_reachable
         self._was_reachable = reachable
-        if reachable and not was_reachable:
-            self._async_kick_listener_restart()
+        reachable_edge = reachable and not was_reachable
+        session_power_state = (
+            None
+            if power_state == "standby" and self._art_implies_power_on
+            else power_state
+        )
+        self.device.observe_art_power(
+            reachable, session_power_state, reachable_edge
+        )
+
+        if reachable_edge:
             # New power-on: the app list may have changed (and the previous
             # attempts may have hit a booting TV) — the real list gets a new
             # shot; the catalog keeps serving sources meanwhile.
             self._app_fetch_attempts = 0
             self._app_fetch_countdown = 0
             self._app_fetch_warned = False
-        elif (
-            reachable
-            and self.data is not None
-            and power_state == "on"
-            and self.restart_listener is not None
-            and not self.device.listener_alive
-        ):
-            # The receiver task died without an unreachable poll in between
-            # (e.g. a brief WiFi blip the heartbeat never saw). Skipped in
-            # standby: the TV is shutting down and a reconnect would hang.
-            self._async_kick_listener_restart()
 
         if reachable:
             self._unreachable_count = 0
-            # A TV reporting standby is (on this model) shutting down and its
-            # art socket tends to hang until timeout — a retry would double
-            # the poll latency for nothing, and a single failed attempt
-            # already resolves to OFF via derive_tv_mode.
-            attempts = 1 if power_state == "standby" else 2
-            self._art_mode = await self.device.async_get_artmode(attempts=attempts)
             self._async_capture_token()
-            if self._art_mode is None and power_state == "on":
-                self._art_fail_streak += 1
-                if (
-                    self._art_fail_streak >= ART_FAIL_UNKNOWN_COUNT
-                    and not self._art_fail_warned
-                ):
-                    self._art_fail_warned = True
-                    LOGGER.warning(
-                        "Art websocket has failed %s consecutive polls; "
-                        "tv_mode will report unknown until it recovers "
-                        "(check the TV's device connection permissions)",
-                        self._art_fail_streak,
-                    )
-            elif self._art_mode is not None:
-                self._art_fail_streak = 0
-                self._art_fail_warned = False
-            if self._art_mode is True and power_state == "on":
-                self._art_implies_power_on = True
-                # Art extras ride the same (healthy) art socket. Cached values
-                # persist while WATCHING: the selection stays valid until an
-                # image_selected push or the next art-mode poll changes it.
-                self._current_art = await self.device.async_get_current_art()
-                self._art_brightness = await self.device.async_get_art_brightness()
-                self._art_color_temp = (
-                    await self.device.async_get_color_temperature()
-                )
         else:
             self._unreachable_count += 1
+
+        generation = self.device.art_generation
+        reconcile_due = (
+            reachable
+            and self.device.art_ready
+            and power_state in {"on", "standby"}
+            and not (
+                power_state == "standby" and self._art_implies_power_on
+            )
+            and (
+                generation != self._art_generation
+                or self._clock() >= self._next_art_reconcile
+            )
+        )
+        mode_sample_live = False
+        if reconcile_due:
+            mode_sample_live = await self._async_reconcile_art(generation)
+
+        if reachable_edge or not reachable or power_state != "on":
+            self._reset_art_failure()
+        elif reconcile_due:
+            if mode_sample_live:
+                self._reset_art_failure()
+            else:
+                self._record_art_failure()
+        elif not self.device.art_ready:
+            self._record_art_failure()
+
+        effective_art_mode = (
+            None
+            if self._art_fail_streak >= ART_FAIL_UNKNOWN_COUNT
+            else self._art_mode
+        )
 
         # OFF debounce: only declare OFF after N consecutive unreachable polls.
         if not reachable and self._unreachable_count < OFF_DEBOUNCE_COUNT:
@@ -173,7 +180,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         else:
             mode = derive_tv_mode(
                 reachable,
-                self._art_mode,
+                effective_art_mode,
                 power_state,
                 standby_wins=self._art_implies_power_on,
             )
@@ -237,7 +244,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         return FrameData(
             reachable=reachable,
             power_state=power_state,
-            art_mode=False if is_off else self._art_mode,
+            art_mode=False if is_off else effective_art_mode,
             tv_mode=mode,
             current_art=None if is_off else self._current_art,
             art_brightness=None if is_off else self._art_brightness,
@@ -246,6 +253,54 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             volume_level=volume_level,
             is_muted=is_muted,
         )
+
+    async def _async_reconcile_art(self, generation: int) -> bool:
+        """Refresh cached Art fields over one already-READY generation."""
+        self._art_generation = generation
+        self._next_art_reconcile = self._clock() + ART_RECONCILE_SECONDS
+        mode_revision = self._art_mode_revision
+        current_art_revision = self._current_art_revision
+        live_push_revision = self._art_live_push_revision
+
+        art_mode = await self.device.async_get_artmode()
+        current_art = await self.device.async_get_current_art()
+        art_brightness = await self.device.async_get_art_brightness()
+        art_color_temp = await self.device.async_get_color_temperature()
+
+        if (
+            art_mode is not None
+            and self._art_mode_revision == mode_revision
+        ):
+            self._art_mode = art_mode
+            if art_mode and self._latest_rest_power_state == "on":
+                self._art_implies_power_on = True
+        if self._current_art_revision == current_art_revision:
+            self._current_art = current_art
+        self._art_brightness = art_brightness
+        self._art_color_temp = art_color_temp
+
+        return (
+            art_mode is not None
+            or self._art_live_push_revision != live_push_revision
+        )
+
+    def _reset_art_failure(self) -> None:
+        self._art_fail_streak = 0
+        self._art_fail_warned = False
+
+    def _record_art_failure(self) -> None:
+        self._art_fail_streak += 1
+        if (
+            self._art_fail_streak >= ART_FAIL_UNKNOWN_COUNT
+            and not self._art_fail_warned
+        ):
+            self._art_fail_warned = True
+            LOGGER.warning(
+                "Art websocket has failed %s consecutive polls; "
+                "tv_mode will report unknown until it recovers "
+                "(check the TV's device connection permissions)",
+                self._art_fail_streak,
+            )
 
     async def _async_detect_running_app(self) -> str | None:
         """Name of the foreground app, or None (live TV / HDMI / not found).
@@ -352,34 +407,22 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         return True
 
     @callback
-    def _async_kick_listener_restart(self) -> None:
-        """Schedule one listener restart; no-op while one is in flight.
-
-        Entry-scoped so unload cancels it, deduped so a flapping TV cannot
-        pile up concurrent restarts.
-        """
-        if self.restart_listener is None:
+    def handle_art_session_state(self, state: ArtSessionState) -> None:
+        """Refresh once when a new Art receiver generation becomes ready."""
+        if state is not ArtSessionState.READY:
             return
-        if self._listener_task is not None and not self._listener_task.done():
+        if (
+            self._art_ready_refresh_task is not None
+            and not self._art_ready_refresh_task.done()
+        ):
             return
-        self._listener_task = self.config_entry.async_create_background_task(
-            self.hass, self._restart_listener_safe(), f"{DOMAIN}-listener-restart"
-        )
-
-    async def _restart_listener_safe(self) -> None:
-        """Restart the art push listener, swallowing failures.
-
-        A failure here must never break the polling loop; the liveness check
-        in the next poll schedules another attempt.
-        """
-        try:
-            await self.restart_listener()
-        except Exception as err:  # noqa: BLE001
-            LOGGER.warning(
-                "Could not restart the art event listener (%s); "
-                "retrying on a later poll, push updates degraded to polling",
-                err,
+        self._art_ready_refresh_task = (
+            self.config_entry.async_create_background_task(
+                self.hass,
+                self.async_request_refresh(),
+                f"{DOMAIN}-art-ready-refresh",
             )
+        )
 
     @callback
     def handle_art_event(self, event: str, data: Any) -> None:
@@ -389,12 +432,18 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         if sub in ("art_mode_changed", "artmode_status"):
             value = data.get("value") or data.get("status")
             self._art_mode = value == "on"
+            self._art_mode_revision += 1
+            if self._art_mode and self._latest_rest_power_state == "on":
+                self._art_implies_power_on = True
         elif sub in ("image_selected", "slideshow_image_changed", "image_changed"):
             content_id = data.get("content_id")
             if not content_id:
                 return
             self._current_art = content_id
+            self._current_art_revision += 1
         elif sub == "go_to_standby":
+            self._art_live_push_revision += 1
+            self._reset_art_failure()
             # Never a state by itself (the destination is ambiguous), but a
             # strong hint the TV is shutting down: refresh now instead of
             # waiting out the heartbeat, so OFF lands in seconds.
@@ -412,11 +461,15 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             return
         else:
             return
+        self._art_live_push_revision += 1
+        self._reset_art_failure()
         current = self.data
         # Use the last polled PowerState and the learned trait: during the
         # shutdown window the dying art socket can still push "on" events,
         # and standby must keep winning exactly as it does on the poll path.
-        power_state = current.power_state if current else "on"
+        power_state = self._latest_rest_power_state
+        if power_state is None:
+            power_state = current.power_state if current else "on"
         mode = derive_tv_mode(
             True, self._art_mode, power_state,
             standby_wins=self._art_implies_power_on,

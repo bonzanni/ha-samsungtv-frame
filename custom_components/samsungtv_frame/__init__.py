@@ -1,12 +1,33 @@
 """The Samsung Frame TV integration."""
 from __future__ import annotations
 
+import asyncio
+
 from homeassistant.core import HomeAssistant
 from samsungtvws.helper import get_ssl_context
 
-from .const import CONF_HOST, CONF_MAC, CONF_TOKEN, PLATFORMS
+from .const import (
+    ART_CLOSE_DEADLINE,
+    ART_CONNECT_DEADLINE,
+    CONF_HOST,
+    CONF_MAC,
+    CONF_TOKEN,
+    LOGGER,
+    PLATFORMS,
+)
 from .coordinator import FrameConfigEntry, FrameCoordinator
 from .device import FrameDevice
+
+
+async def _async_stop_after_setup_failure(device: FrameDevice) -> None:
+    """Bound failed-setup cleanup without replacing the setup error."""
+    try:
+        async with asyncio.timeout(
+            ART_CONNECT_DEADLINE + ART_CLOSE_DEADLINE
+        ):
+            await device.async_stop()
+    except BaseException as err:  # noqa: BLE001 - preserve the setup error
+        LOGGER.warning("Device cleanup after setup failure did not finish: %s", err)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> bool:
@@ -26,8 +47,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> boo
     )
     coordinator = FrameCoordinator(hass, entry, device)
     device.set_art_event_callback(coordinator.handle_art_event)
-    coordinator.restart_listener = device.async_restart_art_listener
-    await coordinator.async_config_entry_first_refresh()
+    device.set_art_session_state_callback(
+        coordinator.handle_art_session_state
+    )
+    try:
+        await device.async_start_art_session()
+        await coordinator.async_config_entry_first_refresh()
+    except BaseException:
+        try:
+            device.set_art_session_state_callback(None)
+        except Exception as err:  # noqa: BLE001 - preserve the setup error
+            LOGGER.warning(
+                "Could not clear Art session callback after setup failure: %s",
+                err,
+            )
+        await _async_stop_after_setup_failure(device)
+        raise
     entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -36,7 +71,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> boo
 
 async def async_unload_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> bool:
     """Unload a config entry."""
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unloaded:
-        await entry.runtime_data.device.async_stop()
-    return unloaded
+    coordinator = entry.runtime_data
+    coordinator.device.set_art_session_state_callback(None)
+    try:
+        unloaded = await hass.config_entries.async_unload_platforms(
+            entry, PLATFORMS
+        )
+    except BaseException:
+        coordinator.device.set_art_session_state_callback(
+            coordinator.handle_art_session_state
+        )
+        raise
+    if not unloaded:
+        coordinator.device.set_art_session_state_callback(
+            coordinator.handle_art_session_state
+        )
+        return False
+    await coordinator.device.async_stop()
+    return True

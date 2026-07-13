@@ -2,10 +2,23 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from homeassistant.config_entries import ConfigEntry
 
+from custom_components.samsungtv_frame.art_session import ArtSessionState
+from custom_components.samsungtv_frame.const import ART_FAIL_UNKNOWN_COUNT
 from custom_components.samsungtv_frame.coordinator import FrameCoordinator
 from custom_components.samsungtv_frame.models import FrameData, TvMode
+
+
+class FakeClock:
+    """Mutable coordinator clock for reconciliation-window tests."""
+
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
 
 
 def _make(hass, device) -> FrameCoordinator:
@@ -14,8 +27,8 @@ def _make(hass, device) -> FrameCoordinator:
     entry.options = {}
 
     # Run real coroutines handed to the mocked background-task API on the
-    # test loop (so e.g. listener restarts actually execute); anything else
-    # (a patched-out method returning a MagicMock/None) is just swallowed.
+    # test loop; anything else (a patched-out method returning a
+    # MagicMock/None) is just swallowed.
     def _bg_task(_hass, coro, _name, eager_start=True):
         import asyncio
 
@@ -27,18 +40,73 @@ def _make(hass, device) -> FrameCoordinator:
     return FrameCoordinator(hass, entry, device)
 
 
+def _seed_ready_art(
+    mock_device,
+    coord: FrameCoordinator,
+    *,
+    generation: int,
+    now: float,
+    art_mode: bool | None,
+    current_art: str | None,
+    brightness: int | None,
+    color_temperature: int | None,
+) -> FakeClock:
+    """Make every input to one READY reconciliation explicit."""
+    clock = FakeClock(now)
+    coord._clock = clock
+    mock_device.art_ready = True
+    mock_device.art_generation = generation
+    mock_device.async_get_artmode.return_value = art_mode
+    mock_device.async_get_current_art.return_value = current_art
+    mock_device.async_get_art_brightness.return_value = brightness
+    mock_device.async_get_color_temperature.return_value = color_temperature
+    return clock
+
+
+def _reset_art_getters(mock_device) -> None:
+    mock_device.async_get_artmode.reset_mock()
+    mock_device.async_get_current_art.reset_mock()
+    mock_device.async_get_art_brightness.reset_mock()
+    mock_device.async_get_color_temperature.reset_mock()
+
+
+def _assert_art_getter_count(mock_device, expected: int) -> None:
+    assert mock_device.async_get_artmode.await_count == expected
+    assert mock_device.async_get_current_art.await_count == expected
+    assert mock_device.async_get_art_brightness.await_count == expected
+    assert mock_device.async_get_color_temperature.await_count == expected
+
+
 async def test_update_watching(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = False
     coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=False,
+        current_art=None,
+        brightness=None,
+        color_temperature=None,
+    )
     data = await coord._async_update_data()
     assert data.tv_mode is TvMode.WATCHING
 
 
 async def test_update_art_mode(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = True
     coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
     data = await coord._async_update_data()
     assert data.tv_mode is TvMode.ART_MODE
 
@@ -64,7 +132,10 @@ async def test_art_event_enters_art_mode(hass, mock_device):
         tv_mode=TvMode.WATCHING,
         current_art=None,
     )
-    coord.handle_art_event("d2d_service_message", {"event": "art_mode_changed", "value": "on"})
+    coord.handle_art_event(
+        "d2d_service_message",
+        {"event": "art_mode_changed", "value": "on"},
+    )
     assert coord.data.tv_mode is TvMode.ART_MODE
     assert coord.data.art_mode is True
 
@@ -78,7 +149,10 @@ async def test_art_event_reads_status_key(hass, mock_device):
         tv_mode=TvMode.WATCHING,
         current_art=None,
     )
-    coord.handle_art_event("d2d_service_message", {"event": "artmode_status", "status": "on"})
+    coord.handle_art_event(
+        "d2d_service_message",
+        {"event": "artmode_status", "status": "on"},
+    )
     assert coord.data.tv_mode is TvMode.ART_MODE
 
 
@@ -99,8 +173,17 @@ async def test_art_event_unknown_subevent_no_push(hass, mock_device):
 async def test_off_resets_art_mode(hass, mock_device):
     # First poll: TV is on and in art mode.
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = True
     coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
     first = await coord._async_update_data()
     assert first.tv_mode is TvMode.ART_MODE
     assert first.art_mode is True
@@ -115,34 +198,154 @@ async def test_off_resets_art_mode(hass, mock_device):
     assert final.art_mode is False
 
 
-async def test_reachable_edge_triggers_listener_restart(hass, mock_device):
+async def test_healthy_heartbeats_use_cached_art_without_art_io(
+    hass, mock_device
+):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
     coord = _make(hass, mock_device)
-    coord.restart_listener = AsyncMock()
+    clock = _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
+
+    await coord._async_update_data()
+    for _ in range(6):
+        clock.now += 10.0
+        await coord._async_update_data()
+
+    assert mock_device.async_get_artmode.await_count == 1
+    assert mock_device.async_get_current_art.await_count == 1
+    assert mock_device.async_get_art_brightness.await_count == 1
+    assert mock_device.async_get_color_temperature.await_count == 1
+
+
+async def test_new_ready_generation_reconciles_once(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    coord = _make(hass, mock_device)
+    clock = _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
+
+    await coord._async_update_data()
+    clock.now = 10.0
+    mock_device.art_generation = 2
+    await coord._async_update_data()
+    clock.now = 20.0
+    await coord._async_update_data()
+
+    _assert_art_getter_count(mock_device, 2)
+
+
+async def test_reconcile_is_spaced_300_seconds(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    coord = _make(hass, mock_device)
+    clock = _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
+
+    await coord._async_update_data()
+    clock.now = 299.9
+    await coord._async_update_data()
+    _assert_art_getter_count(mock_device, 1)
+
+    clock.now = 300.0
+    await coord._async_update_data()
+    _assert_art_getter_count(mock_device, 2)
+
+
+async def test_reconcile_never_runs_when_session_not_ready(
+    hass, mock_device
+):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=2,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
+    mock_device.art_ready = False
+
+    await coord._async_update_data()
+
+    _assert_art_getter_count(mock_device, 0)
+
+
+async def test_dead_listener_observation_does_not_parallel_art_query(
+    hass, mock_device
+):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=0,
+        now=0.0,
+        art_mode=False,
+        current_art=None,
+        brightness=None,
+        color_temperature=None,
+    )
+    mock_device.art_ready = False
+
+    await coord._async_update_data()
+
+    mock_device.observe_art_power.assert_called_once_with(
+        True, "on", False
+    )
+    _assert_art_getter_count(mock_device, 0)
+
+
+async def test_reachable_edge_delegates_one_power_trigger(
+    hass, mock_device
+):
+    coord = _make(hass, mock_device)
 
     # First poll: unreachable.
     mock_device.async_device_info.return_value = None
     await coord._async_update_data()
+    mock_device.observe_art_power.reset_mock()
 
-    # Second poll: reachable again -> crosses the unreachable->reachable edge.
+    # Second poll: reachable again -> one synchronous session observation.
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = False
     await coord._async_update_data()
-    await hass.async_block_till_done()
 
-    coord.restart_listener.assert_awaited_once()
+    mock_device.observe_art_power.assert_called_once_with(
+        True, "on", True
+    )
 
 
-async def test_reachable_to_reachable_does_not_restart_listener(hass, mock_device):
+def test_temporary_listener_restart_owner_is_removed(hass, mock_device):
     coord = _make(hass, mock_device)
-    coord.restart_listener = AsyncMock()
 
-    mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = False
-    await coord._async_update_data()
-    await coord._async_update_data()
-    await hass.async_block_till_done()
-
-    coord.restart_listener.assert_not_awaited()
+    assert not hasattr(coord, "restart_listener")
+    assert not hasattr(coord, "_listener_task")
+    assert not hasattr(coord, "_async_kick_listener_restart")
+    assert not hasattr(coord, "_restart_listener_safe")
 
 
 async def test_standby_wins_after_art_with_power_on_seen(hass, mock_device):
@@ -150,8 +353,17 @@ async def test_standby_wins_after_art_with_power_on_seen(hass, mock_device):
     been observed, standby + art-still-answering must mean shutdown => OFF
     in a single poll (the dying art socket answers 'on' for ~50 s)."""
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = True
     coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
     first = await coord._async_update_data()
     assert first.tv_mode is TvMode.ART_MODE
 
@@ -166,46 +378,81 @@ async def test_standby_holds_art_when_trait_not_learned(hass, mock_device):
     """2025 Frames (#185) report standby during normal art mode; without the
     learned trait the art gate must keep winning."""
     mock_device.async_device_info.return_value = {"PowerState": "standby"}
-    mock_device.async_get_artmode.return_value = True
     coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
     data = await coord._async_update_data()
     assert data.tv_mode is TvMode.ART_MODE
 
 
 async def test_art_poll_fetches_current_art_and_brightness(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = True
-    mock_device.async_get_current_art.return_value = "MY_F0034"
-    mock_device.async_get_art_brightness.return_value = 7
     coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0034",
+        brightness=7,
+        color_temperature=2,
+    )
     data = await coord._async_update_data()
     assert data.current_art == "MY_F0034"
     assert data.art_brightness == 7
+    assert data.art_color_temperature == 2
 
 
 async def test_art_extras_skipped_when_watching_but_cache_held(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = True
-    mock_device.async_get_current_art.return_value = "MY_F0034"
-    mock_device.async_get_art_brightness.return_value = 7
     coord = _make(hass, mock_device)
+    clock = _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0034",
+        brightness=7,
+        color_temperature=2,
+    )
     await coord._async_update_data()
 
-    # Switch to watching: extras are not re-fetched but the cache persists
-    # (the selected artwork is still the selected artwork).
-    mock_device.async_get_artmode.return_value = False
-    mock_device.async_get_current_art.reset_mock()
+    # A live push switches to watching while the selected-art cache persists.
+    coord.handle_art_event(
+        "d2d_service_message",
+        {"event": "art_mode_changed", "value": "off"},
+    )
+    _reset_art_getters(mock_device)
+    clock.now = 10.0
     data = await coord._async_update_data()
-    mock_device.async_get_current_art.assert_not_awaited()
+    _assert_art_getter_count(mock_device, 0)
+    assert data.tv_mode is TvMode.WATCHING
     assert data.current_art == "MY_F0034"
 
 
 async def test_art_extras_cleared_when_off(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = True
-    mock_device.async_get_current_art.return_value = "MY_F0034"
-    mock_device.async_get_art_brightness.return_value = 7
     coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0034",
+        brightness=7,
+        color_temperature=2,
+    )
     await coord._async_update_data()
 
     mock_device.async_device_info.return_value = None
@@ -232,9 +479,245 @@ async def test_image_selected_push_updates_current_art(hass, mock_device):
     assert coord.data.art_brightness == 5
 
 
+async def test_session_ready_callback_schedules_one_refresh(
+    hass, mock_device
+):
+    coord = _make(hass, mock_device)
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+
+    async def _blocked_refresh():
+        refresh_started.set()
+        await release_refresh.wait()
+
+    with patch.object(
+        coord,
+        "async_request_refresh",
+        AsyncMock(side_effect=_blocked_refresh),
+    ) as refresh:
+        try:
+            coord.handle_art_session_state(ArtSessionState.READY)
+            coord.handle_art_session_state(ArtSessionState.READY)
+            await asyncio.wait_for(refresh_started.wait(), timeout=0.1)
+
+            assert refresh.await_count == 1
+            assert (
+                coord.config_entry.async_create_background_task.call_count
+                == 1
+            )
+            assert (
+                coord.config_entry.async_create_background_task.call_args.args[2]
+                == "samsungtv_frame-art-ready-refresh"
+            )
+        finally:
+            release_refresh.set()
+            await hass.async_block_till_done(wait_background_tasks=True)
+
+
+async def test_push_updates_cache_between_reconciliations(
+    hass, mock_device
+):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    coord = _make(hass, mock_device)
+    clock = _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=False,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
+    coord.data = await coord._async_update_data()
+    _reset_art_getters(mock_device)
+
+    coord.handle_art_event(
+        "d2d_service_message",
+        {"event": "art_mode_changed", "value": "on"},
+    )
+    coord.handle_art_event(
+        "d2d_service_message",
+        {"event": "image_selected", "content_id": "MY_F0099"},
+    )
+    clock.now = 10.0
+    data = await coord._async_update_data()
+
+    assert data.tv_mode is TvMode.ART_MODE
+    assert data.art_mode is True
+    assert data.current_art == "MY_F0099"
+    _assert_art_getter_count(mock_device, 0)
+
+
+async def test_reconcile_reads_all_art_fields_sequentially(
+    hass, mock_device
+):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
+    order: list[str] = []
+    mode_started = asyncio.Event()
+    current_started = asyncio.Event()
+    brightness_started = asyncio.Event()
+    color_temperature_started = asyncio.Event()
+    release_mode = asyncio.Event()
+    release_current = asyncio.Event()
+    release_brightness = asyncio.Event()
+    release_color_temperature = asyncio.Event()
+
+    async def _blocked(
+        name: str,
+        started: asyncio.Event,
+        release: asyncio.Event,
+        value,
+    ):
+        order.append(f"{name}:start")
+        started.set()
+        await release.wait()
+        order.append(f"{name}:end")
+        return value
+
+    async def _mode(*_args, **_kwargs):
+        return await _blocked("mode", mode_started, release_mode, True)
+
+    async def _current_art():
+        return await _blocked(
+            "current", current_started, release_current, "MY_F0001"
+        )
+
+    async def _brightness():
+        return await _blocked(
+            "brightness", brightness_started, release_brightness, 5
+        )
+
+    async def _color_temperature():
+        return await _blocked(
+            "color_temperature",
+            color_temperature_started,
+            release_color_temperature,
+            3,
+        )
+
+    mock_device.async_get_artmode.side_effect = _mode
+    mock_device.async_get_current_art.side_effect = _current_art
+    mock_device.async_get_art_brightness.side_effect = _brightness
+    mock_device.async_get_color_temperature.side_effect = _color_temperature
+    data = None
+    poll_task = asyncio.create_task(coord._async_update_data())
+    releases = (
+        release_mode,
+        release_current,
+        release_brightness,
+        release_color_temperature,
+    )
+    try:
+        await asyncio.wait_for(mode_started.wait(), timeout=0.1)
+        assert not current_started.is_set()
+        assert not brightness_started.is_set()
+        assert not color_temperature_started.is_set()
+
+        release_mode.set()
+        await asyncio.wait_for(current_started.wait(), timeout=0.1)
+        assert not brightness_started.is_set()
+        assert not color_temperature_started.is_set()
+
+        release_current.set()
+        await asyncio.wait_for(brightness_started.wait(), timeout=0.1)
+        assert not color_temperature_started.is_set()
+
+        release_brightness.set()
+        await asyncio.wait_for(
+            color_temperature_started.wait(), timeout=0.1
+        )
+        release_color_temperature.set()
+        data = await asyncio.wait_for(poll_task, timeout=0.1)
+    finally:
+        for release in releases:
+            release.set()
+        if not poll_task.done():
+            poll_task.cancel()
+        await asyncio.gather(poll_task, return_exceptions=True)
+
+    assert data is not None
+    assert order == [
+        "mode:start",
+        "mode:end",
+        "current:start",
+        "current:end",
+        "brightness:start",
+        "brightness:end",
+        "color_temperature:start",
+        "color_temperature:end",
+    ]
+    _assert_art_getter_count(mock_device, 1)
+
+
+async def test_reconcile_does_not_overwrite_newer_push(
+    hass, mock_device
+):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=False,
+        current_art="STALE_ART",
+        brightness=4,
+        color_temperature=2,
+    )
+    mode_started = asyncio.Event()
+    release_mode = asyncio.Event()
+
+    async def _stale_mode(*_args, **_kwargs):
+        mode_started.set()
+        await release_mode.wait()
+        return None
+
+    mock_device.async_get_artmode.side_effect = _stale_mode
+    coord._art_fail_streak = 2
+    data = None
+    poll_task = asyncio.create_task(coord._async_update_data())
+    try:
+        await asyncio.wait_for(mode_started.wait(), timeout=0.1)
+        mock_device.async_get_current_art.assert_not_awaited()
+        mock_device.async_get_art_brightness.assert_not_awaited()
+        mock_device.async_get_color_temperature.assert_not_awaited()
+        coord.handle_art_event(
+            "d2d_service_message",
+            {"event": "art_mode_changed", "value": "on"},
+        )
+        coord.handle_art_event(
+            "d2d_service_message",
+            {"event": "image_selected", "content_id": "PUSHED_ART"},
+        )
+        release_mode.set()
+        data = await asyncio.wait_for(poll_task, timeout=0.1)
+    finally:
+        release_mode.set()
+        await asyncio.gather(poll_task, return_exceptions=True)
+
+    assert data is not None
+    assert data.art_mode is True
+    assert data.current_art == "PUSHED_ART"
+    assert coord._art_mode is True
+    assert coord._current_art == "PUSHED_ART"
+    assert coord._art_fail_streak == 0
+    _assert_art_getter_count(mock_device, 1)
+
+
 async def test_running_app_detected_while_watching(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = False
 
     async def _status(app_id):
         return {"visible": app_id == "NETFLIX_ID", "running": True}
@@ -245,6 +728,16 @@ async def test_running_app_detected_while_watching(hass, mock_device):
         "Netflix": {"appId": "NETFLIX_ID"},
         "YouTube": {"appId": "YT_ID"},
     }
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=False,
+        current_art=None,
+        brightness=None,
+        color_temperature=None,
+    )
     data = await coord._async_update_data()
     assert data.tv_mode is TvMode.WATCHING
     assert data.running_app == "Netflix"
@@ -252,99 +745,316 @@ async def test_running_app_detected_while_watching(hass, mock_device):
 
 async def test_running_app_none_when_no_visible_app(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = False
     mock_device.async_app_status.return_value = {"visible": False}
     coord = _make(hass, mock_device)
     coord.app_map = {"Netflix": {"appId": "NETFLIX_ID"}}
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=False,
+        current_art=None,
+        brightness=None,
+        color_temperature=None,
+    )
     data = await coord._async_update_data()
     assert data.running_app is None
 
 
 async def test_running_app_not_swept_in_art_mode(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = True
     coord = _make(hass, mock_device)
     coord.app_map = {"Netflix": {"appId": "NETFLIX_ID"}}
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
     data = await coord._async_update_data()
     mock_device.async_app_status.assert_not_awaited()
     assert data.running_app is None
 
 
-async def test_push_art_on_during_standby_shutdown_stays_off(hass, mock_device):
-    """The dying art socket can push 'on' events during shutdown; with the
-    learned trait and PowerState standby, OFF must win on the push path too."""
+async def test_push_art_on_then_learned_standby_is_off(hass, mock_device):
+    """A live Art-on push teaches that this model uses standby for shutdown."""
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = True
     coord = _make(hass, mock_device)
-    await coord._async_update_data()  # learn art+power-on trait
+    clock = _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=False,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
+    coord.data = await coord._async_update_data()
+    _reset_art_getters(mock_device)
 
-    # Shutdown begins: poll sees standby => OFF.
+    coord.handle_art_event(
+        "d2d_service_message",
+        {"event": "art_mode_changed", "value": "on"},
+    )
+    assert coord.data.tv_mode is TvMode.ART_MODE
+
+    # Even a new READY generation must not reconcile during learned shutdown.
+    mock_device.art_generation = 2
+    clock.now = 10.0
     mock_device.async_device_info.return_value = {"PowerState": "standby"}
     coord.data = await coord._async_update_data()
+
     assert coord.data.tv_mode is TvMode.OFF
+    assert coord.data.art_mode is False
+    mock_device.observe_art_power.assert_called_with(True, None, False)
+    _assert_art_getter_count(mock_device, 0)
 
-    with patch.object(coord, "async_set_updated_data") as push:
-        coord.handle_art_event(
-            "d2d_service_message", {"event": "art_mode_changed", "value": "on"}
-        )
-        pushed = push.call_args.args[0]
-    assert pushed.tv_mode is TvMode.OFF
+    coord.handle_art_event(
+        "d2d_service_message",
+        {"event": "art_mode_changed", "value": "on"},
+    )
+
+    assert coord.data.tv_mode is TvMode.OFF
+    _assert_art_getter_count(mock_device, 0)
 
 
-async def test_initial_poll_does_not_restart_dead_receiver(hass, mock_device):
+async def test_unavailable_session_becomes_unknown_without_network_attempts(
+    hass, mock_device
+):
+    """Unavailable READY state ages the cache without Art reads or opens."""
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = False
-    mock_device.listener_alive = False
+    mock_device.remote_confirmed = False
     coord = _make(hass, mock_device)
-    coord.restart_listener = AsyncMock()
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
+    coord.data = await coord._async_update_data()
+    assert coord.data.tv_mode is TvMode.ART_MODE
+    mock_device.art_ready = False
+    _reset_art_getters(mock_device)
+    coord.config_entry.async_create_background_task.reset_mock()
+
+    for _ in range(ART_FAIL_UNKNOWN_COUNT - 1):
+        coord.data = await coord._async_update_data()
+        assert coord.data.tv_mode is TvMode.ART_MODE
+    coord.data = await coord._async_update_data()
+
+    assert coord.data.tv_mode is TvMode.UNKNOWN
+    assert coord._art_mode is True
+    _assert_art_getter_count(mock_device, 0)
+    mock_device.async_start_art_session.assert_not_awaited()
+    task_names = [
+        task_call.args[2]
+        for task_call in coord.config_entry.async_create_background_task.call_args_list
+    ]
+    assert "samsungtv_frame-listener-restart" not in task_names
+
+
+async def test_failed_due_reconcile_counts_once(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=None,
+        current_art=None,
+        brightness=None,
+        color_temperature=None,
+    )
+
+    async def _failed_mode(*_args, **_kwargs):
+        mock_device.art_ready = False
+        return None
+
+    mock_device.async_get_artmode.side_effect = _failed_mode
     await coord._async_update_data()
-    await hass.async_block_till_done()
 
-    coord.restart_listener.assert_not_awaited()
+    assert coord._art_fail_streak == 1
+    _assert_art_getter_count(mock_device, 1)
+
+    mock_device.async_get_artmode.side_effect = None
+    mock_device.async_get_artmode.return_value = True
+    mock_device.async_get_current_art.return_value = "MY_F0002"
+    mock_device.async_get_art_brightness.return_value = 6
+    mock_device.async_get_color_temperature.return_value = 4
+    mock_device.art_ready = True
+    mock_device.art_generation = 2
+    coord.data = await coord._async_update_data()
+
+    assert coord._art_fail_streak == 0
+    assert coord.data.tv_mode is TvMode.ART_MODE
+    _assert_art_getter_count(mock_device, 2)
 
 
-async def test_dead_receiver_task_triggers_restart_after_initial_poll(
+async def test_reachable_edge_and_off_reset_failure_episode(
     hass, mock_device
 ):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = False
-    mock_device.listener_alive = True
+    mock_device.remote_confirmed = False
     coord = _make(hass, mock_device)
-    coord.restart_listener = AsyncMock()
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
     coord.data = await coord._async_update_data()
+    mock_device.art_ready = False
+    _reset_art_getters(mock_device)
 
-    mock_device.listener_alive = False
-    await coord._async_update_data()
-    await hass.async_block_till_done()
-
-    coord.restart_listener.assert_awaited_once()
-
-
-async def test_listener_restart_deduped_while_in_flight(hass, mock_device):
-    coord = _make(hass, mock_device)
-    coord.restart_listener = AsyncMock()
-    coord._listener_task = MagicMock()
-    coord._listener_task.done.return_value = False
-    coord._async_kick_listener_restart()
-    coord.config_entry.async_create_background_task.assert_not_called()
-
-
-async def test_persistent_art_failure_becomes_unknown(hass, mock_device):
-    """After N consecutive failed art queries the last-stable hold must end."""
-    mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = True
-    coord = _make(hass, mock_device)
-    coord.data = await coord._async_update_data()
-    assert coord.data.tv_mode is TvMode.ART_MODE
-
-    from custom_components.samsungtv_frame.const import ART_FAIL_UNKNOWN_COUNT
-
-    mock_device.async_get_artmode.return_value = None  # art channel dead
-    for _ in range(ART_FAIL_UNKNOWN_COUNT - 1):
+    async def _assert_exact_failure_budget():
+        for expected in range(1, ART_FAIL_UNKNOWN_COUNT):
+            coord.data = await coord._async_update_data()
+            assert coord._art_fail_streak == expected
+            assert coord.data.tv_mode is TvMode.ART_MODE
         coord.data = await coord._async_update_data()
-        assert coord.data.tv_mode is TvMode.ART_MODE  # held while transient
+        assert coord._art_fail_streak == ART_FAIL_UNKNOWN_COUNT
+        assert coord.data.tv_mode is TvMode.UNKNOWN
+
+    await _assert_exact_failure_budget()
+
+    mock_device.async_device_info.return_value = None
     coord.data = await coord._async_update_data()
-    assert coord.data.tv_mode is TvMode.UNKNOWN  # bounded: surfaces as unknown
+    assert coord._art_fail_streak == 0
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    coord.data = await coord._async_update_data()
+    assert coord._art_fail_streak == 0
+    assert coord.data.tv_mode is TvMode.ART_MODE
+    await _assert_exact_failure_budget()
+
+    mock_device.async_device_info.return_value = {"PowerState": "standby"}
+    coord.data = await coord._async_update_data()
+    assert coord._art_fail_streak == 0
+    assert coord.data.tv_mode is TvMode.OFF
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    await _assert_exact_failure_budget()
+    _assert_art_getter_count(mock_device, 0)
+
+
+@pytest.mark.parametrize(
+    "push_payload",
+    [
+        {"event": "image_selected", "content_id": "MY_F0099"},
+        {"event": "art_mode_changed", "value": "on"},
+        {"event": "artmode_status", "status": "on"},
+    ],
+    ids=["image-selected", "art-mode-changed", "artmode-status"],
+)
+async def test_push_resets_failure_streak(
+    hass, mock_device, push_payload
+):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
+    coord.data = await coord._async_update_data()
+    mock_device.art_ready = False
+    _reset_art_getters(mock_device)
+    for _ in range(3):
+        coord.data = await coord._async_update_data()
+    assert coord._art_fail_streak == 3
+    observation_count = mock_device.observe_art_power.call_count
+
+    coord.handle_art_event(
+        "d2d_service_message",
+        push_payload,
+    )
+
+    assert coord._art_fail_streak == 0
+    assert mock_device.observe_art_power.call_count == observation_count
+    _assert_art_getter_count(mock_device, 0)
+    mock_device.async_start_art_session.assert_not_awaited()
+
+
+async def test_unreachable_ready_session_never_reconciles(
+    hass, mock_device
+):
+    mock_device.async_device_info.return_value = None
+    coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=300.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
+
+    await coord._async_update_data()
+
+    _assert_art_getter_count(mock_device, 0)
+
+
+async def test_cancelled_reconcile_reserves_window(hass, mock_device):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    coord = _make(hass, mock_device)
+    clock = _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=False,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
+    mode_started = asyncio.Event()
+    never_release = asyncio.Event()
+
+    async def _blocked_mode(*_args, **_kwargs):
+        mode_started.set()
+        await never_release.wait()
+        return False
+
+    mock_device.async_get_artmode.side_effect = _blocked_mode
+    first_poll = asyncio.create_task(coord._async_update_data())
+    try:
+        await asyncio.wait_for(mode_started.wait(), timeout=0.1)
+        first_poll.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_poll
+    finally:
+        first_poll.cancel()
+        await asyncio.gather(first_poll, return_exceptions=True)
+
+    mock_device.async_get_artmode.side_effect = None
+    mock_device.async_get_artmode.return_value = False
+    clock.now = 10.0
+    await coord._async_update_data()
+
+    assert mock_device.async_get_artmode.await_count == 1
+    assert mock_device.async_get_current_art.await_count == 0
+    assert mock_device.async_get_art_brightness.await_count == 0
+    assert mock_device.async_get_color_temperature.await_count == 0
 
 
 async def test_app_fetch_retries_and_replaces_catalog(hass, mock_device):
@@ -354,9 +1064,19 @@ async def test_app_fetch_retries_and_replaces_catalog(hass, mock_device):
     )
 
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = False
+    mock_device.remote_confirmed = True
     mock_device.async_app_list.return_value = None  # booting TV: fetch fails
     coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=False,
+        current_art=None,
+        brightness=None,
+        color_temperature=None,
+    )
     await coord._async_update_data()
     await hass.async_block_till_done()
     # Catalog serves from the start, even while real fetches fail.
@@ -370,16 +1090,27 @@ async def test_app_fetch_retries_and_replaces_catalog(hass, mock_device):
         await coord._async_update_data()
     await hass.async_block_till_done()
     # The TV's real list replaces the catalog once it answers.
-    assert coord.app_map == {"Netflix": {"name": "Netflix", "appId": "X", "app_type": 2}}
+    assert coord.app_map == {
+        "Netflix": {"name": "Netflix", "appId": "X", "app_type": 2}
+    }
 
 
 async def test_no_background_app_fetch_before_remote_confirmed(hass, mock_device):
     """A remote connect can pop an authorization prompt on the TV; background
     fetches must never be the trigger — only user-initiated remote use."""
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = False
     mock_device.remote_confirmed = False
     coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=False,
+        current_art=None,
+        brightness=None,
+        color_temperature=None,
+    )
     for _ in range(6):
         await coord._async_update_data()
     await hass.async_block_till_done()
@@ -396,9 +1127,19 @@ async def test_catalog_kept_after_exhaustion_and_power_cycle(hass, mock_device):
     )
 
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = False
+    mock_device.remote_confirmed = True
     mock_device.async_app_list.return_value = None
     coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=False,
+        current_art=None,
+        brightness=None,
+        color_temperature=None,
+    )
     for _ in range(APP_FETCH_MAX_ATTEMPTS * APP_FETCH_POLL_SPACING):
         await coord._async_update_data()
     await hass.async_block_till_done()
@@ -417,9 +1158,18 @@ async def test_catalog_kept_after_exhaustion_and_power_cycle(hass, mock_device):
 
 async def test_volume_polled_when_powered_on(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = False
     mock_device.async_get_volume.return_value = (0.15, True)
     coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=False,
+        current_art=None,
+        brightness=None,
+        color_temperature=None,
+    )
     data = await coord._async_update_data()
     assert data.volume_level == 0.15
     assert data.is_muted is True
@@ -441,22 +1191,25 @@ async def test_heartbeat_option_sets_update_interval(hass, mock_device):
     assert coord.update_interval.total_seconds() == 30
 
 
-async def test_poll_captures_newly_issued_token(hass, mock_device):
+async def test_reachable_heartbeat_captures_token_while_art_unavailable(
+    hass, mock_device
+):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = False
+    mock_device.art_ready = False
     mock_device.newest_token = "fresh-token"
     coord = _make(hass, mock_device)
+    coord._clock = FakeClock(0.0)
     coord.config_entry.data = {"host": "1.2.3.4", "token": None}
     with patch.object(hass.config_entries, "async_update_entry") as update:
         await coord._async_update_data()
     mock_device.update_token.assert_called_once_with("fresh-token")
     update.assert_called_once()
     assert update.call_args.kwargs["data"]["token"] == "fresh-token"
+    _assert_art_getter_count(mock_device, 0)
 
 
 async def test_poll_no_token_update_when_none_issued(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.async_get_artmode.return_value = False
     coord = _make(hass, mock_device)
     with patch.object(hass.config_entries, "async_update_entry") as update:
         await coord._async_update_data()
@@ -534,35 +1287,28 @@ async def test_art_event_go_to_standby_holds_but_refreshes(hass, mock_device):
             coord, "async_request_refresh", AsyncMock(side_effect=_refresh)
         ) as refresh,
     ):
-        coord.handle_art_event("d2d_service_message", {"event": "go_to_standby"})
-        coord.handle_art_event("d2d_service_message", {"event": "go_to_standby"})
-        # Destination is ambiguous -> never a state change by itself...
-        push.assert_not_called()
-        coord.config_entry.async_create_background_task.assert_called_once()
-        assert (
-            coord.config_entry.async_create_background_task.call_args.args[0] is hass
-        )
-        assert (
-            coord.config_entry.async_create_background_task.call_args.args[2]
-            == "samsungtv_frame-standby-refresh"
-        )
-        await asyncio.sleep(0)
-        refresh.assert_awaited_once()
-        release_refresh.set()
-        await hass.async_block_till_done()
+        try:
+            coord.handle_art_event(
+                "d2d_service_message", {"event": "go_to_standby"}
+            )
+            coord.handle_art_event(
+                "d2d_service_message", {"event": "go_to_standby"}
+            )
+            # Destination is ambiguous -> never a state change by itself...
+            push.assert_not_called()
+            coord.config_entry.async_create_background_task.assert_called_once()
+            assert (
+                coord.config_entry.async_create_background_task.call_args.args[0]
+                is hass
+            )
+            assert (
+                coord.config_entry.async_create_background_task.call_args.args[2]
+                == "samsungtv_frame-standby-refresh"
+            )
+            await asyncio.sleep(0)
+            refresh.assert_awaited_once()
+        finally:
+            release_refresh.set()
+            await hass.async_block_till_done()
         # ...but it must trigger an immediate poll to resolve OFF fast.
         refresh.assert_awaited_once()
-
-
-async def test_poll_skips_art_retry_when_standby(hass, mock_device):
-    mock_device.async_device_info.return_value = {"PowerState": "standby"}
-    coord = _make(hass, mock_device)
-    await coord._async_update_data()
-    assert mock_device.async_get_artmode.call_args.kwargs["attempts"] == 1
-
-
-async def test_poll_uses_art_retry_when_on(hass, mock_device):
-    mock_device.async_device_info.return_value = {"PowerState": "on"}
-    coord = _make(hass, mock_device)
-    await coord._async_update_data()
-    assert mock_device.async_get_artmode.call_args.kwargs["attempts"] == 2

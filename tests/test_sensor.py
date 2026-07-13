@@ -11,6 +11,8 @@ from custom_components.samsungtv_frame.const import (
 async def test_tv_mode_sensor_watching(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False
+    mock_device.art_ready = True
+    mock_device.art_generation = 1
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_HOST: "1.2.3.4", CONF_MAC: "A0:D0:5B:86:CE:B7", CONF_TOKEN: "t"},
@@ -31,6 +33,8 @@ async def test_current_art_sensor(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = True
     mock_device.async_get_current_art.return_value = "MY_F0034"
+    mock_device.art_ready = True
+    mock_device.art_generation = 1
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_HOST: "1.2.3.4", CONF_MAC: "A0:D0:5B:86:CE:B7", CONF_TOKEN: "t"},

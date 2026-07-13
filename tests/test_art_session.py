@@ -222,6 +222,54 @@ async def test_observations_inside_backoff_do_not_connect():
     assert art.start_listening.await_count == 1
 
 
+async def test_initial_on_observation_schedules_due_session_probe():
+    art = FakeArt()
+    art.block_next_start()
+    clock = FakeClock()
+    session, factory = make_session(art, clock)
+    await session.async_start()
+
+    session.observe_power(
+        reachable=True, power_state="on", reachable_edge=False
+    )
+    session.observe_power(
+        reachable=True, power_state="on", reachable_edge=False
+    )
+    try:
+        await wait_for_start_calls(art, 1)
+        assert [name for _coroutine, name in factory.calls] == [
+            "samsungtv_frame-art-session-connect"
+        ]
+    finally:
+        if art._start_gate is not None:
+            art.release_start()
+        await session.async_stop()
+
+
+async def test_cold_standby_observation_allows_initial_probe():
+    art = FakeArt()
+    art.block_next_start()
+    clock = FakeClock()
+    session, factory = make_session(art, clock)
+    await session.async_start()
+
+    session.observe_power(
+        reachable=True, power_state="standby", reachable_edge=False
+    )
+    session.observe_power(
+        reachable=True, power_state="standby", reachable_edge=False
+    )
+    try:
+        await wait_for_start_calls(art, 1)
+        assert [name for _coroutine, name in factory.calls] == [
+            "samsungtv_frame-art-session-connect"
+        ]
+    finally:
+        if art._start_gate is not None:
+            art.release_start()
+        await session.async_stop()
+
+
 async def test_three_hostless_failures_enter_900_second_dormant():
     art = FakeArt(
         [ArtHostUnavailable("no host") for _ in range(3)]
@@ -371,6 +419,52 @@ async def test_dead_ready_receiver_enters_backoff_without_immediate_open():
     assert session.state is ArtSessionState.BACKOFF
     assert session._next_retry_at == clock.now + 30
     assert art.start_listening.await_count == 1
+
+
+async def test_reachable_edge_dead_ready_receiver_probes_immediately():
+    art = FakeArt()
+    clock = FakeClock()
+    session, factory = make_session(art, clock)
+    await session.async_start()
+    assert await session.async_ensure_ready(ArtSessionTrigger.BACKGROUND)
+    assert session.state is ArtSessionState.READY
+    assert art.start_listening.await_count == 1
+
+    # A reachable edge starts a fresh failure episode even if stale counters
+    # somehow survived until receiver death.
+    session._failure_count = 3
+    session._host_failure_count = 2
+    session._next_retry_at = clock.now + 300
+    art.alive = False
+    assert session.state is ArtSessionState.READY
+    assert not session.ready
+    art.block_next_start()
+
+    try:
+        session.observe_power(
+            reachable=True, power_state="on", reachable_edge=True
+        )
+        for _ in range(5):
+            session.observe_power(
+                reachable=True, power_state="on", reachable_edge=False
+            )
+        await wait_for_start_calls(art, 2)
+        assert art.start_listening.await_count == 2
+        assert session._failure_count == 1
+        assert session._host_failure_count == 0
+        assert session._next_retry_at == clock.now + 30
+        assert [
+            name
+            for _coroutine, name in factory.calls
+            if name == "samsungtv_frame-art-session-connect"
+        ] == [
+            "samsungtv_frame-art-session-connect",
+            "samsungtv_frame-art-session-connect",
+        ]
+    finally:
+        if art._start_gate is not None:
+            art.release_start()
+        await session.async_stop()
 
 
 async def test_stop_during_connect_is_terminal_and_closes_transport():

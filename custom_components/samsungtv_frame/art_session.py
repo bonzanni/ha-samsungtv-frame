@@ -113,7 +113,7 @@ class ArtSession:
     def observe_power(
         self,
         reachable: bool,
-        power_state: str,
+        power_state: str | None,
         reachable_edge: bool,
     ) -> None:
         """Record power state and schedule due connection work."""
@@ -123,7 +123,7 @@ class ArtSession:
         if reachable_edge:
             self._reset_failures()
             self._next_retry_at = 0.0
-        if not reachable or power_state != "on":
+        if not reachable or power_state not in {"on", "standby"}:
             return
         if (
             self._state is ArtSessionState.READY
@@ -132,6 +132,9 @@ class ArtSession:
             self._record_failure(
                 ConnectionFailure("Art receiver stopped")
             )
+            if reachable_edge:
+                self._schedule_connect(ArtSessionTrigger.POWER_EDGE)
+                return
         if self._background_attempt_due():
             self._schedule_connect(
                 ArtSessionTrigger.POWER_EDGE

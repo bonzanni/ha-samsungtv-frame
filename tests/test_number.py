@@ -11,6 +11,8 @@ ENTITY = "number.samsung_frame_tv_art_brightness"
 
 
 async def _setup(hass, mock_device):
+    mock_device.art_ready = True
+    mock_device.art_generation = 1
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_HOST: "1.2.3.4", CONF_MAC: "A0:D0:5B:86:CE:B7", CONF_TOKEN: "t"},

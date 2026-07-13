@@ -11,6 +11,8 @@ ENTITY = "image.samsung_frame_tv_current_art_image"
 
 
 async def _setup(hass, mock_device):
+    mock_device.art_ready = True
+    mock_device.art_generation = 1
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_HOST: "1.2.3.4", CONF_MAC: "A0:D0:5B:86:CE:B7", CONF_TOKEN: "t"},
@@ -46,9 +48,11 @@ async def test_image_serves_current_art_thumbnail(hass, mock_device):
     assert mock_device.async_get_art_thumbnail.await_count == 1
 
     # Art change invalidates the cache and bumps the timestamp.
-    mock_device.async_get_current_art.return_value = "MY_F0042"
     mock_device.async_get_art_thumbnail.return_value = b"jpeg-2"
-    await coordinator.async_refresh()
+    coordinator.handle_art_event(
+        "d2d_service_message",
+        {"event": "image_selected", "content_id": "MY_F0042"},
+    )
     assert await entity.async_image() == b"jpeg-2"
     assert mock_device.async_get_art_thumbnail.await_count == 2
 

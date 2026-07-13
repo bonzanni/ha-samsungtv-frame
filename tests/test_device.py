@@ -1,5 +1,6 @@
 # tests/test_device.py
 import asyncio
+from inspect import signature
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -200,14 +201,6 @@ async def test_get_artmode_does_not_retry_timeout(device):
     device._art_session.async_connection_failed.assert_awaited_once_with(error)
 
 
-async def test_get_artmode_legacy_attempts_argument_is_ignored(hass, device):
-    error = OSError("hanging socket")
-    device._art.get_artmode = AsyncMock(side_effect=error)
-    assert await device.async_get_artmode(attempts=99) is None
-    device._art.get_artmode.assert_awaited_once()
-    device._art_session.async_connection_failed.assert_awaited_once_with(error)
-
-
 async def test_user_mutation_requests_one_user_probe_and_executes_once(device):
     device._art.set_artmode = AsyncMock()
 
@@ -360,18 +353,16 @@ async def test_update_token_is_used_by_both_persistent_clients(hass, device):
     assert device._remote.token == "fresh-token"
 
 
-async def test_art_callback_and_start_are_loop_native(hass, device):
+async def test_art_callback_and_session_start_are_loop_native(hass, device):
     callback = AsyncMock()
     device._art.set_event_callback = MagicMock()
     device._art.start_listening = AsyncMock()
     with patch.object(hass, "async_add_executor_job") as executor:
         device.set_art_event_callback(callback)
-        await device.async_start_art_listener()
+        await device.async_start_art_session()
     device._art.set_event_callback.assert_called_once_with(callback)
     device._art_session.async_start.assert_awaited_once()
-    device._art_session.async_ensure_ready.assert_awaited_once_with(
-        ArtSessionTrigger.BACKGROUND
-    )
+    device._art_session.async_ensure_ready.assert_not_awaited()
     device._art.start_listening.assert_not_awaited()
     executor.assert_not_called()
 
@@ -399,33 +390,13 @@ def test_observe_art_power_delegates_without_awaiting_network(device):
     )
 
 
-async def test_listener_alive_delegates_to_art_ready(device):
-    assert device.listener_alive is True
-
-
-async def test_listener_not_restarted_after_stop(hass, device):
-    """An in-flight restart finishing after unload must not resurrect a
-    listener nothing will ever close."""
-    device._remote.close = AsyncMock()
-    device._art.start_listening = AsyncMock()
-    await device.async_stop()
-    await device.async_restart_art_listener()
-    await device.async_start_art_listener()
-    device._art.start_listening.assert_not_awaited()
-    device._art_session.async_start.assert_not_awaited()
-    device._art_session.async_ensure_ready.assert_not_awaited()
-
-
-async def test_legacy_listener_shims_arm_and_background_ensure(device):
-    device._art.close = AsyncMock()
-    device._art.start_listening = AsyncMock()
-    await device.async_restart_art_listener()
-    device._art_session.async_start.assert_awaited_once()
-    device._art_session.async_ensure_ready.assert_awaited_once_with(
-        ArtSessionTrigger.BACKGROUND
-    )
-    device._art.close.assert_not_awaited()
-    device._art.start_listening.assert_not_awaited()
+def test_temporary_art_compatibility_shims_are_removed(device):
+    assert list(signature(FrameDevice.async_get_artmode).parameters) == [
+        "self"
+    ]
+    assert not hasattr(type(device), "listener_alive")
+    assert not hasattr(type(device), "async_start_art_listener")
+    assert not hasattr(type(device), "async_restart_art_listener")
 
 
 async def test_device_stop_stops_session_and_remote_once(device):
@@ -472,10 +443,7 @@ async def test_device_stop_stops_session_and_remote_once(device):
     assert len(device._test_task_factory_calls) == 1
 
 
-@pytest.mark.parametrize("concurrent_action", ["listener", "mutation"])
-async def test_stop_admission_closes_before_owner_first_runs(
-    device, concurrent_action
-):
+async def test_stop_admission_closes_before_owner_first_runs(device):
     release_owner = asyncio.Event()
     owner_created = asyncio.Event()
 
@@ -494,14 +462,9 @@ async def test_stop_admission_closes_before_owner_first_runs(
     await owner_created.wait()
 
     try:
-        if concurrent_action == "listener":
-            await device.async_start_art_listener()
-            device._art_session.async_start.assert_not_awaited()
-            device._art_session.async_ensure_ready.assert_not_awaited()
-        else:
-            with pytest.raises(ConnectionFailure, match="stopped"):
-                await device.async_set_artmode(True)
-            device._art.set_artmode.assert_not_awaited()
+        with pytest.raises(ConnectionFailure, match="stopped"):
+            await device.async_set_artmode(True)
+        device._art.set_artmode.assert_not_awaited()
         assert device._stopped is True
     finally:
         release_owner.set()

@@ -1,10 +1,18 @@
-from unittest.mock import call, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, call, patch
+
+import pytest
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.samsungtv_frame import (
+    async_setup_entry,
+    async_unload_entry,
+)
 from custom_components.samsungtv_frame.const import (
     CONF_HOST, CONF_MAC, CONF_TOKEN, DOMAIN,
 )
+from custom_components.samsungtv_frame.coordinator import FrameCoordinator
 
 
 def _make_entry() -> MockConfigEntry:
@@ -18,14 +26,30 @@ def _make_entry() -> MockConfigEntry:
 async def test_setup_and_unload(hass, mock_device):
     entry = _make_entry()
     entry.add_to_hass(hass)
-    callback_was_wired = False
+    setup_order: list[str] = []
 
-    def _capture_callback(_callback):
-        nonlocal callback_was_wired
-        callback_was_wired = True
+    def _capture_event_callback(_callback):
+        assert setup_order == []
+        setup_order.append("event-callback")
+
+    def _capture_state_callback(_callback):
+        if _callback is None:
+            setup_order.append("state-clear")
+            return
+        assert setup_order == ["event-callback"]
+        setup_order.append("state-callback")
+
+    async def _start_session():
+        assert setup_order == ["event-callback", "state-callback"]
+        setup_order.append("session-start")
 
     async def _device_info():
-        assert callback_was_wired
+        assert setup_order == [
+            "event-callback",
+            "state-callback",
+            "session-start",
+        ]
+        setup_order.append("first-refresh")
         return {
             "PowerState": "on",
             "FrameTVSupport": "true",
@@ -34,8 +58,11 @@ async def test_setup_and_unload(hass, mock_device):
         }
 
     ssl_context = object()
-    mock_device.listener_alive = False
-    mock_device.set_art_event_callback.side_effect = _capture_callback
+    mock_device.set_art_event_callback.side_effect = _capture_event_callback
+    mock_device.set_art_session_state_callback.side_effect = (
+        _capture_state_callback
+    )
+    mock_device.async_start_art_session.side_effect = _start_session
     mock_device.async_device_info.side_effect = _device_info
     with (
         patch(
@@ -67,16 +94,20 @@ async def test_setup_and_unload(hass, mock_device):
         mock_device.set_art_event_callback.assert_called_once_with(
             entry.runtime_data.handle_art_event
         )
-        assert (
-            entry.runtime_data.restart_listener
-            == mock_device.async_restart_art_listener
+        mock_device.set_art_session_state_callback.assert_called_once_with(
+            entry.runtime_data.handle_art_session_state
         )
-        mock_device.async_start_art_listener.assert_not_awaited()
+        mock_device.async_start_art_session.assert_awaited_once()
+        assert setup_order == [
+            "event-callback",
+            "state-callback",
+            "session-start",
+            "first-refresh",
+        ]
         assert all(
             task_call.args[2] != "samsungtv_frame-listener-restart"
             for task_call in create_background_task.call_args_list
         )
-        mock_device.async_restart_art_listener.assert_not_awaited()
 
         create_background_task.reset_mock()
 
@@ -90,13 +121,17 @@ async def test_setup_and_unload(hass, mock_device):
 
         assert await hass.config_entries.async_unload(entry.entry_id)
         mock_device.async_stop.assert_awaited()
+        assert (
+            mock_device.set_art_session_state_callback.call_args_list[-1]
+            == call(None)
+        )
 
 
-async def test_setup_tv_off_skips_listener(hass, mock_device):
-    """A powered-off TV must not stall setup on the listener connect.
+async def test_setup_tv_off_arms_session_without_art_io(hass, mock_device):
+    """A powered-off TV arms recovery without opening the Art transport.
 
-    The native receiver starts only when a reachable poll requests art state.
-    Setup while the TV is off must therefore perform no art connection.
+    The session starts accepting observations before the first refresh, but a
+    powered-off refresh must perform no Art request.
     """
     mock_device.async_device_info.return_value = None
     entry = _make_entry()
@@ -113,7 +148,211 @@ async def test_setup_tv_off_skips_listener(hass, mock_device):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done(wait_background_tasks=True)
         assert entry.runtime_data is not None
+        mock_device.async_start_art_session.assert_awaited_once()
         mock_device.async_get_artmode.assert_not_awaited()
-        mock_device.async_start_art_listener.assert_not_awaited()
-        # The recovery hook is still wired for the reachable edge.
-        assert entry.runtime_data.restart_listener is not None
+        mock_device.set_art_session_state_callback.assert_called_once_with(
+            entry.runtime_data.handle_art_session_state
+        )
+
+
+async def test_setup_start_failure_clears_callback_and_bounds_cleanup(
+    hass, mock_device
+):
+    entry = _make_entry()
+    cleanup_started = asyncio.Event()
+    cleanup_cancelled = asyncio.Event()
+    never_finishes = asyncio.Event()
+    start_error = RuntimeError("session start failed")
+    mock_device.async_start_art_session.side_effect = start_error
+
+    async def _wedged_stop():
+        cleanup_started.set()
+        try:
+            await never_finishes.wait()
+        finally:
+            cleanup_cancelled.set()
+
+    mock_device.async_stop.side_effect = _wedged_stop
+    with (
+        patch(
+            "custom_components.samsungtv_frame.FrameDevice",
+            return_value=mock_device,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.get_ssl_context",
+            return_value=object(),
+        ),
+        patch(
+            "custom_components.samsungtv_frame.ART_CONNECT_DEADLINE",
+            0.01,
+            create=True,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.ART_CLOSE_DEADLINE",
+            0.01,
+            create=True,
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            AsyncMock(),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="session start failed") as raised:
+            await asyncio.wait_for(
+                async_setup_entry(hass, entry), timeout=0.2
+            )
+
+    assert raised.value is start_error
+    assert cleanup_started.is_set()
+    assert cleanup_cancelled.is_set()
+    assert (
+        mock_device.set_art_session_state_callback.call_args_list[-1]
+        == call(None)
+    )
+
+
+async def test_setup_first_refresh_failure_clears_callback_and_bounds_cleanup(
+    hass, mock_device
+):
+    entry = _make_entry()
+    cleanup_started = asyncio.Event()
+    cleanup_cancelled = asyncio.Event()
+    never_finishes = asyncio.Event()
+    refresh_error = RuntimeError("first refresh failed")
+
+    async def _wedged_stop():
+        cleanup_started.set()
+        try:
+            await never_finishes.wait()
+        finally:
+            cleanup_cancelled.set()
+
+    mock_device.async_stop.side_effect = _wedged_stop
+    with (
+        patch(
+            "custom_components.samsungtv_frame.FrameDevice",
+            return_value=mock_device,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.get_ssl_context",
+            return_value=object(),
+        ),
+        patch.object(
+            FrameCoordinator,
+            "async_config_entry_first_refresh",
+            AsyncMock(side_effect=refresh_error),
+        ),
+        patch(
+            "custom_components.samsungtv_frame.ART_CONNECT_DEADLINE",
+            0.01,
+            create=True,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.ART_CLOSE_DEADLINE",
+            0.01,
+            create=True,
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            AsyncMock(),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="first refresh failed") as raised:
+            await asyncio.wait_for(
+                async_setup_entry(hass, entry), timeout=0.2
+            )
+
+    assert raised.value is refresh_error
+    mock_device.async_start_art_session.assert_awaited_once()
+    assert cleanup_started.is_set()
+    assert cleanup_cancelled.is_set()
+    assert (
+        mock_device.set_art_session_state_callback.call_args_list[-1]
+        == call(None)
+    )
+
+
+async def test_unload_removes_state_callback_before_platforms_and_stop(
+    hass, mock_device
+):
+    entry = _make_entry()
+    coordinator = MagicMock(spec=FrameCoordinator)
+    coordinator.device = mock_device
+    entry.runtime_data = coordinator
+    order: list[str] = []
+
+    def _set_callback(callback):
+        assert callback is None
+        order.append("state-clear")
+
+    async def _unload_platforms(_entry, _platforms):
+        order.append("platform-unload")
+        return True
+
+    async def _stop():
+        order.append("device-stop")
+
+    mock_device.set_art_session_state_callback.side_effect = _set_callback
+    mock_device.async_stop.side_effect = _stop
+    with patch.object(
+        hass.config_entries,
+        "async_unload_platforms",
+        AsyncMock(side_effect=_unload_platforms),
+    ):
+        assert await async_unload_entry(hass, entry)
+
+    assert order == ["state-clear", "platform-unload", "device-stop"]
+    mock_device.set_art_session_state_callback.assert_called_once_with(None)
+
+
+async def test_unload_restores_state_callback_when_platform_unload_fails(
+    hass, mock_device
+):
+    entry = _make_entry()
+    coordinator = MagicMock(spec=FrameCoordinator)
+    coordinator.device = mock_device
+    entry.runtime_data = coordinator
+    callback = coordinator.handle_art_session_state
+
+    with patch.object(
+        hass.config_entries,
+        "async_unload_platforms",
+        AsyncMock(return_value=False),
+    ):
+        assert not await async_unload_entry(hass, entry)
+
+    assert mock_device.set_art_session_state_callback.call_args_list == [
+        call(None),
+        call(callback),
+    ]
+    mock_device.async_stop.assert_not_awaited()
+
+
+async def test_unload_restores_state_callback_when_platform_unload_raises(
+    hass, mock_device
+):
+    entry = _make_entry()
+    coordinator = MagicMock(spec=FrameCoordinator)
+    coordinator.device = mock_device
+    entry.runtime_data = coordinator
+    callback = coordinator.handle_art_session_state
+    unload_error = RuntimeError("platform unload failed")
+
+    with (
+        patch.object(
+            hass.config_entries,
+            "async_unload_platforms",
+            AsyncMock(side_effect=unload_error),
+        ),
+        pytest.raises(RuntimeError, match="platform unload failed") as raised,
+    ):
+        await async_unload_entry(hass, entry)
+
+    assert raised.value is unload_error
+    assert mock_device.set_art_session_state_callback.call_args_list == [
+        call(None),
+        call(callback),
+    ]
+    mock_device.async_stop.assert_not_awaited()

@@ -35,8 +35,6 @@ def mock_device() -> MagicMock:
     device.async_set_artmode = AsyncMock()
     device.async_turn_on = AsyncMock()
     device.async_turn_off = AsyncMock()
-    device.async_start_art_listener = AsyncMock()
-    device.async_restart_art_listener = AsyncMock()
     device.async_stop = AsyncMock()
     device.async_send_key = AsyncMock()
     device.async_launch_app = AsyncMock()

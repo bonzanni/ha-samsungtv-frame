@@ -248,9 +248,8 @@ class FrameDevice:
             await self._art_session.async_connection_failed(err)
             raise
 
-    async def async_get_artmode(self, attempts: int = 2) -> bool | None:
+    async def async_get_artmode(self) -> bool | None:
         """Return Art Mode state without opening or retrying the session."""
-        del attempts  # Temporary Task 4 compatibility argument.
         value = await self._async_art_read(self._art.get_artmode)
         if value is None:
             return None
@@ -425,26 +424,6 @@ class FrameDevice:
     def set_art_event_callback(self, callback: ArtEventCallback) -> None:
         """Set the loop-native callback receiving unsolicited Art events."""
         self._art.set_event_callback(callback)
-
-    @property
-    def listener_alive(self) -> bool:
-        """Temporary compatibility alias for supervised Art readiness."""
-        return self.art_ready
-
-    async def async_start_art_listener(self) -> None:
-        """Temporarily arm and request one session-owned background probe."""
-        if self._stopped:
-            return
-        await self._art_session.async_start()
-        if self._stopped:
-            return
-        await self._art_session.async_ensure_ready(
-            ArtSessionTrigger.BACKGROUND
-        )
-
-    async def async_restart_art_listener(self) -> None:
-        """Temporary compatibility shim for session-owned recovery."""
-        await self.async_start_art_listener()
 
     async def _async_close_remote(self) -> None:
         """Close the remote without allowing shutdown to wedge indefinitely."""
