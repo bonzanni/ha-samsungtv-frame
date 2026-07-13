@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine
-import contextlib
 from enum import StrEnum
 import random
 import time
@@ -12,6 +11,8 @@ from typing import Any, cast
 from samsungtvws.exceptions import ConnectionFailure
 
 from .const import (
+    ART_CLOSE_DEADLINE,
+    ART_CONNECT_DEADLINE,
     ART_DORMANT_SECONDS,
     ART_HOST_RETRY_DELAYS,
     ART_RETRY_DELAYS,
@@ -68,6 +69,7 @@ class ArtSession:
         self._clock = clock
         self._jitter = jitter
         self._connect_task: asyncio.Task[bool] | None = None
+        self._close_task: asyncio.Task[None] | None = None
         self._stop_task: asyncio.Task[None] | None = None
         self._started = False
         self._terminal = False
@@ -163,13 +165,19 @@ class ArtSession:
         """Close a failed transport and enter its next recovery state."""
         if not self._started or self._terminal:
             return
+        self._record_failure(error)
         await self._close_transport()
-        if self._started and not self._terminal:
-            self._record_failure(error)
 
     async def async_stop(self) -> None:
         """Permanently stop this session and close its transport."""
         task = self._stop_task
+        if task is not None and task.done() and (
+            task.cancelled() or task.exception() is not None
+        ):
+            if self._state is ArtSessionState.STOPPED:
+                return
+            self._stop_task = None
+            task = None
         if task is None:
             coroutine = self._async_stop_once()
             try:
@@ -186,15 +194,15 @@ class ArtSession:
         """Run the one terminal shutdown shared by all stop callers."""
         self._terminal = True
         self._started = False
-        task = self._active_connect_task()
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        self._connect_task = None
-        self._set_state(ArtSessionState.STOPPED)
-        self._art.stop()
-        await self._close_transport()
+        try:
+            self._art.stop()
+            task = self._active_connect_task()
+            if task is not None:
+                task.cancel()
+                await self._wait_for_connect_on_stop(task)
+            await self._close_transport(ignore_cancellation=True)
+        finally:
+            self._set_state(ArtSessionState.STOPPED)
 
     def _set_state(self, state: ArtSessionState) -> None:
         if state is self._state:
@@ -235,12 +243,14 @@ class ArtSession:
         self._set_state(ArtSessionState.BACKOFF)
 
     def _background_attempt_due(self) -> bool:
+        close_task = self._close_task
         return (
             self._started
             and not self._terminal
             and self._state
             in {ArtSessionState.BACKOFF, ArtSessionState.DORMANT}
             and self._active_connect_task() is None
+            and (close_task is None or close_task.done())
             and self._clock() >= self._next_retry_at
         )
 
@@ -260,6 +270,11 @@ class ArtSession:
             return task
         if not self._started or self._terminal or self.ready:
             return None
+        close_task = self._close_task
+        if close_task is not None:
+            if not close_task.done():
+                return None
+            self._close_task = None
 
         coroutine = self._connect_once()
         try:
@@ -296,20 +311,20 @@ class ArtSession:
                 raise ConnectionFailure("Art receiver did not start")
         except asyncio.CancelledError:
             if self._started and not self._terminal:
-                await self._close_transport()
                 self._record_failure(
                     ConnectionFailure("Art connection cancelled")
                 )
+            await self._close_transport(force=self._late_close_required())
             raise
         except ArtHostUnavailable as err:
             if self._started and not self._terminal:
                 self._record_failure(err)
-            await self._close_transport()
+            await self._close_transport(force=self._late_close_required())
             return False
         except Exception as err:  # noqa: BLE001
             if self._started and not self._terminal:
                 self._record_failure(err)
-            await self._close_transport()
+            await self._close_transport(force=self._late_close_required())
             return False
 
         self._generation += 1
@@ -318,6 +333,78 @@ class ArtSession:
         self._set_state(ArtSessionState.READY)
         return True
 
-    async def _close_transport(self) -> None:
-        with contextlib.suppress(Exception):
-            await self._art.close()
+    def _late_close_required(self) -> bool:
+        task = self._close_task
+        return self._terminal and task is not None and task.done()
+
+    async def _wait_for_connect_on_stop(
+        self, task: asyncio.Task[bool]
+    ) -> None:
+        """Wait a bounded time for connect cancellation, ignoring owner cancel."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + ART_CONNECT_DEADLINE
+        while not task.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            try:
+                done, _pending = await asyncio.wait(
+                    {task}, timeout=remaining
+                )
+            except asyncio.CancelledError:
+                continue
+            if done:
+                return
+
+    def _schedule_close(self, *, force: bool) -> asyncio.Task[None]:
+        task = self._close_task
+        if task is not None and (not task.done() or not force):
+            return task
+
+        coroutine = self._close_once()
+        try:
+            task = self._task_factory(
+                coroutine, f"{DOMAIN}-art-session-close"
+            )
+        except BaseException:
+            coroutine.close()
+            raise
+        self._close_task = task
+        return task
+
+    async def _close_transport(
+        self,
+        *,
+        force: bool = False,
+        ignore_cancellation: bool = False,
+    ) -> None:
+        """Join one bounded physical close without transferring ownership."""
+        task = self._schedule_close(force=force)
+        interrupted = False
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        interrupted = True
+                    task = self._schedule_close(force=True)
+                    continue
+                if task.done():
+                    interrupted = True
+                    break
+                interrupted = True
+        if interrupted and not ignore_cancellation:
+            raise asyncio.CancelledError
+
+    async def _close_once(self) -> None:
+        """Run one physical close with an outer lifecycle-lock deadline."""
+        try:
+            async with asyncio.timeout(ART_CLOSE_DEADLINE):
+                await self._art.close()
+        except TimeoutError:
+            LOGGER.debug("Art transport close exceeded its deadline")
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("Art transport close failed: %s", err)

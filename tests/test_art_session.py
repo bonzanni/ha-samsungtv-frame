@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from samsungtvws.exceptions import ConnectionFailure
 
+from custom_components.samsungtv_frame import art_session as art_session_module
 from custom_components.samsungtv_frame.art_session import (
     ArtSession,
     ArtSessionState,
@@ -76,11 +77,13 @@ class FakeArt:
         self._ignore_start_cancellation = False
         if gate is not None:
             try:
-                await gate.wait()
-            except asyncio.CancelledError:
-                if not ignore_cancellation:
-                    raise
-                await gate.wait()
+                while True:
+                    try:
+                        await gate.wait()
+                        break
+                    except asyncio.CancelledError:
+                        if not ignore_cancellation:
+                            raise
             finally:
                 self._start_gate = None
         outcome = self.outcomes.popleft() if self.outcomes else None
@@ -138,6 +141,25 @@ async def wait_for_close_calls(art: FakeArt, expected: int) -> None:
         await asyncio.sleep(0)
     raise AssertionError(
         f"expected {expected} close calls, got {art.close.await_count}"
+    )
+
+
+async def wait_for_stop_calls(art: FakeArt, expected: int) -> None:
+    for _ in range(20):
+        if art.stop.call_count == expected:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(
+        f"expected {expected} stop calls, got {art.stop.call_count}"
+    )
+
+
+def shorten_lifecycle_deadlines(monkeypatch) -> None:
+    monkeypatch.setattr(
+        art_session_module, "ART_CONNECT_DEADLINE", 0.01, raising=False
+    )
+    monkeypatch.setattr(
+        art_session_module, "ART_CLOSE_DEADLINE", 0.01, raising=False
     )
 
 
@@ -474,6 +496,206 @@ async def test_ensure_waiter_cancellation_does_not_cancel_shared_connect():
     assert await surviving_waiter
     assert session.state is ArtSessionState.READY
     assert art.start_listening.await_count == 1
+
+
+async def test_stop_bounds_connect_that_ignores_cancellation(monkeypatch):
+    shorten_lifecycle_deadlines(monkeypatch)
+    art = FakeArt()
+    art.block_next_start(ignore_cancellation=True)
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    await session.async_start()
+    caller = asyncio.create_task(
+        session.async_ensure_ready(ArtSessionTrigger.USER)
+    )
+    await wait_for_start_calls(art, 1)
+
+    stop_waiter = asyncio.create_task(session.async_stop())
+    try:
+        await asyncio.wait_for(asyncio.shield(stop_waiter), 0.2)
+    finally:
+        if art._start_gate is not None:
+            art.release_start()
+        await asyncio.gather(stop_waiter, caller, return_exceptions=True)
+
+    assert session.state is ArtSessionState.STOPPED
+    assert session.generation == 0
+    assert art.stop.call_count == 1
+    assert not art.alive
+
+
+async def test_stop_outer_deadline_bounds_blocked_transport_close(monkeypatch):
+    shorten_lifecycle_deadlines(monkeypatch)
+    art = FakeArt()
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    await session.async_start()
+    assert await session.async_ensure_ready(ArtSessionTrigger.BACKGROUND)
+    art.block_next_close()
+
+    stop_waiter = asyncio.create_task(session.async_stop())
+    try:
+        await asyncio.wait_for(asyncio.shield(stop_waiter), 0.2)
+    finally:
+        if art._close_gate is not None:
+            art.release_close()
+        await asyncio.gather(stop_waiter, return_exceptions=True)
+
+    assert session.state is ArtSessionState.STOPPED
+    assert art.stop.call_count == 1
+    assert art.close.await_count == 1
+    assert not art.alive
+
+
+async def test_cancelling_stop_owner_during_connect_wait_finishes_cleanup(
+    monkeypatch,
+):
+    shorten_lifecycle_deadlines(monkeypatch)
+    art = FakeArt()
+    art.block_next_start(ignore_cancellation=True)
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    await session.async_start()
+    caller = asyncio.create_task(
+        session.async_ensure_ready(ArtSessionTrigger.USER)
+    )
+    await wait_for_start_calls(art, 1)
+    stop_waiter = asyncio.create_task(session.async_stop())
+    await wait_for_stop_calls(art, 1)
+    owner = session._stop_task
+    assert owner is not None
+    assert not owner.done()
+
+    owner.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(stop_waiter), 0.2)
+    finally:
+        if art._start_gate is not None:
+            art.release_start()
+        await asyncio.gather(stop_waiter, caller, return_exceptions=True)
+
+    assert session.state is ArtSessionState.STOPPED
+    assert art.stop.call_count == 1
+    assert not art.alive
+    await session.async_stop()
+
+
+async def test_cancelling_stop_owner_during_close_does_not_poison_stop():
+    art = FakeArt()
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    await session.async_start()
+    assert await session.async_ensure_ready(ArtSessionTrigger.BACKGROUND)
+    art.block_next_close()
+    stop_waiter = asyncio.create_task(session.async_stop())
+    await wait_for_close_calls(art, 1)
+    owner = session._stop_task
+    assert owner is not None
+
+    owner.cancel()
+    try:
+        await asyncio.sleep(0)
+        assert not owner.done()
+    finally:
+        if art._close_gate is not None:
+            art.release_close()
+        result = await asyncio.gather(stop_waiter, return_exceptions=True)
+
+    assert result == [None]
+    assert session.state is ArtSessionState.STOPPED
+    assert art.stop.call_count == 1
+    assert art.close.await_count == 1
+    await session.async_stop()
+
+
+async def test_cancelled_close_owner_is_replaced_before_stop_completes():
+    art = FakeArt()
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    await session.async_start()
+    assert await session.async_ensure_ready(ArtSessionTrigger.BACKGROUND)
+    art.block_next_close()
+    stop_waiter = asyncio.create_task(session.async_stop())
+    await wait_for_close_calls(art, 1)
+    close_owner = session._close_task
+    assert close_owner is not None
+
+    close_owner.cancel()
+    try:
+        await wait_for_close_calls(art, 2)
+    finally:
+        if art._close_gate is not None:
+            art.release_close()
+        result = await asyncio.gather(stop_waiter, return_exceptions=True)
+
+    assert result == [None]
+    assert session.state is ArtSessionState.STOPPED
+    assert art.stop.call_count == 1
+    assert art.close.await_count == 2
+    await session.async_stop()
+    assert art.close.await_count == 2
+
+
+async def test_second_connect_cancellation_cannot_interrupt_close_recovery():
+    art = FakeArt()
+    art.block_next_start()
+    art.block_next_close()
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    await session.async_start()
+    caller = asyncio.create_task(
+        session.async_ensure_ready(ArtSessionTrigger.BACKGROUND)
+    )
+    await wait_for_start_calls(art, 1)
+    connect_task = session._connect_task
+    assert connect_task is not None
+    connect_task.cancel()
+    await wait_for_close_calls(art, 1)
+
+    try:
+        connect_task.cancel()
+        await asyncio.sleep(0)
+        assert session.state is ArtSessionState.BACKOFF
+        close_task = session._close_task
+        assert close_task is not None
+        assert not close_task.done()
+    finally:
+        if art._close_gate is not None:
+            art.release_close()
+        await asyncio.gather(caller, return_exceptions=True)
+
+    assert art.close.await_count == 1
+    assert session.state is ArtSessionState.BACKOFF
+
+
+async def test_stop_joins_connect_cleanup_close_without_closing_twice():
+    art = FakeArt()
+    art.block_next_start()
+    art.block_next_close()
+    clock = FakeClock()
+    session, factory = make_session(art, clock)
+    await session.async_start()
+    caller = asyncio.create_task(
+        session.async_ensure_ready(ArtSessionTrigger.BACKGROUND)
+    )
+    await wait_for_start_calls(art, 1)
+    connect_task = session._connect_task
+    assert connect_task is not None
+    connect_task.cancel()
+    await wait_for_close_calls(art, 1)
+
+    stop_waiter = asyncio.create_task(session.async_stop())
+    await wait_for_stop_calls(art, 1)
+    if art._close_gate is not None:
+        art.release_close()
+    await asyncio.gather(stop_waiter, caller, return_exceptions=True)
+
+    assert session.state is ArtSessionState.STOPPED
+    assert art.stop.call_count == 1
+    assert art.close.await_count == 1
+    task_names = [name for _coroutine, name in factory.calls]
+    assert "samsungtv_frame-art-session-close" in task_names
+    assert "samsungtv_frame-art-session-stop" in task_names
 
 
 async def test_generic_failure_resets_consecutive_hostless_streak():
