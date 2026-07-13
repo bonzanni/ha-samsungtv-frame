@@ -46,6 +46,11 @@ default 10). Push events (art mode changes) arrive instantly regardless of the h
 The IP address can be changed later via the entry's Reconfigure menu.
 
 ## Reliability
+Version 0.6.8 supervises the Art websocket as one long-lived session. When the TV's
+internal Art host is unavailable, Home Assistant now backs off instead of reconnecting
+on every heartbeat; healthy state remains push-driven with periodic reconciliation over
+the existing socket. No configuration migration is required when upgrading.
+
 Art commands, push events, thumbnails, uploads, pairing, and shutdown use cancellable
 async I/O. No configuration migration is required when upgrading to 0.6.7.
 
