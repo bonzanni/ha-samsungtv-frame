@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from samsungtvws.event import IGNORE_EVENTS_AT_STARTUP
 from samsungtvws.exceptions import ConnectionFailure, UnauthorizedError
 from websockets.protocol import State
 
@@ -26,8 +28,10 @@ class FakeWebSocket:
         self.closed = False
         self.state = State.OPEN
         self.recv_delay = recv_delay
+        self.recv_started = asyncio.Event()
 
     async def recv(self):
+        self.recv_started.set()
         if self.recv_delay:
             await asyncio.sleep(self.recv_delay)
         return await self.frames.get()
@@ -70,6 +74,34 @@ async def test_open_captures_token_after_ignored_broadcasts():
     await remote.close()
 
 
+async def test_open_does_not_log_handshake_token_or_client_data(caplog):
+    token = "distinctive-remote-secret-token"
+    client_name = "identifying-living-room-client"
+    ws = FakeWebSocket(
+        [
+            {
+                "event": "ms.channel.connect",
+                "data": {
+                    "token": token,
+                    "clients": [{"deviceName": client_name}],
+                },
+            }
+        ]
+    )
+    remote = make_remote()
+    caplog.set_level(logging.DEBUG, logger="samsungtvws")
+
+    with patch(
+        "custom_components.samsungtv_frame.frame_remote.connect",
+        AsyncMock(return_value=ws),
+    ):
+        await remote.open()
+    await remote.close()
+
+    leaked = {value for value in (token, client_name) if value in caplog.text}
+    assert leaked == set()
+
+
 async def test_timeout_event_requires_reauth_and_closes_local_socket():
     ws = FakeWebSocket([{"event": "ms.channel.timeOut"}])
     remote = make_remote()
@@ -83,6 +115,21 @@ async def test_timeout_event_requires_reauth_and_closes_local_socket():
         await remote.open()
     assert ws.closed
     assert remote.connection is None
+
+
+async def test_timeout_event_preserves_existing_token():
+    ws = FakeWebSocket([{"event": "ms.channel.timeOut"}])
+    remote = make_remote()
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_remote.connect",
+            AsyncMock(return_value=ws),
+        ),
+        pytest.raises(RemotePairingRequired),
+    ):
+        await remote.open()
+
+    assert remote.token == "tok"
 
 
 @pytest.mark.parametrize(
@@ -107,6 +154,23 @@ async def test_open_failure_closes_local_socket(event, expected_error):
     assert remote.connection is None
 
 
+async def test_open_cancellation_closes_local_socket():
+    ws = FakeWebSocket([])
+    remote = make_remote()
+    with patch(
+        "custom_components.samsungtv_frame.frame_remote.connect",
+        AsyncMock(return_value=ws),
+    ):
+        open_task = asyncio.create_task(remote.open())
+        await ws.recv_started.wait()
+        open_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await open_task
+
+    assert ws.closed is True
+    assert remote.connection is None
+
+
 async def test_open_timeout_closes_local_socket():
     ws = FakeWebSocket(
         [{"event": "ms.channel.connect"}], recv_delay=0.02
@@ -122,6 +186,33 @@ async def test_open_timeout_closes_local_socket():
         await remote.open()
     assert ws.closed is True
     assert remote.connection is None
+
+
+@pytest.mark.parametrize(
+    "broadcast_event",
+    [
+        pytest.param(
+            "ms.channel.clientDisconnect", id="client-disconnect"
+        ),
+        pytest.param(
+            IGNORE_EVENTS_AT_STARTUP[0], id="upstream-startup-event"
+        ),
+    ],
+)
+async def test_open_tolerates_startup_broadcasts(broadcast_event):
+    ws = FakeWebSocket(
+        [
+            {"event": broadcast_event},
+            {"event": "ms.channel.connect"},
+        ]
+    )
+    remote = make_remote()
+    with patch(
+        "custom_components.samsungtv_frame.frame_remote.connect",
+        AsyncMock(return_value=ws),
+    ):
+        assert await remote.open() is ws
+    await remote.close()
 
 
 async def test_open_passes_injected_ssl_context_and_timeout_to_connect():
@@ -144,6 +235,21 @@ async def test_open_passes_injected_ssl_context_and_timeout_to_connect():
         ssl=ssl_context,
     )
     await remote.close()
+
+
+async def test_close_closes_successful_websocket():
+    ws = FakeWebSocket([{"event": "ms.channel.connect"}])
+    remote = make_remote()
+    with patch(
+        "custom_components.samsungtv_frame.frame_remote.connect",
+        AsyncMock(return_value=ws),
+    ):
+        await remote.open()
+
+    await remote.close()
+
+    assert ws.closed is True
+    assert remote.connection is None
 
 
 async def test_concurrent_open_calls_share_one_connect():

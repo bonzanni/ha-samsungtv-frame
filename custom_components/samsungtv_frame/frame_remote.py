@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 
-from samsungtvws import helper
 from samsungtvws.async_remote import SamsungTVWSAsyncRemote
 from samsungtvws.event import (
     IGNORE_EVENTS_AT_STARTUP,
@@ -70,11 +70,8 @@ class FrameRemote(SamsungTVWSAsyncRemote):
                     )
                     event = None
                     while event is None or event in _HANDSHAKE_BROADCASTS:
-                        frame = helper.process_api_response(
-                            await websocket.recv()
-                        )
+                        frame = json.loads(await websocket.recv())
                         event = frame.get("event", "*")
-                        self._websocket_event(event, frame)
                     if event == MS_CHANNEL_UNAUTHORIZED:
                         raise UnauthorizedError(frame)
                     if event == "ms.channel.timeOut":
@@ -83,7 +80,11 @@ class FrameRemote(SamsungTVWSAsyncRemote):
                         )
                     if event != MS_CHANNEL_CONNECT_EVENT:
                         raise ConnectionFailure(frame)
-                    self._check_for_token(frame)
+                    data = frame.get("data")
+                    if isinstance(data, dict):
+                        token = data.get("token")
+                        if isinstance(token, str) and token:
+                            self.token = token
                 self.connection = websocket
                 return websocket
             except BaseException:
