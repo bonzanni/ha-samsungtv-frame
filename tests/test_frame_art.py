@@ -1266,6 +1266,59 @@ async def test_open_allows_missing_client_metadata_when_ready_arrives():
     await art.close()
 
 
+@pytest.mark.parametrize(
+    "clients",
+    [
+        pytest.param([], id="empty-list"),
+        pytest.param({}, id="non-list"),
+        pytest.param([{}], id="missing-role"),
+        pytest.param([None], id="non-dict-entry"),
+        pytest.param([{"isHost": "false"}], id="non-boolean-role"),
+    ],
+)
+async def test_open_allows_unknown_client_role_metadata(clients):
+    ws = FakeWebSocket(
+        [
+            {
+                "event": "ms.channel.connect",
+                "data": {"clients": clients},
+            },
+            {"event": "ms.channel.ready"},
+        ]
+    )
+    art = make_art()
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.connect",
+        AsyncMock(return_value=ws),
+    ):
+        assert await art.open() is ws
+    await art.close()
+
+
+async def test_open_rejects_malformed_clients_with_explicit_false_role():
+    ws = FakeWebSocket(
+        [
+            {
+                "event": "ms.channel.connect",
+                "data": {"clients": [None, {"isHost": False}]},
+            },
+            {"event": "ms.channel.ready"},
+        ]
+    )
+    art = make_art()
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            AsyncMock(return_value=ws),
+        ),
+        pytest.raises(ArtHostUnavailable),
+    ):
+        await art.open()
+    assert ws.closed
+    assert ws.frames.qsize() == 1
+    assert art.connection is None
+
+
 async def test_open_times_out_when_host_is_present_but_ready_never_arrives():
     ws = FakeWebSocket(
         [

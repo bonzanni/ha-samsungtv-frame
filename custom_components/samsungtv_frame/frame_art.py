@@ -73,10 +73,13 @@ def _explicitly_missing_art_host(frame: dict[str, Any]) -> bool:
     clients = data.get("clients")
     if not isinstance(clients, list) or not clients:
         return False
-    return not any(
-        isinstance(client, dict) and client.get("isHost") is True
+    explicit_roles = [
+        client["isHost"]
         for client in clients
-    )
+        if isinstance(client, dict)
+        and isinstance(client.get("isHost"), bool)
+    ]
+    return bool(explicit_roles) and not any(explicit_roles)
 
 
 class FrameArt(SamsungTVWSAsyncConnection):
