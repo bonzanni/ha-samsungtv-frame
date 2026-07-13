@@ -49,6 +49,7 @@ class FakeArt:
         self.alive = False
         self._start_gate: asyncio.Event | None = None
         self._ignore_start_cancellation = False
+        self._close_gate: asyncio.Event | None = None
         self.start_listening = AsyncMock(side_effect=self._start_listening)
         self.close = AsyncMock(side_effect=self._close)
         self.stop = MagicMock(side_effect=self._stop)
@@ -61,6 +62,13 @@ class FakeArt:
     def release_start(self) -> None:
         assert self._start_gate is not None
         self._start_gate.set()
+
+    def block_next_close(self) -> None:
+        self._close_gate = asyncio.Event()
+
+    def release_close(self) -> None:
+        assert self._close_gate is not None
+        self._close_gate.set()
 
     async def _start_listening(self) -> None:
         gate = self._start_gate
@@ -81,6 +89,12 @@ class FakeArt:
         self.alive = True
 
     async def _close(self) -> None:
+        gate = self._close_gate
+        if gate is not None:
+            try:
+                await gate.wait()
+            finally:
+                self._close_gate = None
         self.alive = False
 
     def _stop(self) -> None:
@@ -114,6 +128,16 @@ async def wait_for_start_calls(art: FakeArt, expected: int) -> None:
         await asyncio.sleep(0)
     raise AssertionError(
         f"expected {expected} start calls, got {art.start_listening.await_count}"
+    )
+
+
+async def wait_for_close_calls(art: FakeArt, expected: int) -> None:
+    for _ in range(20):
+        if art.close.await_count == expected:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(
+        f"expected {expected} close calls, got {art.close.await_count}"
     )
 
 
@@ -344,6 +368,152 @@ async def test_stop_during_connect_is_terminal_and_closes_transport():
     )
     await asyncio.sleep(0)
     assert art.start_listening.await_count == 1
+
+
+async def test_external_connect_cancellation_closes_and_remains_recoverable():
+    art = FakeArt()
+    art.block_next_start()
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    await session.async_start()
+    caller = asyncio.create_task(
+        session.async_ensure_ready(ArtSessionTrigger.BACKGROUND)
+    )
+    await wait_for_start_calls(art, 1)
+    connect_task = session._connect_task
+    assert connect_task is not None
+
+    connect_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    assert art.close.await_count == 1
+    assert session.state is ArtSessionState.BACKOFF
+    assert session._next_retry_at == clock.now + 30
+    clock.now = session._next_retry_at
+    assert await session.async_ensure_ready(ArtSessionTrigger.BACKGROUND)
+    assert session.state is ArtSessionState.READY
+
+
+async def test_concurrent_stop_callers_wait_for_shared_shutdown():
+    art = FakeArt()
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    await session.async_start()
+    assert await session.async_ensure_ready(ArtSessionTrigger.BACKGROUND)
+    art.block_next_close()
+
+    first = asyncio.create_task(session.async_stop())
+    await wait_for_close_calls(art, 1)
+    second = asyncio.create_task(session.async_stop())
+    await asyncio.sleep(0)
+
+    assert not first.done()
+    assert not second.done()
+    art.release_close()
+    await asyncio.gather(first, second)
+    assert session.state is ArtSessionState.STOPPED
+    assert not art.alive
+    assert art.stop.call_count == 1
+    assert art.close.await_count == 1
+
+
+async def test_cancelling_one_stop_waiter_does_not_abandon_shared_shutdown():
+    art = FakeArt()
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    await session.async_start()
+    assert await session.async_ensure_ready(ArtSessionTrigger.BACKGROUND)
+    art.block_next_close()
+
+    cancelled_waiter = asyncio.create_task(session.async_stop())
+    await wait_for_close_calls(art, 1)
+    surviving_waiter = asyncio.create_task(session.async_stop())
+    await asyncio.sleep(0)
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+
+    try:
+        assert not surviving_waiter.done()
+        stop_task = session._stop_task
+        assert stop_task is not None
+        assert not stop_task.done()
+    finally:
+        if art._close_gate is not None:
+            art.release_close()
+        await asyncio.gather(surviving_waiter, return_exceptions=True)
+    assert session.state is ArtSessionState.STOPPED
+    assert not art.alive
+    assert art.stop.call_count == 1
+    assert art.close.await_count == 1
+
+
+async def test_ensure_waiter_cancellation_does_not_cancel_shared_connect():
+    art = FakeArt()
+    art.block_next_start()
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    await session.async_start()
+    cancelled_waiter = asyncio.create_task(
+        session.async_ensure_ready(ArtSessionTrigger.USER)
+    )
+    await wait_for_start_calls(art, 1)
+    connect_task = session._connect_task
+    assert connect_task is not None
+
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+    assert not connect_task.done()
+    surviving_waiter = asyncio.create_task(
+        session.async_ensure_ready(ArtSessionTrigger.USER)
+    )
+
+    art.release_start()
+    assert await surviving_waiter
+    assert session.state is ArtSessionState.READY
+    assert art.start_listening.await_count == 1
+
+
+async def test_generic_failure_resets_consecutive_hostless_streak():
+    art = FakeArt(
+        [
+            ArtHostUnavailable("no host"),
+            ConnectionFailure("generic"),
+            ArtHostUnavailable("no host"),
+            ArtHostUnavailable("no host"),
+        ]
+    )
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    await session.async_start()
+
+    for _ in range(4):
+        assert not await session.async_ensure_ready(
+            ArtSessionTrigger.BACKGROUND
+        )
+        clock.now = session._next_retry_at
+
+    assert session.state is ArtSessionState.BACKOFF
+    assert session._host_failure_count == 2
+
+
+async def test_success_after_hostless_failure_resets_both_counters():
+    art = FakeArt([ArtHostUnavailable("no host"), None])
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    await session.async_start()
+
+    assert not await session.async_ensure_ready(ArtSessionTrigger.BACKGROUND)
+    assert session._failure_count == 1
+    assert session._host_failure_count == 1
+    clock.now = session._next_retry_at
+    assert await session.async_ensure_ready(ArtSessionTrigger.BACKGROUND)
+
+    assert session.state is ArtSessionState.READY
+    assert session._failure_count == 0
+    assert session._host_failure_count == 0
 
 
 async def test_state_callback_changes_without_replay_and_runs_once_per_change():

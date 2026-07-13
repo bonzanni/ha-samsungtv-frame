@@ -68,6 +68,7 @@ class ArtSession:
         self._clock = clock
         self._jitter = jitter
         self._connect_task: asyncio.Task[bool] | None = None
+        self._stop_task: asyncio.Task[None] | None = None
         self._started = False
         self._terminal = False
         self._failure_count = 0
@@ -168,25 +169,32 @@ class ArtSession:
 
     async def async_stop(self) -> None:
         """Permanently stop this session and close its transport."""
-        if self._terminal:
-            return
+        task = self._stop_task
+        if task is None:
+            coroutine = self._async_stop_once()
+            try:
+                task = self._task_factory(
+                    coroutine, f"{DOMAIN}-art-session-stop"
+                )
+            except BaseException:
+                coroutine.close()
+                raise
+            self._stop_task = task
+        await asyncio.shield(task)
+
+    async def _async_stop_once(self) -> None:
+        """Run the one terminal shutdown shared by all stop callers."""
         self._terminal = True
         self._started = False
         task = self._active_connect_task()
-        try:
-            if task is not None and task is not asyncio.current_task():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    current = asyncio.current_task()
-                    if current is not None and current.cancelling():
-                        raise
-        finally:
-            self._connect_task = None
-            self._set_state(ArtSessionState.STOPPED)
-            self._art.stop()
-            await self._close_transport()
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._connect_task = None
+        self._set_state(ArtSessionState.STOPPED)
+        self._art.stop()
+        await self._close_transport()
 
     def _set_state(self, state: ArtSessionState) -> None:
         if state is self._state:
@@ -287,6 +295,11 @@ class ArtSession:
             if not self._art.is_alive():
                 raise ConnectionFailure("Art receiver did not start")
         except asyncio.CancelledError:
+            if self._started and not self._terminal:
+                await self._close_transport()
+                self._record_failure(
+                    ConnectionFailure("Art connection cancelled")
+                )
             raise
         except ArtHostUnavailable as err:
             if self._started and not self._terminal:
