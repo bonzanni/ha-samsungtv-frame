@@ -53,19 +53,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> boo
     try:
         await device.async_start_art_session()
         await coordinator.async_config_entry_first_refresh()
+        entry.runtime_data = coordinator
+        await hass.config_entries.async_forward_entry_setups(
+            entry, PLATFORMS
+        )
     except BaseException:
         try:
             device.set_art_session_state_callback(None)
-        except Exception as err:  # noqa: BLE001 - preserve the setup error
+        except BaseException as err:  # noqa: BLE001 - preserve setup error
             LOGGER.warning(
                 "Could not clear Art session callback after setup failure: %s",
                 err,
             )
         await _async_stop_after_setup_failure(device)
         raise
-    entry.runtime_data = coordinator
-
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 

@@ -274,6 +274,78 @@ async def test_setup_first_refresh_failure_clears_callback_and_bounds_cleanup(
     )
 
 
+async def test_setup_platform_forward_failure_cleans_device_session(
+    hass, mock_device
+):
+    entry = _make_entry()
+    cleanup_started = asyncio.Event()
+    cleanup_cancelled = asyncio.Event()
+    never_finishes = asyncio.Event()
+    forward_error = RuntimeError("platform forwarding failed")
+    forwarded_runtime = []
+
+    async def _wedged_stop():
+        cleanup_started.set()
+        try:
+            await never_finishes.wait()
+        finally:
+            cleanup_cancelled.set()
+
+    async def _failed_forward(_entry, _platforms):
+        assert entry.runtime_data is not None
+        forwarded_runtime.append(entry.runtime_data)
+        raise forward_error
+
+    mock_device.async_stop.side_effect = _wedged_stop
+    with (
+        patch(
+            "custom_components.samsungtv_frame.FrameDevice",
+            return_value=mock_device,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.get_ssl_context",
+            return_value=object(),
+        ),
+        patch.object(
+            FrameCoordinator,
+            "async_config_entry_first_refresh",
+            AsyncMock(),
+        ) as first_refresh,
+        patch(
+            "custom_components.samsungtv_frame.ART_CONNECT_DEADLINE",
+            0.01,
+            create=True,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.ART_CLOSE_DEADLINE",
+            0.01,
+            create=True,
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            AsyncMock(side_effect=_failed_forward),
+        ),
+    ):
+        with pytest.raises(
+            RuntimeError, match="platform forwarding failed"
+        ) as raised:
+            await asyncio.wait_for(
+                async_setup_entry(hass, entry), timeout=0.2
+            )
+
+    assert raised.value is forward_error
+    mock_device.async_start_art_session.assert_awaited_once()
+    first_refresh.assert_awaited_once()
+    assert cleanup_started.is_set()
+    assert cleanup_cancelled.is_set()
+    assert (
+        mock_device.set_art_session_state_callback.call_args_list[-1]
+        == call(None)
+    )
+    assert entry.runtime_data is forwarded_runtime[0]
+
+
 async def test_unload_removes_state_callback_before_platforms_and_stop(
     hass, mock_device
 ):

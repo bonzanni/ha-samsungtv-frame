@@ -263,9 +263,22 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         live_push_revision = self._art_live_push_revision
 
         art_mode = await self.device.async_get_artmode()
-        current_art = await self.device.async_get_current_art()
-        art_brightness = await self.device.async_get_art_brightness()
-        art_color_temp = await self.device.async_get_color_temperature()
+        current_art: str | None = None
+        art_brightness: int | None = None
+        art_color_temp: int | None = None
+        current_art_valid = False
+        art_brightness_valid = False
+        art_color_temp_valid = False
+
+        if self._art_session_is_ready(generation):
+            current_art = await self.device.async_get_current_art()
+            current_art_valid = self._art_session_is_ready(generation)
+        if current_art_valid:
+            art_brightness = await self.device.async_get_art_brightness()
+            art_brightness_valid = self._art_session_is_ready(generation)
+        if art_brightness_valid:
+            art_color_temp = await self.device.async_get_color_temperature()
+            art_color_temp_valid = self._art_session_is_ready(generation)
 
         if (
             art_mode is not None
@@ -274,14 +287,26 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             self._art_mode = art_mode
             if art_mode and self._latest_rest_power_state == "on":
                 self._art_implies_power_on = True
-        if self._current_art_revision == current_art_revision:
+        if (
+            current_art_valid
+            and self._current_art_revision == current_art_revision
+        ):
             self._current_art = current_art
-        self._art_brightness = art_brightness
-        self._art_color_temp = art_color_temp
+        if art_brightness_valid:
+            self._art_brightness = art_brightness
+        if art_color_temp_valid:
+            self._art_color_temp = art_color_temp
 
         return (
             art_mode is not None
             or self._art_live_push_revision != live_push_revision
+        )
+
+    def _art_session_is_ready(self, generation: int) -> bool:
+        """Return whether reconciliation still owns one READY generation."""
+        return (
+            self.device.art_ready
+            and self.device.art_generation == generation
         )
 
     def _reset_art_failure(self) -> None:

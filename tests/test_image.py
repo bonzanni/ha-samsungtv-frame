@@ -76,10 +76,15 @@ async def test_image_keeps_last_thumbnail_on_fetch_failure(hass, mock_device):
     mock_device.async_get_artmode.return_value = True
     mock_device.async_get_current_art.return_value = "MY_F0034"
     mock_device.async_get_art_thumbnail.return_value = b"jpeg-bytes"
-    await _setup(hass, mock_device)
+    entry = await _setup(hass, mock_device)
     entity = hass.data["image"].get_entity(ENTITY)
     assert await entity.async_image() == b"jpeg-bytes"
 
-    mock_device.async_get_current_art.return_value = "MY_F0042"
+    mock_device.async_get_art_thumbnail.reset_mock()
     mock_device.async_get_art_thumbnail.return_value = None
+    entry.runtime_data.handle_art_event(
+        "d2d_service_message",
+        {"event": "image_selected", "content_id": "MY_F0042"},
+    )
     assert await entity.async_image() == b"jpeg-bytes"
+    mock_device.async_get_art_thumbnail.assert_awaited_once_with("MY_F0042")

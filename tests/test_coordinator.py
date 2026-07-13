@@ -716,6 +716,60 @@ async def test_reconcile_does_not_overwrite_newer_push(
     _assert_art_getter_count(mock_device, 1)
 
 
+async def test_reconcile_preserves_cache_on_ready_loss_but_accepts_live_none(
+    hass, mock_device
+):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
+    coord.data = await coord._async_update_data()
+
+    async def _lose_ready_during_current_art():
+        mock_device.art_ready = False
+        return None
+
+    mock_device.art_generation = 2
+    mock_device.async_get_current_art.side_effect = (
+        _lose_ready_during_current_art
+    )
+    mock_device.async_get_art_brightness.return_value = None
+    mock_device.async_get_color_temperature.return_value = None
+    after_loss = await coord._async_update_data()
+    calls_after_loss = (
+        mock_device.async_get_artmode.await_count,
+        mock_device.async_get_current_art.await_count,
+        mock_device.async_get_art_brightness.await_count,
+        mock_device.async_get_color_temperature.await_count,
+    )
+
+    mock_device.art_ready = True
+    mock_device.art_generation = 3
+    mock_device.async_get_current_art.side_effect = None
+    mock_device.async_get_current_art.return_value = None
+    after_live_none = await coord._async_update_data()
+
+    assert (
+        after_loss.current_art,
+        after_loss.art_brightness,
+        after_loss.art_color_temperature,
+    ) == ("MY_F0001", 5, 3)
+    assert calls_after_loss == (2, 2, 1, 1)
+    assert (
+        after_live_none.current_art,
+        after_live_none.art_brightness,
+        after_live_none.art_color_temperature,
+    ) == (None, None, None)
+
+
 async def test_running_app_detected_while_watching(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
 
@@ -885,7 +939,10 @@ async def test_failed_due_reconcile_counts_once(hass, mock_device):
     await coord._async_update_data()
 
     assert coord._art_fail_streak == 1
-    _assert_art_getter_count(mock_device, 1)
+    assert mock_device.async_get_artmode.await_count == 1
+    assert mock_device.async_get_current_art.await_count == 0
+    assert mock_device.async_get_art_brightness.await_count == 0
+    assert mock_device.async_get_color_temperature.await_count == 0
 
     mock_device.async_get_artmode.side_effect = None
     mock_device.async_get_artmode.return_value = True
@@ -898,7 +955,10 @@ async def test_failed_due_reconcile_counts_once(hass, mock_device):
 
     assert coord._art_fail_streak == 0
     assert coord.data.tv_mode is TvMode.ART_MODE
-    _assert_art_getter_count(mock_device, 2)
+    assert mock_device.async_get_artmode.await_count == 2
+    assert mock_device.async_get_current_art.await_count == 1
+    assert mock_device.async_get_art_brightness.await_count == 1
+    assert mock_device.async_get_color_temperature.await_count == 1
 
 
 async def test_reachable_edge_and_off_reset_failure_episode(
