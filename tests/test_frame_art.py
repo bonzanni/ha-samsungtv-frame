@@ -10,7 +10,10 @@ import pytest
 from samsungtvws.exceptions import ConnectionFailure, ResponseError, UnauthorizedError
 from websockets.protocol import State
 
-from custom_components.samsungtv_frame.frame_art import FrameArt
+from custom_components.samsungtv_frame.frame_art import (
+    ArtHostUnavailable,
+    FrameArt,
+)
 
 
 class FakeWebSocket:
@@ -1157,7 +1160,19 @@ async def test_open_ignores_broadcasts_captures_token_and_waits_for_ready():
     ws = FakeWebSocket(
         [
             {"event": "ms.channel.clientConnect"},
-            {"event": "ms.channel.connect", "data": {"token": "fresh"}},
+            {
+                "event": "ms.channel.connect",
+                "data": {
+                    "token": "fresh",
+                    "clients": [
+                        {"isHost": True, "deviceName": "Smart Device"},
+                        {
+                            "isHost": False,
+                            "deviceName": "Home Assistant",
+                        },
+                    ],
+                },
+            },
             {"event": "ms.channel.clientDisconnect"},
             {"event": "ms.channel.ready"},
         ]
@@ -1206,6 +1221,77 @@ async def test_open_uses_instance_timeout_for_handshake():
     assert art.connection is None
 
 
+async def test_open_fails_fast_when_connect_lists_no_art_host():
+    ws = FakeWebSocket(
+        [
+            {
+                "event": "ms.channel.connect",
+                "data": {
+                    "clients": [
+                        {"isHost": False, "deviceName": "Home Assistant"}
+                    ]
+                },
+            },
+            {"event": "ms.channel.ready"},
+        ]
+    )
+    art = make_art()
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            AsyncMock(return_value=ws),
+        ),
+        pytest.raises(ArtHostUnavailable),
+    ):
+        await art.open()
+    assert ws.closed
+    assert ws.frames.qsize() == 1
+    assert art.connection is None
+
+
+async def test_open_allows_missing_client_metadata_when_ready_arrives():
+    """Retain compatibility with connect frames that omit client metadata."""
+    ws = FakeWebSocket(
+        [
+            {"event": "ms.channel.connect", "data": {}},
+            {"event": "ms.channel.ready"},
+        ]
+    )
+    art = make_art()
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.connect",
+        AsyncMock(return_value=ws),
+    ):
+        assert await art.open() is ws
+    await art.close()
+
+
+async def test_open_times_out_when_host_is_present_but_ready_never_arrives():
+    ws = FakeWebSocket(
+        [
+            {
+                "event": "ms.channel.connect",
+                "data": {
+                    "clients": [
+                        {"isHost": True, "deviceName": "Smart Device"}
+                    ]
+                },
+            }
+        ]
+    )
+    art = make_art(timeout=0.01)
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            AsyncMock(return_value=ws),
+        ),
+        pytest.raises(TimeoutError),
+    ):
+        await art.open()
+    assert ws.closed
+    assert art.connection is None
+
+
 @pytest.mark.parametrize("event", ["ms.channel.unauthorized", "unexpected"])
 async def test_open_closes_local_socket_on_failed_handshake(event):
     ws = FakeWebSocket([{"event": event}])
@@ -1236,9 +1322,7 @@ async def test_open_deadline_bounds_endless_broadcast_stream():
 
 
 async def test_open_is_idempotent():
-    ws = FakeWebSocket(
-        [{"event": "ms.channel.connect"}, {"event": "ms.channel.ready"}]
-    )
+    ws = FakeWebSocket(handshake_frames())
     art = make_art()
     connect_mock = AsyncMock(return_value=ws)
     with patch("custom_components.samsungtv_frame.frame_art.connect", connect_mock):
@@ -1304,7 +1388,7 @@ async def test_open_stop_during_handshake_closes_local_socket_before_publish():
         while not connect_mock.await_count:
             await asyncio.sleep(0)
         art.stop()
-        await ws.frames.put(json.dumps({"event": "ms.channel.connect"}))
+        await ws.frames.put(json.dumps(handshake_frames()[0]))
         await ws.frames.put(json.dumps({"event": "ms.channel.ready"}))
 
         try:
@@ -1317,9 +1401,7 @@ async def test_open_stop_during_handshake_closes_local_socket_before_publish():
 
 
 async def test_start_listening_is_idempotent():
-    ws = FakeWebSocket(
-        [{"event": "ms.channel.connect"}, {"event": "ms.channel.ready"}]
-    )
+    ws = FakeWebSocket(handshake_frames())
     art = make_art()
     with patch(
         "custom_components.samsungtv_frame.frame_art.connect",
@@ -1335,8 +1417,7 @@ async def test_start_listening_is_idempotent():
 async def test_is_alive_becomes_false_when_receiver_exits():
     ws = FakeWebSocket(
         [
-            {"event": "ms.channel.connect"},
-            {"event": "ms.channel.ready"},
+            *handshake_frames(),
             "not a websocket frame",
         ]
     )
@@ -1357,8 +1438,7 @@ async def test_receiver_decodes_push_payload_for_callback():
     callback = AsyncMock()
     ws = FakeWebSocket(
         [
-            {"event": "ms.channel.connect"},
-            {"event": "ms.channel.ready"},
+            *handshake_frames(),
             {
                 "event": "d2d_service_message",
                 "data": json.dumps({"event": "art_mode_changed", "value": "on"}),
@@ -1395,8 +1475,19 @@ async def test_dispatch_ignores_non_push_and_undecodable_payloads(event, data):
 
 
 def handshake_frames():
-    """Return a successful Art websocket handshake."""
-    return [{"event": "ms.channel.connect"}, {"event": "ms.channel.ready"}]
+    """Return a successful Art websocket handshake with the TV host present."""
+    return [
+        {
+            "event": "ms.channel.connect",
+            "data": {
+                "clients": [
+                    {"isHost": True, "deviceName": "Smart Device"},
+                    {"isHost": False, "deviceName": "Home Assistant"},
+                ]
+            },
+        },
+        {"event": "ms.channel.ready"},
+    ]
 
 
 async def wait_for_sent(ws, count):
@@ -1799,7 +1890,7 @@ async def test_close_serializes_with_in_progress_open():
         close_task = asyncio.create_task(art.close())
         await asyncio.sleep(0)
 
-        await ws.frames.put(json.dumps({"event": "ms.channel.connect"}))
+        await ws.frames.put(json.dumps(handshake_frames()[0]))
         await ws.frames.put(json.dumps({"event": "ms.channel.ready"}))
         opened, _ = await asyncio.gather(open_task, close_task)
 

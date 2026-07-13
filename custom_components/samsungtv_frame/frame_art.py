@@ -47,6 +47,10 @@ type TaskFactory = Callable[
 ]
 
 
+class ArtHostUnavailable(ConnectionFailure):
+    """The channel connected but explicitly listed no internal Art host."""
+
+
 @dataclass(slots=True)
 class _PendingResponse:
     """A response waiter registered with the receiver."""
@@ -60,6 +64,19 @@ _HANDSHAKE_BROADCASTS = {
     MS_CHANNEL_CLIENT_CONNECT_EVENT,
     MS_CHANNEL_CLIENT_DISCONNECT_EVENT,
 }
+
+
+def _explicitly_missing_art_host(frame: dict[str, Any]) -> bool:
+    data = frame.get("data")
+    if not isinstance(data, dict):
+        return False
+    clients = data.get("clients")
+    if not isinstance(clients, list) or not clients:
+        return False
+    return not any(
+        isinstance(client, dict) and client.get("isHost") is True
+        for client in clients
+    )
 
 
 class FrameArt(SamsungTVWSAsyncConnection):
@@ -146,6 +163,10 @@ class FrameArt(SamsungTVWSAsyncConnection):
                 if event != MS_CHANNEL_CONNECT_EVENT:
                     raise ConnectionFailure(frame)
                 self._check_for_token(frame)
+                if _explicitly_missing_art_host(frame):
+                    raise ArtHostUnavailable(
+                        "Art channel connected without an internal host"
+                    )
                 connected = True
                 continue
 
