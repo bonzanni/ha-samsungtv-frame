@@ -250,7 +250,10 @@ class ArtSession:
             and self._state
             in {ArtSessionState.BACKOFF, ArtSessionState.DORMANT}
             and self._active_connect_task() is None
-            and (close_task is None or close_task.done())
+            and (
+                close_task is None
+                or self._close_finished_successfully(close_task)
+            )
             and self._clock() >= self._next_retry_at
         )
 
@@ -272,7 +275,7 @@ class ArtSession:
             return None
         close_task = self._close_task
         if close_task is not None:
-            if not close_task.done():
+            if not self._close_finished_successfully(close_task):
                 return None
             self._close_task = None
 
@@ -372,6 +375,12 @@ class ArtSession:
         self._close_task = task
         return task
 
+    @staticmethod
+    def _close_finished_successfully(task: asyncio.Task[None]) -> bool:
+        if not task.done() or task.cancelled():
+            return False
+        return task.exception() is None
+
     async def _close_transport(
         self,
         *,
@@ -396,6 +405,8 @@ class ArtSession:
                     interrupted = True
                     break
                 interrupted = True
+            except Exception:  # noqa: BLE001 - replace a failed close owner
+                task = self._schedule_close(force=True)
         if interrupted and not ignore_cancellation:
             raise asyncio.CancelledError
 

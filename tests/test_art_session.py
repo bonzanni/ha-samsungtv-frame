@@ -51,6 +51,7 @@ class FakeArt:
         self._start_gate: asyncio.Event | None = None
         self._ignore_start_cancellation = False
         self._close_gate: asyncio.Event | None = None
+        self._close_cancelled_event: asyncio.Event | None = None
         self.start_listening = AsyncMock(side_effect=self._start_listening)
         self.close = AsyncMock(side_effect=self._close)
         self.stop = MagicMock(side_effect=self._stop)
@@ -70,6 +71,9 @@ class FakeArt:
     def release_close(self) -> None:
         assert self._close_gate is not None
         self._close_gate.set()
+
+    def notify_close_cancelled(self, event: asyncio.Event) -> None:
+        self._close_cancelled_event = event
 
     async def _start_listening(self) -> None:
         gate = self._start_gate
@@ -96,8 +100,13 @@ class FakeArt:
         if gate is not None:
             try:
                 await gate.wait()
+            except asyncio.CancelledError:
+                if self._close_cancelled_event is not None:
+                    self._close_cancelled_event.set()
+                raise
             finally:
                 self._close_gate = None
+                self._close_cancelled_event = None
         self.alive = False
 
     def _stop(self) -> None:
@@ -634,6 +643,44 @@ async def test_cancelled_close_owner_is_replaced_before_stop_completes():
     assert art.close.await_count == 2
     await session.async_stop()
     assert art.close.await_count == 2
+
+
+async def test_cancelled_nonterminal_close_stays_gated_until_replacement():
+    art = FakeArt()
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    await session.async_start()
+    assert await session.async_ensure_ready(ArtSessionTrigger.BACKGROUND)
+    assert session.generation == 1
+    art.block_next_close()
+    close_cancelled = asyncio.Event()
+    art.notify_close_cancelled(close_cancelled)
+    failure_waiter = asyncio.create_task(
+        session.async_connection_failed(ConnectionFailure("lost"))
+    )
+    await wait_for_close_calls(art, 1)
+    close_owner = session._close_task
+    assert close_owner is not None
+
+    async def ensure_as_close_is_cancelled() -> bool:
+        await close_cancelled.wait()
+        return await session.async_ensure_ready(ArtSessionTrigger.USER)
+
+    raced_user = asyncio.create_task(ensure_as_close_is_cancelled())
+    close_owner.cancel()
+    assert await raced_user is False
+    await failure_waiter
+
+    assert art.start_listening.await_count == 1
+    assert session.generation == 1
+    assert session.state is ArtSessionState.BACKOFF
+    assert art.close.await_count == 2
+    assert not art.alive
+
+    assert await session.async_ensure_ready(ArtSessionTrigger.USER)
+    assert art.start_listening.await_count == 2
+    assert session.generation == 2
+    assert session.state is ArtSessionState.READY
 
 
 async def test_second_connect_cancellation_cannot_interrupt_close_recovery():
