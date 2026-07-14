@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -11,17 +10,22 @@ from async_upnp_client.client import UpnpDevice, UpnpService
 from async_upnp_client.client_factory import UpnpFactory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from samsungtvws.async_rest import SamsungTVAsyncRest
 from samsungtvws.command import SamsungTVCommand
-from samsungtvws.exceptions import ConnectionFailure, ResponseError
+from samsungtvws.exceptions import (
+    ConnectionFailure,
+    ResponseError,
+    UnauthorizedError,
+)
 from samsungtvws.remote import ChannelEmitCommand, SendRemoteKey
 from wakeonlan import send_magic_packet
 
 from .const import (
-    ART_CLOSE_DEADLINE,
     DOMAIN,
     LOGGER,
     PORT_REST,
+    REMOTE_CANCEL_DEADLINE,
+    REMOTE_CLOSE_DEADLINE,
+    REMOTE_DRAIN_DEADLINE,
 )
 from .art_session import (
     ArtSession,
@@ -31,6 +35,7 @@ from .art_session import (
 )
 from .frame_art import ArtEventCallback, FrameArt, TaskFactory
 from .frame_remote import FrameRemote, RemotePairingRequired
+from .rest import PrivacySafeSamsungTVAsyncRest
 
 _RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
 _DMR_URL = "http://{host}:9197/dmr"
@@ -58,7 +63,7 @@ class FrameDevice:
         # _rest is created lazily on first async_device_info call: aiohttp's connector
         # requires a running event loop, so we cannot create it here in __init__ (which
         # may be called from a sync context, e.g. in tests).
-        self._rest: SamsungTVAsyncRest | None = None
+        self._rest: PrivacySafeSamsungTVAsyncRest | None = None
         self._remote: FrameRemote | None = (
             self._create_remote(token) if token else None
         )
@@ -78,15 +83,16 @@ class FrameDevice:
         # resurrect a connection nothing will ever close.
         self._stopped = False
         self._stop_task: asyncio.Task[None] | None = None
+        self._remote_operation_lock = asyncio.Lock()
+        self._active_remote_operation: asyncio.Task[Any] | None = None
+        self._remote_quiescing = False
         # UPnP DMR device (RenderingControl) — created lazily, dropped on
         # failure so a TV power cycle just triggers a fresh description fetch.
         self._upnp_device: UpnpDevice | None = None
         self._remote_token_callback: Callable[[str], None] | None = None
         self._remote_reauth_callback: Callable[[], None] | None = None
-        # True after any successful remote-channel operation this run. The
-        # background app-list fetch is gated on it: a remote connect can make
-        # the TV pop an authorization prompt (e.g. after a power cycle wiped
-        # the grant), and only user-initiated actions should ever do that.
+        # True after any successful foreground remote-channel operation this
+        # run; power and unload boundaries invalidate the observation.
         self.remote_confirmed = False
 
     @property
@@ -175,10 +181,10 @@ class FrameDevice:
         """Replace the foreground remote reauthorization callback."""
         self._remote_reauth_callback = callback
 
-    def _ensure_rest(self) -> SamsungTVAsyncRest:
+    def _ensure_rest(self) -> PrivacySafeSamsungTVAsyncRest:
         if self._rest is None:
             session = async_get_clientsession(self._hass)
-            self._rest = SamsungTVAsyncRest(
+            self._rest = PrivacySafeSamsungTVAsyncRest(
                 self._host, session=session, port=PORT_REST, timeout=8
             )
         return self._rest
@@ -380,7 +386,14 @@ class FrameDevice:
 
     async def async_turn_off(self) -> None:
         # Single press only toggles art mode; a 3 s hold truly powers a Frame off.
-        await self._async_remote_commands(SendRemoteKey.hold("KEY_POWER", 3))
+        try:
+            await self._async_remote_commands(
+                SendRemoteKey.hold("KEY_POWER", 3)
+            )
+        finally:
+            # A successful power-off makes this transport authorization
+            # observation stale; a failed send leaves the TV state unknown.
+            self.remote_confirmed = False
 
     async def async_send_key(self, key: str) -> None:
         await self._async_remote_commands([SendRemoteKey.click(key)])
@@ -396,21 +409,44 @@ class FrameDevice:
         )
 
     async def async_app_list(self) -> list[dict[str, Any]] | None:
-        """Installed apps, or None (not supported on all TVs / TV not ready)."""
-        remote = self._remote
-        if remote is None:
-            return None
-        try:
-            apps = await remote.app_list()
-        except RemotePairingRequired:
-            self.remote_confirmed = False
-            return None
-        except Exception:  # noqa: BLE001
-            LOGGER.debug("Remote app-list request failed")
-            return None
-        self.remote_confirmed = True
-        self._capture_remote_token()
-        return apps
+        """Compatibility seam; runtime installed-app discovery is disabled."""
+        return None
+
+    @property
+    def _remote_unavailable(self) -> bool:
+        return self._stopped or self._remote_quiescing
+
+    def _ensure_remote_available(self) -> None:
+        if self._remote_unavailable:
+            raise ConnectionFailure("Remote control is unavailable")
+
+    async def async_quiesce_remote(self) -> None:
+        """Close remote admission and join operations before reversible unload."""
+        self._remote_quiescing = True
+        self.remote_confirmed = False
+        await self._async_drain_remote_operation()
+
+    def resume_remote(self) -> None:
+        """Reopen remote admission after a failed platform unload."""
+        if not self._stopped:
+            self._remote_quiescing = False
+
+    async def _async_drain_remote_operation(self) -> None:
+        """Boundedly join, then cancel, the active serialized remote work."""
+        operation = self._active_remote_operation
+        if operation is None or operation is asyncio.current_task():
+            return
+        _, pending = await asyncio.wait(
+            {operation}, timeout=REMOTE_DRAIN_DEADLINE
+        )
+        if not pending:
+            return
+        operation.cancel()
+        _, pending = await asyncio.wait(
+            {operation}, timeout=REMOTE_CANCEL_DEADLINE
+        )
+        if pending:
+            raise ConnectionFailure("Remote operation did not stop")
 
     def _capture_remote_token(self) -> None:
         """Synchronously persist a changed canonical remote token."""
@@ -432,47 +468,112 @@ class FrameDevice:
             self._remote_reauth_callback()
 
     async def _async_remote_commands(self, commands: list[SamsungTVCommand]) -> None:
-        """Send on the persistent remote; reset once if the connection is stale.
+        """Open, persist authorization, then send; retry one stale transport.
 
-        Like the art client, the remote keeps a cached connection that is never
-        invalidated when the TV power-cycles; the first send after a cycle
-        fails, so close and retry once before giving up.
+        Opening is explicit so a token issued during authorization is persisted
+        before a power command can make the TV unreachable. Persistence sits
+        outside the transport exception handlers: a callback failure must fail
+        the operation without sending or being retried as a stale socket.
         """
-        remote = self._remote
-        if remote is None:
-            self._request_remote_reauth()
-            raise RemotePairingRequired("Remote authorization required")
-        try:
-            await remote.send_commands(commands)
-        except RemotePairingRequired:
-            self._request_remote_reauth()
-            raise
-        except Exception:  # noqa: BLE001
-            LOGGER.debug(
-                "Remote send failed; retrying once on a fresh connection"
-            )
-            with contextlib.suppress(Exception, TimeoutError):
-                async with asyncio.timeout(ART_CLOSE_DEADLINE):
-                    await remote.close()
+        self._ensure_remote_available()
+        async with self._remote_operation_lock:
+            operation = asyncio.current_task()
+            self._active_remote_operation = operation
             try:
-                await remote.send_commands(commands)
-            except RemotePairingRequired:
-                self._request_remote_reauth()
-                raise
-        self.remote_confirmed = True
-        self._capture_remote_token()
+                self._ensure_remote_available()
+                remote = self._remote
+                if remote is None:
+                    self._request_remote_reauth()
+                    raise RemotePairingRequired(
+                        "Remote authorization required"
+                    )
+
+                for attempt in range(2):
+                    try:
+                        await remote.open()
+                    except RemotePairingRequired:
+                        self._request_remote_reauth()
+                        raise
+                    except UnauthorizedError:
+                        self._request_remote_reauth()
+                        raise UnauthorizedError(
+                            "Remote authorization rejected"
+                        ) from None
+                    except Exception:  # noqa: BLE001
+                        self.remote_confirmed = False
+                        if attempt == 1:
+                            raise ConnectionFailure(
+                                "Remote control connection failed"
+                            ) from None
+                        LOGGER.debug(
+                            "Remote open failed; retrying once on a fresh connection"
+                        )
+                        await self._async_reset_remote(remote)
+                        continue
+
+                    self._capture_remote_token()
+                    self._ensure_remote_available()
+
+                    try:
+                        await remote.send_commands(commands)
+                    except RemotePairingRequired:
+                        self._request_remote_reauth()
+                        raise
+                    except UnauthorizedError:
+                        self._request_remote_reauth()
+                        raise UnauthorizedError(
+                            "Remote authorization rejected"
+                        ) from None
+                    except Exception:  # noqa: BLE001
+                        self.remote_confirmed = False
+                        if attempt == 1:
+                            raise ConnectionFailure(
+                                "Remote control connection failed"
+                            ) from None
+                        LOGGER.debug(
+                            "Remote send failed; retrying once on a fresh connection"
+                        )
+                        await self._async_reset_remote(remote)
+                        continue
+
+                    self._ensure_remote_available()
+                    self.remote_confirmed = True
+                    return
+            finally:
+                if self._active_remote_operation is operation:
+                    self._active_remote_operation = None
+
+    async def _async_reset_remote(self, remote: FrameRemote) -> None:
+        """Close one stale socket; do not retry unless ownership is resolved."""
+        try:
+            await remote.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise ConnectionFailure("Remote control reset failed") from None
 
     def set_art_event_callback(self, callback: ArtEventCallback) -> None:
         """Set the loop-native callback receiving unsolicited Art events."""
         self._art.set_event_callback(callback)
 
-    async def _async_close_remote(self) -> None:
-        """Close the remote without allowing shutdown to wedge indefinitely."""
+    async def _async_stop_remote(self) -> None:
+        """Join active remote work, then permanently stop its transport."""
+        drain_error: ConnectionFailure | None = None
+        try:
+            await self._async_drain_remote_operation()
+        except ConnectionFailure as err:
+            drain_error = err
         remote = self._remote
-        if remote is None:
-            return
-        async with asyncio.timeout(ART_CLOSE_DEADLINE):
-            await remote.close()
+        if remote is not None:
+            try:
+                async with asyncio.timeout(REMOTE_CLOSE_DEADLINE):
+                    await remote.async_stop()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+        if drain_error is not None:
+            raise drain_error
 
     async def async_stop(self) -> None:
         """Join the one task-factory-owned terminal shutdown."""
@@ -494,6 +595,8 @@ class FrameDevice:
                     raise
                 self._stop_task = task
                 self._stopped = True
+                self._remote_quiescing = True
+                self.remote_confirmed = False
             try:
                 await asyncio.shield(task)
                 return
@@ -510,9 +613,11 @@ class FrameDevice:
     async def _async_stop_once(self) -> None:
         """Stop the Art session and remote exactly once."""
         self._stopped = True
+        self._remote_quiescing = True
+        self.remote_confirmed = False
         completion = asyncio.gather(
             self._art_session.async_stop(),
-            self._async_close_remote(),
+            self._async_stop_remote(),
             return_exceptions=True,
         )
         while True:

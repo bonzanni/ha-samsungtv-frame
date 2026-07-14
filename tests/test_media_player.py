@@ -6,7 +6,7 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.samsungtv_frame.const import (
-    CONF_HOST, CONF_MAC, CONF_TOKEN, DOMAIN,
+    CONF_HOST, CONF_MAC, CONF_TOKEN, DEFAULT_APP_MAP, DOMAIN,
 )
 
 ENTITY = "media_player.samsung_frame_tv"
@@ -131,15 +131,11 @@ async def test_send_key_failure_raises_ha_error(hass, mock_device):
 async def test_select_source_launches_app(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False
-    mock_device.async_app_list.return_value = [
-        {"name": "Netflix", "appId": "11101200001", "app_type": 2},
-        {"name": "YouTube", "appId": "111299001912", "app_type": 4},
-    ]
     await _setup(hass, mock_device)
     await hass.async_block_till_done(wait_background_tasks=True)
 
     state = hass.states.get(ENTITY)
-    assert state.attributes["source_list"] == ["Netflix", "YouTube"]
+    assert state.attributes["source_list"] == sorted(DEFAULT_APP_MAP)
 
     await hass.services.async_call(
         "media_player", "select_source",
@@ -153,7 +149,7 @@ async def test_select_source_launches_app(hass, mock_device):
         {"entity_id": ENTITY, "source": "YouTube"}, blocking=True,
     )
     mock_device.async_launch_app.assert_awaited_once_with(
-        "111299001912", "NATIVE_LAUNCH"
+        "111299001912", "DEEP_LINK"
     )
 
 
@@ -161,24 +157,33 @@ async def test_select_source_unknown_app_raises(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False
     await _setup(hass, mock_device)
-    with pytest.raises(ServiceValidationError):
+    with pytest.raises(ServiceValidationError) as raised:
         await hass.services.async_call(
             "media_player", "select_source",
             {"entity_id": ENTITY, "source": "Nope"}, blocking=True,
         )
 
+    assert str(raised.value) == (
+        "Unknown source 'Nope'; choose an app from the curated built-in "
+        "catalog"
+    )
 
-async def test_catalog_source_list_when_app_list_unsupported(hass, mock_device):
-    """TVs that never answer the app-list request still get the built-in
-    catalog as source_list, available immediately."""
+
+async def test_media_player_sources_are_exact_curated_builtin_catalog(
+    hass, mock_device
+):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False
-    mock_device.async_app_list.return_value = None
+    mock_device.remote_confirmed = True
+    mock_device.async_app_list.return_value = [
+        {"name": "Discovered App", "appId": "PRIVATE", "app_type": 4}
+    ]
     await _setup(hass, mock_device)
     await hass.async_block_till_done(wait_background_tasks=True)
+
     state = hass.states.get(ENTITY)
-    assert "Netflix" in state.attributes["source_list"]
-    assert len(state.attributes["source_list"]) == 7
+    assert state.attributes["source_list"] == sorted(DEFAULT_APP_MAP)
+    mock_device.async_app_list.assert_not_awaited()
 
 
 async def test_send_key_entity_service(hass, mock_device):
@@ -206,16 +211,12 @@ async def test_set_art_mode_entity_service(hass, mock_device):
 async def test_source_and_app_name_reflect_running_app(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False
-    mock_device.async_app_list.return_value = [
-        {"name": "Netflix", "appId": "NETFLIX_ID", "app_type": 2},
-    ]
 
-    async def _status(app_id):
+    async def _status(_app_id):
         return {"visible": True, "running": True}
 
     mock_device.async_app_status.side_effect = _status
     await _setup(hass, mock_device)
-    # First poll ran before the app list existed; the next one sweeps.
     await hass.async_block_till_done(wait_background_tasks=True)
     coordinator = hass.config_entries.async_entries(DOMAIN)[0].runtime_data
     await coordinator.async_refresh()
@@ -227,9 +228,6 @@ async def test_source_and_app_name_reflect_running_app(hass, mock_device):
 async def test_source_falls_back_to_tv_when_no_app_visible(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False
-    mock_device.async_app_list.return_value = [
-        {"name": "Netflix", "appId": "NETFLIX_ID", "app_type": 2},
-    ]
     mock_device.async_app_status.return_value = {"visible": False}
     await _setup(hass, mock_device)
     await hass.async_block_till_done(wait_background_tasks=True)
@@ -358,9 +356,6 @@ async def test_set_photo_filter_service(hass, mock_device):
 async def test_play_media_launches_app_with_deep_link(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False
-    mock_device.async_app_list.return_value = [
-        {"name": "YouTube", "appId": "111299001912", "app_type": 2},
-    ]
     await _setup(hass, mock_device)
     await hass.async_block_till_done(wait_background_tasks=True)
     await hass.services.async_call(

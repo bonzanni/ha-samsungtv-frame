@@ -13,6 +13,7 @@ import uuid
 from samsungtvws import helper
 from samsungtvws.art.art import ART_ENDPOINT, ArtChannelEmitCommand
 from samsungtvws.async_connection import SamsungTVWSAsyncConnection
+from samsungtvws.command import SamsungTVCommand, SamsungTVSleepCommand
 from samsungtvws.event import (
     D2D_SERVICE_MESSAGE_EVENT,
     IGNORE_EVENTS_AT_STARTUP,
@@ -40,6 +41,10 @@ from .const import (
     LOGGER,
     PORT_WS,
 )
+from .websocket_privacy import (
+    QUIET_WEBSOCKET_LOGGER,
+    process_api_response_silently,
+)
 
 type ArtEventCallback = Callable[[str, dict[str, Any]], Awaitable[None] | None]
 type TaskFactory = Callable[
@@ -49,6 +54,10 @@ type TaskFactory = Callable[
 
 class ArtHostUnavailable(ConnectionFailure):
     """The channel connected but explicitly listed no internal Art host."""
+
+
+class ArtCleanupPending(ConnectionFailure):
+    """A prior Art generation still owns live cleanup work."""
 
 
 @dataclass(slots=True)
@@ -113,15 +122,102 @@ class FrameArt(SamsungTVWSAsyncConnection):
         self._pending: dict[str, _PendingResponse] = {}
         self._uuidless_pending: _PendingResponse | None = None
         self._transfer_tasks: set[asyncio.Task[Any]] = set()
+        self._receiver_connection: ClientConnection | None = None
         self._closing = False
         self._stopped = False
+
+    @staticmethod
+    def _force_abort(websocket: ClientConnection) -> None:
+        """Abort a websocket whose graceful close could not finish."""
+        transport = getattr(websocket, "transport", None)
+        abort = getattr(transport, "abort", None)
+        if callable(abort):
+            with contextlib.suppress(Exception):
+                abort()
+
+    @classmethod
+    async def _async_close_websocket(
+        cls, websocket: ClientConnection
+    ) -> None:
+        """Bound, abort, and fully drain one physical websocket close."""
+        close_task = asyncio.create_task(
+            websocket.close(), name=f"{DOMAIN}-art-socket-close"
+        )
+        cancellation: asyncio.CancelledError | None = None
+        aborted = False
+
+        def abort_once() -> None:
+            nonlocal aborted
+            if not aborted:
+                cls._force_abort(websocket)
+                aborted = True
+
+        try:
+            done, _pending = await asyncio.wait(
+                {close_task}, timeout=ART_CLOSE_DEADLINE
+            )
+        except asyncio.CancelledError as err:
+            cancellation = err
+            done = set()
+
+        if close_task in done:
+            try:
+                close_task.result()
+            except asyncio.CancelledError:
+                abort_once()
+            except BaseException:
+                abort_once()
+        else:
+            abort_once()
+            if not close_task.done():
+                close_task.cancel()
+            while not close_task.done():
+                try:
+                    await asyncio.shield(close_task)
+                except asyncio.CancelledError as err:
+                    if not close_task.done():
+                        cancellation = err
+                        abort_once()
+                        close_task.cancel()
+                except BaseException:
+                    break
+            if close_task.done() and not close_task.cancelled():
+                with contextlib.suppress(BaseException):
+                    close_task.result()
+
+        if cancellation is not None:
+            raise cancellation
+
+    @staticmethod
+    async def _async_drain_tasks(
+        tasks: set[asyncio.Task[Any]],
+        cancellation: asyncio.CancelledError | None,
+    ) -> tuple[set[asyncio.Task[Any]], asyncio.CancelledError | None]:
+        """Bound child-task drain while remembering only caller cancellation."""
+        pending = {task for task in tasks if not task.done()}
+        deadline = asyncio.get_running_loop().time() + ART_CLOSE_DEADLINE
+        while pending:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                _done, pending = await asyncio.wait(
+                    pending, timeout=remaining
+                )
+            except asyncio.CancelledError as err:
+                cancellation = err
+        return pending, cancellation
 
     async def open(self) -> ClientConnection:
         """Open the websocket and complete its bounded two-stage handshake."""
         async with self._lifecycle_lock:
             self._raise_if_stopped()
+            if not self.token:
+                raise UnauthorizedError("Art authorization required")
             if self.connection is not None:
                 return self.connection
+            if self.has_live_children():
+                raise ArtCleanupPending("Art cleanup pending")
 
             websocket = None
             try:
@@ -135,37 +231,47 @@ class FrameArt(SamsungTVWSAsyncConnection):
                     websocket = await connect(
                         self._format_websocket_url(self.endpoint),
                         open_timeout=deadline,
+                        logger=QUIET_WEBSOCKET_LOGGER,
                         **kwargs,
                     )
                     await self._wait_for_handshake(websocket)
                     self._raise_if_stopped()
                 self.connection = websocket
                 return websocket
-            except BaseException:
+            except BaseException as err:
                 if websocket is not None:
-                    with contextlib.suppress(Exception, TimeoutError):
-                        async with asyncio.timeout(ART_CLOSE_DEADLINE):
-                            await websocket.close()
+                    await self._async_close_websocket(websocket)
                 self.connection = None
-                raise
+                if isinstance(
+                    err,
+                    (
+                        asyncio.CancelledError,
+                        TimeoutError,
+                        ArtHostUnavailable,
+                        UnauthorizedError,
+                        ConnectionFailure,
+                    ),
+                ):
+                    raise
+                raise ConnectionFailure("Art connection failed") from None
 
-    async def _wait_for_handshake(self, websocket: ClientConnection) -> None:
+    async def _wait_for_handshake(
+        self, websocket: ClientConnection
+    ) -> None:
         """Wait for channel connect followed by Art channel readiness."""
         connected = False
         while True:
-            frame = helper.process_api_response(await websocket.recv())
+            frame = process_api_response_silently(await websocket.recv())
             event = frame.get("event", "*")
-            self._websocket_event(event, frame)
 
             if event == MS_CHANNEL_UNAUTHORIZED:
-                raise UnauthorizedError(frame)
+                raise UnauthorizedError("Art authorization rejected")
 
             if not connected:
                 if event in _HANDSHAKE_BROADCASTS:
                     continue
                 if event != MS_CHANNEL_CONNECT_EVENT:
-                    raise ConnectionFailure(frame)
-                self._check_for_token(frame)
+                    raise ConnectionFailure("Art handshake failed")
                 if _explicitly_missing_art_host(frame):
                     raise ArtHostUnavailable(
                         "Art channel connected without an internal host"
@@ -176,20 +282,30 @@ class FrameArt(SamsungTVWSAsyncConnection):
             if event == MS_CHANNEL_READY_EVENT:
                 return
             if event not in _HANDSHAKE_BROADCASTS:
-                raise ConnectionFailure(frame)
+                raise ConnectionFailure("Art handshake failed")
 
     async def start_listening(self) -> None:
         """Open and start the sole HA-owned websocket receiver."""
         self._raise_if_stopped()
         if self._task_factory is None:
             raise RuntimeError("A task factory is required to start the receiver")
-        await self.open()
-        if self._recv_loop is not None and not self._recv_loop.done():
-            return
+        connection = await self.open()
+        receiver = self._recv_loop
+        if receiver is not None and not receiver.done():
+            if self._receiver_connection is connection:
+                return
+            raise ArtCleanupPending("Art cleanup pending")
         self._closing = False
-        self._recv_loop = self._task_factory(
-            self._receive_loop(), f"{DOMAIN}-art-receiver"
-        )
+        coroutine = self._receive_loop(connection)
+        try:
+            receiver = self._task_factory(
+                coroutine, f"{DOMAIN}-art-receiver"
+            )
+        except BaseException:
+            coroutine.close()
+            raise
+        self._recv_loop = receiver
+        self._receiver_connection = connection
 
     def set_event_callback(self, callback: ArtEventCallback | None) -> None:
         """Replace the callback receiving unsolicited Art events."""
@@ -203,6 +319,13 @@ class FrameArt(SamsungTVWSAsyncConnection):
         """Reject work that crossed the permanent shutdown boundary."""
         if self._stopped:
             raise ConnectionFailure("Art connection is stopped")
+
+    def has_live_children(self) -> bool:
+        """Return whether a receiver or transfer still owns Art work."""
+        receiver = self._recv_loop
+        return (
+            receiver is not None and not receiver.done()
+        ) or any(not task.done() for task in self._transfer_tasks)
 
     async def request(
         self,
@@ -262,9 +385,13 @@ class FrameArt(SamsungTVWSAsyncConnection):
         nested = payload.get("data")
         if isinstance(nested, str):
             nested_data = json.loads(nested)
-            for item in nested_data:
-                if item.get("item") == setting:
-                    return item
+            if isinstance(nested_data, list):
+                for item in nested_data:
+                    if (
+                        isinstance(item, dict)
+                        and item.get("item") == setting
+                    ):
+                        return item
         return payload
 
     async def get_brightness(self) -> Any:
@@ -667,19 +794,40 @@ class FrameArt(SamsungTVWSAsyncConnection):
                 self._uuidless_pending = None
             self._consume_or_cancel_future(future)
 
-    async def _receive_loop(self) -> None:
+    @staticmethod
+    async def _send_command(
+        connection: ClientConnection,
+        command: SamsungTVCommand | dict[str, Any],
+        delay: float,
+    ) -> None:
+        """Send one command without exposing its payload through logging."""
+        if isinstance(command, SamsungTVSleepCommand):
+            await asyncio.sleep(command.delay)
+            return
+        if isinstance(command, SamsungTVCommand):
+            payload = command.get_payload()
+        else:
+            payload = json.dumps(command)
+        await connection.send(payload)
+        await asyncio.sleep(delay)
+
+    async def _receive_loop(
+        self, connection: ClientConnection | None = None
+    ) -> None:
         """Receive and dispatch each websocket frame exactly once."""
-        connection = self.connection
+        if connection is None:
+            connection = self.connection
         try:
             while connection is not None:
-                frame = helper.process_api_response(await connection.recv())
+                frame = process_api_response_silently(
+                    await connection.recv()
+                )
                 event = frame.get("event", "*")
-                self._websocket_event(event, frame)
                 await self._dispatch_frame(event, frame)
         except asyncio.CancelledError:
             raise
-        except Exception as err:
-            LOGGER.debug("Art receiver exited: %s", err)
+        except Exception:
+            LOGGER.debug("Art receiver exited")
         finally:
             await self._receiver_finished(connection)
 
@@ -727,20 +875,21 @@ class FrameArt(SamsungTVWSAsyncConnection):
                 awaitable = callback(event, payload)
                 if awaitable is not None:
                     await awaitable
-            except Exception as err:
-                LOGGER.warning("Art event callback failed: %s", err)
+            except Exception:
+                LOGGER.warning("Art event callback failed")
 
     async def _receiver_finished(self, connection: ClientConnection | None) -> None:
         """Clean up only the connection captured by this receiver."""
-        if connection is not None:
-            with contextlib.suppress(Exception, TimeoutError):
-                async with asyncio.timeout(ART_CLOSE_DEADLINE):
-                    await connection.close()
         if self.connection is connection:
             self.connection = None
-        self._fail_pending(ConnectionFailure("Art connection closed"))
-        if self._recv_loop is asyncio.current_task():
-            self._recv_loop = None
+        try:
+            if connection is not None:
+                await self._async_close_websocket(connection)
+        finally:
+            self._fail_pending(ConnectionFailure("Art connection closed"))
+            if self._recv_loop is asyncio.current_task():
+                self._recv_loop = None
+                self._receiver_connection = None
 
     def _fail_pending(self, error: Exception) -> None:
         """Fail and clear every response waiter."""
@@ -757,8 +906,18 @@ class FrameArt(SamsungTVWSAsyncConnection):
         """Cancel owned tasks and close the websocket within a deadline."""
         async with self._lifecycle_lock:
             self._closing = True
+            cancellation: asyncio.CancelledError | None = None
+            receiver_error: BaseException | None = None
+            tasks_alive = False
             try:
                 current = asyncio.current_task()
+                completed_transfers = {
+                    task for task in self._transfer_tasks if task.done()
+                }
+                for task in completed_transfers:
+                    if not task.cancelled():
+                        task.exception()
+                self._transfer_tasks.difference_update(completed_transfers)
                 transfers = [
                     task
                     for task in self._transfer_tasks
@@ -767,30 +926,59 @@ class FrameArt(SamsungTVWSAsyncConnection):
                 for task in transfers:
                     task.cancel()
                 if transfers:
-                    with contextlib.suppress(
-                        asyncio.CancelledError, TimeoutError
-                    ):
-                        async with asyncio.timeout(ART_CLOSE_DEADLINE):
-                            await asyncio.gather(
-                                *transfers, return_exceptions=True
-                            )
-                    self._transfer_tasks.difference_update(transfers)
+                    pending_transfers, cancellation = await self._async_drain_tasks(
+                        set(transfers), cancellation
+                    )
+                    completed_transfers = {
+                        task for task in transfers if task.done()
+                    }
+                    for task in completed_transfers:
+                        if not task.cancelled():
+                            task.exception()
+                    self._transfer_tasks.difference_update(
+                        completed_transfers
+                    )
+                    tasks_alive = any(
+                        not task.done() for task in pending_transfers
+                    )
 
                 receiver = self._recv_loop
-                self._recv_loop = None
                 if receiver is not None and receiver is not current:
-                    receiver.cancel()
-                    with contextlib.suppress(
-                        asyncio.CancelledError, TimeoutError
-                    ):
-                        async with asyncio.timeout(ART_CLOSE_DEADLINE):
-                            await receiver
+                    if not receiver.done():
+                        receiver.cancel()
+                        pending_receivers, cancellation = (
+                            await self._async_drain_tasks(
+                                {receiver}, cancellation
+                            )
+                        )
+                        tasks_alive = tasks_alive or any(
+                            not task.done() for task in pending_receivers
+                        )
+                    if receiver.done() and not receiver.cancelled():
+                        receiver_error = receiver.exception()
+                    if receiver.done() and self._recv_loop is receiver:
+                        self._recv_loop = None
+                        self._receiver_connection = None
+                elif receiver is current:
+                    self._recv_loop = None
+                    self._receiver_connection = None
                 connection, self.connection = self.connection, None
-                if connection is not None:
-                    with contextlib.suppress(Exception, TimeoutError):
-                        async with asyncio.timeout(ART_CLOSE_DEADLINE):
-                            await connection.close()
-                self._fail_pending(ConnectionFailure("Art connection closed"))
+                try:
+                    if connection is not None:
+                        try:
+                            await self._async_close_websocket(connection)
+                        except asyncio.CancelledError as err:
+                            cancellation = err
+                finally:
+                    self._fail_pending(
+                        ConnectionFailure("Art connection closed")
+                    )
+                if cancellation is not None:
+                    raise cancellation
+                if tasks_alive:
+                    raise ConnectionFailure("Art tasks did not stop")
+                if receiver_error is not None:
+                    raise receiver_error
             finally:
                 self._closing = False
 
@@ -801,4 +989,5 @@ class FrameArt(SamsungTVWSAsyncConnection):
             and self.connection.state is not State.CLOSED
             and self._recv_loop is not None
             and not self._recv_loop.done()
+            and self._receiver_connection is self.connection
         )

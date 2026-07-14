@@ -12,8 +12,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .art_session import ArtSessionState
 from .const import (
-    APP_FETCH_MAX_ATTEMPTS,
-    APP_FETCH_POLL_SPACING,
     ART_FAIL_UNKNOWN_COUNT,
     ART_RECONCILE_SECONDS,
     CONF_TOKEN,
@@ -76,22 +74,16 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         self._art_fail_warned = False
         self._upnp_fail_streak = 0
         self._upnp_fail_warned = False
-        self._app_fetch_warned = False
         # Learned model trait: art mode coexisting with PowerState "on"
         # (2022-24 Frames) means "standby" can only be a shutdown, so it may
         # override the art gate in derive_tv_mode. Never learned on 2025
         # models, which report "standby" during normal art mode (#185).
         self._art_implies_power_on = False
-        # Installed apps keyed by display name (media_player source list).
-        # Seeded with the built-in catalog so the source dropdown exists from
-        # the first poll; replaced by the TV's real list when (if) the TV
-        # answers the request — some firmwares never do.
+        # Curated built-in apps keyed by display name for media_player sources.
+        # Copy each entry so runtime consumers cannot mutate the constants.
         self.app_map: dict[str, dict[str, Any]] = {
             name: dict(app) for name, app in DEFAULT_APP_MAP.items()
         }
-        self._app_map_is_fallback = True
-        self._app_fetch_attempts = 0
-        self._app_fetch_countdown = 0
 
     def _last_stable(self) -> TvMode:
         if self.data is not None and self.data.tv_mode is not TvMode.UNKNOWN:
@@ -118,6 +110,8 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         was_reachable = self._was_reachable
         self._was_reachable = reachable
         reachable_edge = reachable and not was_reachable
+        if not reachable or reachable_edge:
+            self.device.remote_confirmed = False
         session_power_state = (
             None
             if power_state == "standby" and self._art_implies_power_on
@@ -126,14 +120,6 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         self.device.observe_art_power(
             reachable, session_power_state, reachable_edge
         )
-
-        if reachable_edge:
-            # New power-on: the app list may have changed (and the previous
-            # attempts may have hit a booting TV) — the real list gets a new
-            # shot; the catalog keeps serving sources meanwhile.
-            self._app_fetch_attempts = 0
-            self._app_fetch_countdown = 0
-            self._app_fetch_warned = False
 
         if reachable:
             self._unreachable_count = 0
@@ -190,6 +176,9 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
                 # freeze the last state forever.
                 mode = self._last_stable()
 
+        if mode is TvMode.OFF:
+            self.device.remote_confirmed = False
+
         running_app: str | None = None
         if mode is TvMode.WATCHING and self.app_map:
             running_app = await self._async_detect_running_app()
@@ -215,27 +204,6 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             "Poll: reachable=%s power=%s art=%s -> %s",
             reachable, power_state, self._art_mode, mode,
         )
-
-        # Real app-list fetch: retry on every APP_FETCH_POLL_SPACING-th poll
-        # so the attempts span minutes — a cold-booting TV ignores the request
-        # for the first ~30 s, which would burn back-to-back attempts.
-        # Gated on remote_confirmed: opening the remote channel can pop an
-        # authorization prompt on the TV (a power cycle can wipe the grant),
-        # and only user-initiated actions should ever do that — never a
-        # background fetch. The catalog serves sources until then.
-        if (
-            mode in (TvMode.WATCHING, TvMode.ART_MODE)
-            and self.device.remote_confirmed
-            and self._app_map_is_fallback
-            and self._app_fetch_attempts < APP_FETCH_MAX_ATTEMPTS
-        ):
-            self._app_fetch_countdown -= 1
-            if self._app_fetch_countdown <= 0:
-                self._app_fetch_countdown = APP_FETCH_POLL_SPACING
-                self._app_fetch_attempts += 1
-                self.config_entry.async_create_background_task(
-                    self.hass, self._async_fetch_app_list(), f"{DOMAIN}-app-list"
-                )
 
         # When the TV is off we know art mode cannot be active, even if the
         # last cached value says otherwise.  Keep self._art_mode unchanged so
@@ -330,7 +298,7 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
     async def _async_detect_running_app(self) -> str | None:
         """Name of the foreground app, or None (live TV / HDMI / not found).
 
-        One REST status call per installed app, bounded concurrency; the
+        One REST status call per curated app, bounded concurrency; the
         foreground app is the one reporting visible=true.
         """
         assert self.app_map is not None
@@ -346,43 +314,20 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         )
         return next((name for name in results if name), None)
 
-    async def _async_fetch_app_list(self) -> None:
-        """Populate the media_player source list from the TV's installed apps."""
-        apps = await self.device.async_app_list()
-        if not apps:
-            if (
-                self._app_fetch_attempts >= APP_FETCH_MAX_ATTEMPTS
-                and not self._app_fetch_warned
-            ):
-                self._app_fetch_warned = True
-                # Some firmwares (e.g. 2022 LS03B) accept the request but
-                # never answer it; the pre-seeded catalog keeps serving.
-                LOGGER.info(
-                    "The TV did not answer the installed-apps request after "
-                    "%s attempts; keeping the built-in catalog of %s "
-                    "well-known apps",
-                    self._app_fetch_attempts,
-                    len(self.app_map),
-                )
-            return
-        self.app_map = {
-            app["name"]: app for app in apps if app.get("name") and app.get("appId")
-        }
-        self._app_map_is_fallback = False
-        LOGGER.debug("Fetched %d installed apps", len(self.app_map))
-        self.async_update_listeners()
-
     @callback
     def handle_remote_token(self, token: str) -> None:
         """Adopt and persist a changed canonical remote token."""
-        if not token or token == self.config_entry.data.get(CONF_TOKEN):
+        if not token:
             return
+        if token != self.config_entry.data.get(CONF_TOKEN):
+            self.hass.config_entries.async_update_entry(
+                self.config_entry,
+                data={**self.config_entry.data, CONF_TOKEN: token},
+            )
+            LOGGER.info("Captured a newly issued remote credential")
+        # Runtime adoption acknowledges successful persistence. If the entry
+        # already held this token, this still repairs stale runtime clients.
         self.device.update_token(token)
-        self.hass.config_entries.async_update_entry(
-            self.config_entry,
-            data={**self.config_entry.data, CONF_TOKEN: token},
-        )
-        LOGGER.info("Captured a newly issued remote credential")
 
     @callback
     def handle_remote_reauth(self) -> None:
@@ -511,6 +456,8 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         )
         if mode is TvMode.UNKNOWN:
             mode = self._last_stable()
+        if mode is TvMode.OFF:
+            self.device.remote_confirmed = False
         self.async_set_updated_data(
             FrameData(
                 reachable=True,

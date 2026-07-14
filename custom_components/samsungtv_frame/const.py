@@ -70,7 +70,14 @@ ART_CONNECT_DEADLINE = 10
 ART_REQUEST_DEADLINE = 20
 ART_D2D_DEADLINE = 20
 ART_CLOSE_DEADLINE = 5
+ART_CLEANUP_RECHECK = 2.0
 REMOTE_CLOSE_DEADLINE = 5
+# Foreground remote work includes an 8 s open plus a normal 3 s power hold.
+# Give cooperative work time to finish before unload requests cancellation.
+REMOTE_DRAIN_DEADLINE = 15
+# Once cancellation is requested, shutdown must not wait indefinitely for a
+# misbehaving library/network coroutine to release device operation ownership.
+REMOTE_CANCEL_DEADLINE = 2
 ART_RETRY_DELAYS = (30.0, 60.0, 120.0, 300.0)
 ART_HOST_RETRY_DELAYS = (60.0, 120.0, 300.0)
 ART_DORMANT_SECONDS = 900.0
@@ -79,14 +86,8 @@ ART_RECONCILE_SECONDS = 300.0
 PAIRING_DEADLINE = 30
 # One wedged call must never kill the coordinator: whole-poll deadline.
 POLL_DEADLINE = 45
-# App-list fetch attempts per power-on before giving up (with one warning),
-# spaced APP_FETCH_POLL_SPACING polls apart (a cold-booting TV ignores the
-# request for its first ~30 s).
-APP_FETCH_MAX_ATTEMPTS = 10
-APP_FETCH_POLL_SPACING = 3
 
-# Fallback source catalog for TVs whose firmware never answers the
-# installed-apps request (e.g. 2022 LS03B): well-known Tizen app ids from
+# Curated built-in source catalog: well-known Tizen app ids from
 # https://github.com/jaruba/ha-samsungtv-tizen/blob/master/App_IDs.md
 DEFAULT_APP_MAP: dict[str, dict[str, str | int]] = {
     "Netflix": {"appId": "11101200001", "app_type": 2},

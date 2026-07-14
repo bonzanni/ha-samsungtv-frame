@@ -4,15 +4,23 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import pytest
+from samsungtvws.art.art import ArtChannelEmitCommand
+from samsungtvws.command import SamsungTVSleepCommand
 from samsungtvws.exceptions import ConnectionFailure, ResponseError, UnauthorizedError
 from websockets.protocol import State
 
+from custom_components.samsungtv_frame.device import FrameDevice
 from custom_components.samsungtv_frame.frame_art import (
     ArtHostUnavailable,
     FrameArt,
+)
+from custom_components.samsungtv_frame.websocket_privacy import (
+    QUIET_WEBSOCKET_LOGGER,
 )
 
 
@@ -28,6 +36,7 @@ class FakeWebSocket:
         self.state = State.OPEN
         self.on_send = on_send
         self.recv_delay = recv_delay
+        self.transport = MagicMock()
 
     async def recv(self):
         if self.recv_delay:
@@ -127,16 +136,41 @@ def task_factory(coroutine, name):
     return asyncio.create_task(coroutine, name=name)
 
 
-def make_art(*, callback=None, **kwargs):
+def make_art(*, callback=None, token="tok", **kwargs):
     """Create a transport under test."""
     return FrameArt(
         "1.2.3.4",
-        token="tok",
+        token=token,
         ssl_context=MagicMock(),
         task_factory=task_factory,
         event_callback=callback,
         **kwargs,
     )
+
+
+@pytest.mark.parametrize("token", [None, ""], ids=["none", "empty"])
+async def test_open_without_token_refuses_before_network(token):
+    art = make_art(token=token)
+    connect_mock = AsyncMock(
+        side_effect=AssertionError("network should not be called")
+    )
+
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            connect_mock,
+        ),
+        pytest.raises(
+            UnauthorizedError, match="^Art authorization required$"
+        ),
+    ):
+        await art.open()
+
+    connect_mock.assert_not_awaited()
+    assert art.connection is None
+    assert art._recv_loop is None
+    assert art._receiver_connection is None
+    assert not art._transfer_tasks
 
 
 async def test_request_does_not_open_when_receiver_is_not_ready():
@@ -265,6 +299,63 @@ async def test_get_artmode_settings_extracts_nested_setting():
         "value": 7,
     }
     art.request.assert_awaited_once_with("get_artmode_settings")
+
+
+async def test_get_artmode_settings_skips_malformed_members_before_match():
+    art = make_art()
+    payload = {
+        "data": json.dumps(
+            [
+                None,
+                4,
+                "invalid",
+                ["item", "brightness"],
+                {"item": "brightness", "value": 7},
+            ]
+        )
+    }
+    art.request = AsyncMock(return_value=payload)
+
+    assert await art.get_artmode_settings("brightness") == {
+        "item": "brightness",
+        "value": 7,
+    }
+
+
+@pytest.mark.parametrize(
+    "nested_data",
+    [None, 4, "invalid", {"item": "brightness", "value": 7}],
+)
+async def test_get_artmode_settings_non_list_returns_payload(nested_data):
+    art = make_art()
+    payload = {"data": json.dumps(nested_data)}
+    art.request = AsyncMock(return_value=payload)
+
+    assert await art.get_artmode_settings("brightness") is payload
+
+
+async def test_numeric_device_getter_ignores_malformed_nested_settings(hass):
+    device = FrameDevice(
+        hass,
+        host="1.2.3.4",
+        mac="A0:D0:5B:86:CE:B7",
+        token="tok",
+        ssl_context=MagicMock(),
+        task_factory=task_factory,
+    )
+    session = MagicMock(ready=True)
+    session.async_connection_failed = AsyncMock()
+    device._art_session = session
+    device._art.request = AsyncMock(
+        return_value={
+            "data": json.dumps(
+                [None, "invalid", {"item": "brightness", "value": 7}]
+            )
+        }
+    )
+
+    assert await device.async_get_art_brightness() == 7
+    session.async_connection_failed.assert_not_awaited()
 
 
 async def test_get_artmode_settings_propagates_nested_json_error():
@@ -1243,7 +1334,7 @@ async def test_upload_api_097_sends_exact_binary_frame_and_correlates_result():
     await art.close()
 
 
-async def test_open_ignores_broadcasts_captures_token_and_waits_for_ready():
+async def test_open_ignores_broadcasts_preserves_token_and_waits_for_ready():
     ws = FakeWebSocket(
         [
             {"event": "ms.channel.clientConnect"},
@@ -1264,14 +1355,170 @@ async def test_open_ignores_broadcasts_captures_token_and_waits_for_ready():
             {"event": "ms.channel.ready"},
         ]
     )
-    art = make_art()
+    art = make_art(token="remote-token")
     with patch(
         "custom_components.samsungtv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         assert await art.open() is ws
-    assert art.token == "fresh"
+    assert art.token == "remote-token"
     assert not ws.closed
+
+
+async def test_open_ignores_art_token_across_reconnect_generations():
+    remote_token = "remote-issued-token"
+    art_token = "art-handshake-token"
+    first_ws = FakeWebSocket(
+        [
+            {
+                "event": "ms.channel.connect",
+                "data": {
+                    "token": art_token,
+                    "clients": [{"isHost": True}],
+                },
+            },
+            {"event": "ms.channel.ready"},
+        ]
+    )
+    second_ws = FakeWebSocket(handshake_frames())
+    art = make_art(token=remote_token)
+    connect_mock = AsyncMock(side_effect=[first_ws, second_ws])
+
+    try:
+        with patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            connect_mock,
+        ):
+            assert await art.open() is first_ws
+            token_after_first_generation = art.token
+            await art.close()
+            assert await art.open() is second_ws
+
+        reconnect_url = connect_mock.await_args_list[1].args[0]
+        reconnect_token = parse_qs(urlparse(reconnect_url).query)["token"]
+        assert reconnect_token == [remote_token]
+        assert token_after_first_generation == remote_token
+        assert art.token == remote_token
+    finally:
+        await art.close()
+
+
+async def test_open_uses_quiet_logger_and_never_logs_private_handshake(
+    caplog,
+):
+    handshake_token = "private-art-handshake-token"
+    remote_token = "private-remote-token"
+    client = "private-art-client-name"
+    host = "private-art-tv-host"
+    frame_secret = "private-art-frame-field"
+    ws = FakeWebSocket(
+        [
+            {
+                "event": "ms.channel.connect",
+                "data": {
+                    "token": handshake_token,
+                    "clients": [
+                        {
+                            "isHost": True,
+                            "deviceName": host,
+                            "private": frame_secret,
+                        },
+                        {"isHost": False, "deviceName": client},
+                    ],
+                },
+            },
+            {"event": "ms.channel.ready"},
+        ]
+    )
+    art = FrameArt(
+        host,
+        token=remote_token,
+        ssl_context=MagicMock(),
+        task_factory=task_factory,
+        event_callback=None,
+    )
+    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="samsungtvws")
+    caplog.set_level(logging.DEBUG, logger="websockets")
+
+    async def _connect(url, **kwargs):
+        kwargs["logger"].debug("private websocket URL %s", url)
+        return ws
+
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.connect",
+        AsyncMock(side_effect=_connect),
+    ) as connect_mock:
+        assert await art.open() is ws
+
+    assert connect_mock.await_args.kwargs["logger"] is QUIET_WEBSOCKET_LOGGER
+    assert art.token == remote_token
+    assert not {
+        value
+        for value in (
+            handshake_token,
+            remote_token,
+            client,
+            host,
+            frame_secret,
+        )
+        if value in caplog.text
+    }
+    await art.close()
+
+
+@pytest.mark.parametrize(
+    ("event", "expected_error", "message"),
+    [
+        (
+            "ms.channel.unauthorized",
+            UnauthorizedError,
+            "Art authorization rejected",
+        ),
+        ("unexpected", ConnectionFailure, "Art handshake failed"),
+    ],
+)
+async def test_open_failure_is_sanitized_and_never_logs_raw_frame(
+    event, expected_error, message, caplog
+):
+    secret = "private-art-failed-handshake-frame"
+    ws = FakeWebSocket(
+        [{"event": event, "data": {"token": secret, "private": secret}}]
+    )
+    art = make_art()
+    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="samsungtvws")
+
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            AsyncMock(return_value=ws),
+        ),
+        pytest.raises(expected_error) as raised,
+    ):
+        await art.open()
+
+    assert str(raised.value) == message
+    assert secret not in str(raised.value)
+    assert secret not in caplog.text
+
+
+async def test_generic_open_failure_is_sanitized():
+    secret = "private-art-connect-exception"
+    art = make_art()
+
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            AsyncMock(side_effect=OSError(secret)),
+        ),
+        pytest.raises(ConnectionFailure) as raised,
+    ):
+        await art.open()
+
+    assert str(raised.value) == "Art connection failed"
+    assert raised.value.__suppress_context__ is True
+    assert secret not in str(raised.value)
 
 
 async def test_open_uses_instance_timeout_for_connect():
@@ -1446,6 +1693,141 @@ async def test_open_closes_local_socket_on_failed_handshake(event):
     assert art.connection is None
 
 
+async def test_failed_handshake_close_error_force_aborts_without_token_adoption():
+    ws = FakeWebSocket(
+        [
+            {
+                "event": "ms.channel.connect",
+                "data": {"token": "new-token"},
+            },
+            {"event": "unexpected"},
+        ]
+    )
+    ws.close = AsyncMock(side_effect=OSError("close failed"))
+    art = make_art()
+
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            AsyncMock(return_value=ws),
+        ),
+        pytest.raises(ConnectionFailure, match="^Art handshake failed$"),
+    ):
+        await art.open()
+
+    ws.transport.abort.assert_called_once_with()
+    assert art.connection is None
+    assert art.token == "tok"
+
+
+async def test_failed_handshake_close_deadline_force_aborts_and_drains():
+    ws = FakeWebSocket([{"event": "unexpected"}])
+    close_finished = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def _close():
+        try:
+            await never_finishes.wait()
+        finally:
+            close_finished.set()
+
+    ws.close = _close
+    art = make_art()
+
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            AsyncMock(return_value=ws),
+        ),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+            0.01,
+        ),
+        pytest.raises(ConnectionFailure, match="^Art handshake failed$"),
+    ):
+        await art.open()
+
+    ws.transport.abort.assert_called_once_with()
+    assert close_finished.is_set()
+    assert art.connection is None
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == "samsungtv_frame-art-socket-close"
+    ]
+
+
+async def test_cancellation_during_failed_handshake_cleanup_wins_and_aborts():
+    ws = FakeWebSocket([{"event": "unexpected"}])
+    close_started = asyncio.Event()
+    close_finished = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def _close():
+        close_started.set()
+        try:
+            await never_finishes.wait()
+        finally:
+            close_finished.set()
+
+    ws.close = _close
+    art = make_art()
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.connect",
+        AsyncMock(return_value=ws),
+    ):
+        open_task = asyncio.create_task(art.open())
+        await close_started.wait()
+        open_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await open_task
+
+    ws.transport.abort.assert_called_once_with()
+    assert close_finished.is_set()
+    assert art.connection is None
+
+
+async def test_repeated_cancellation_during_failed_handshake_cleanup_wins():
+    ws = FakeWebSocket([{"event": "unexpected"}])
+    close_started = asyncio.Event()
+    first_close_cancellation = asyncio.Event()
+    close_finished = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def _cancellation_resistant_close():
+        close_started.set()
+        try:
+            await never_finishes.wait()
+        except asyncio.CancelledError:
+            first_close_cancellation.set()
+            await never_finishes.wait()
+        finally:
+            close_finished.set()
+
+    ws.close = _cancellation_resistant_close
+    art = make_art()
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.connect",
+        AsyncMock(return_value=ws),
+    ):
+        open_task = asyncio.create_task(art.open())
+        await close_started.wait()
+        open_task.cancel()
+        await first_close_cancellation.wait()
+        open_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await open_task
+
+    assert ws.transport.abort.call_count >= 1
+    assert close_finished.is_set()
+    assert art.connection is None
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == "samsungtv_frame-art-socket-close"
+    ]
+
+
 async def test_open_deadline_bounds_endless_broadcast_stream():
     ws = FakeWebSocket([{"event": "ms.channel.clientConnect"}] * 20)
     art = make_art(timeout=0.01)
@@ -1520,6 +1902,8 @@ async def test_open_stop_during_handshake_closes_local_socket_before_publish():
     art = make_art()
     ws = FakeWebSocket([])
     connect_mock = AsyncMock(return_value=ws)
+    connect_frame = handshake_frames()[0]
+    connect_frame["data"]["token"] = "new-token-after-stop"
 
     with patch(
         "custom_components.samsungtv_frame.frame_art.connect", connect_mock
@@ -1528,7 +1912,7 @@ async def test_open_stop_during_handshake_closes_local_socket_before_publish():
         while not connect_mock.await_count:
             await asyncio.sleep(0)
         art.stop()
-        await ws.frames.put(json.dumps(handshake_frames()[0]))
+        await ws.frames.put(json.dumps(connect_frame))
         await ws.frames.put(json.dumps({"event": "ms.channel.ready"}))
 
         try:
@@ -1536,6 +1920,7 @@ async def test_open_stop_during_handshake_closes_local_socket_before_publish():
                 await open_task
             assert ws.closed
             assert art.connection is None
+            assert art.token == "tok"
         finally:
             await art.close()
 
@@ -1551,6 +1936,41 @@ async def test_start_listening_is_idempotent():
         receiver = art._recv_loop
         await art.start_listening()
         assert art._recv_loop is receiver
+        await art.close()
+
+
+async def test_start_listening_factory_failure_clears_binding_and_coroutine():
+    created = []
+
+    def failing_factory(coroutine, _name):
+        created.append(coroutine)
+        raise RuntimeError("task factory failed")
+
+    ws = FakeWebSocket(handshake_frames())
+    art = FrameArt(
+        "1.2.3.4",
+        token="tok",
+        ssl_context=MagicMock(),
+        task_factory=failing_factory,
+        event_callback=None,
+    )
+    try:
+        with (
+            patch(
+                "custom_components.samsungtv_frame.frame_art.connect",
+                AsyncMock(return_value=ws),
+            ),
+            pytest.raises(RuntimeError, match="task factory failed"),
+        ):
+            await art.start_listening()
+
+        assert art._recv_loop is None
+        assert art._receiver_connection is None
+        assert len(created) == 1
+        assert created[0].cr_frame is None
+    finally:
+        for coroutine in created:
+            coroutine.close()
         await art.close()
 
 
@@ -1572,6 +1992,27 @@ async def test_is_alive_becomes_false_when_receiver_exits():
         await receiver
     assert not art.is_alive()
     assert ws.closed
+
+
+async def test_is_alive_rejects_receiver_bound_to_different_connection():
+    art = make_art()
+    published = FakeWebSocket([])
+    stale = FakeWebSocket([])
+    receiver = asyncio.create_task(
+        asyncio.Event().wait(), name="test-mismatched-art-receiver"
+    )
+    art.connection = published
+    art._recv_loop = receiver
+    art._receiver_connection = stale
+
+    try:
+        assert not art.is_alive()
+    finally:
+        await art.close()
+
+    assert receiver.done()
+    assert art._recv_loop is None
+    assert art._receiver_connection is None
 
 
 async def test_receiver_decodes_push_payload_for_callback():
@@ -1677,6 +2118,56 @@ async def test_request_correlates_response_by_uuid():
         )
         assert await request_task == {"request_id": request_id, "value": "on"}
         await art.close()
+
+
+async def test_request_wire_payload_is_unchanged_and_not_logged(caplog):
+    request_name = "private-art-request-name"
+    content_id = "private-art-content-id"
+    ws = FakeWebSocket(handshake_frames())
+    art = make_art()
+    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="samsungtvws")
+
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.connect",
+        AsyncMock(return_value=ws),
+    ):
+        await art.start_listening()
+        request_task = asyncio.create_task(
+            art.request(request_name, content_id=content_id)
+        )
+        await wait_for_sent(ws, 1)
+        inner = sent_art_request(ws, 0)
+        expected = ArtChannelEmitCommand.art_app_request(inner).get_payload()
+        assert ws.sent[0] == expected
+        await ws.frames.put(
+            art_response(request_id=inner["request_id"], value="ok")
+        )
+        assert (await request_task)["value"] == "ok"
+        await art.close()
+
+    assert request_name not in caplog.text
+    assert content_id not in caplog.text
+
+
+async def test_send_command_preserves_dict_and_sleep_semantics(caplog):
+    secret = "private-art-dict-payload"
+    ws = FakeWebSocket([])
+    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="samsungtvws")
+
+    payload = {"request": secret, "value": 1}
+    await FrameArt._send_command(ws, payload, 0)
+    assert ws.sent == [json.dumps(payload)]
+
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.asyncio.sleep",
+        AsyncMock(),
+    ) as sleep:
+        await FrameArt._send_command(ws, SamsungTVSleepCommand(0.25), 99)
+    sleep.assert_awaited_once_with(0.25)
+    assert ws.sent == [json.dumps(payload)]
+    assert secret not in caplog.text
 
 
 async def test_request_falls_back_to_id_when_request_id_is_null():
@@ -1852,6 +2343,55 @@ async def test_callback_exception_does_not_interrupt_pending_request(
             assert "Art event callback failed" in caplog.text
         finally:
             await art.close()
+
+
+async def test_receiver_and_callback_failures_do_not_log_private_data(caplog):
+    content_secret = "private-art-receiver-content"
+    exception_secret = "private-art-callback-exception"
+
+    async def callback(_event, _payload):
+        raise RuntimeError(exception_secret)
+
+    ws = FakeWebSocket(
+        [
+            *handshake_frames(),
+            {
+                "event": "d2d_service_message",
+                "data": json.dumps(
+                    {"event": "art_mode_changed", "value": content_secret}
+                ),
+            },
+        ]
+    )
+    art = make_art(callback=callback)
+    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="samsungtvws")
+
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.connect",
+        AsyncMock(return_value=ws),
+    ):
+        await art.start_listening()
+        for _ in range(20):
+            if "Art event callback failed" in caplog.text:
+                break
+            await asyncio.sleep(0)
+        await ws.frames.put(OSError("private-art-receiver-exception"))
+        receiver = art._recv_loop
+        assert receiver is not None
+        await receiver
+
+    assert "Art event callback failed" in caplog.text
+    assert "Art receiver exited" in caplog.text
+    assert not {
+        value
+        for value in (
+            content_secret,
+            exception_secret,
+            "private-art-receiver-exception",
+        )
+        if value in caplog.text
+    }
 
 
 async def test_dispatch_propagates_callback_cancellation():
@@ -2030,6 +2570,496 @@ async def test_close_is_idempotent():
     assert ws.closed
     assert art.connection is None
     assert art._recv_loop is None
+
+
+async def test_close_failure_force_aborts_and_detaches_connection():
+    art = make_art()
+    ws = FakeWebSocket([])
+    ws.close = AsyncMock(side_effect=OSError("close failed"))
+    art.connection = ws
+
+    await art.close()
+
+    ws.transport.abort.assert_called_once_with()
+    assert art.connection is None
+
+
+async def test_close_deadline_force_aborts_and_drains_close_task():
+    art = make_art()
+    ws = FakeWebSocket([])
+    close_finished = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def _close():
+        try:
+            await never_finishes.wait()
+        finally:
+            close_finished.set()
+
+    ws.close = _close
+    art.connection = ws
+
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+        0.01,
+    ):
+        await art.close()
+
+    ws.transport.abort.assert_called_once_with()
+    assert close_finished.is_set()
+    assert art.connection is None
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == "samsungtv_frame-art-socket-close"
+    ]
+
+
+async def test_close_cancellation_force_aborts_detaches_and_propagates():
+    art = make_art()
+    ws = FakeWebSocket([])
+    close_started = asyncio.Event()
+    close_finished = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def _close():
+        close_started.set()
+        try:
+            await never_finishes.wait()
+        finally:
+            close_finished.set()
+
+    ws.close = _close
+    art.connection = ws
+    close_task = asyncio.create_task(art.close())
+    await close_started.wait()
+    close_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    ws.transport.abort.assert_called_once_with()
+    assert close_finished.is_set()
+    assert art.connection is None
+
+
+def register_pending_response(art):
+    """Register one pending response and return its observable future."""
+    future = asyncio.get_running_loop().create_future()
+    pending = MagicMock()
+    pending.future = future
+    art._pending["pending-close"] = pending
+    return future
+
+
+def assert_no_art_close_tasks():
+    """Assert that no Art receiver, transfer, or socket-close task remains."""
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name()
+        in {
+            "test-blocking-art-transfer",
+            "test-blocking-art-receiver",
+            "samsungtv_frame-art-socket-close",
+        }
+    ]
+
+
+@pytest.mark.parametrize("cancel_count", [1, 2], ids=["single", "repeated"])
+async def test_close_remembers_caller_cancellation_during_transfer_drain(
+    cancel_count,
+):
+    art = make_art()
+    ws = FakeWebSocket([])
+    art.connection = ws
+    pending = register_pending_response(art)
+    transfer_started = asyncio.Event()
+    transfer_cancelled = asyncio.Event()
+    release_transfer = asyncio.Event()
+    transfer_finished = asyncio.Event()
+    child_cancellations = 0
+
+    async def _blocking_transfer():
+        nonlocal child_cancellations
+        transfer_started.set()
+        try:
+            while not release_transfer.is_set():
+                try:
+                    await release_transfer.wait()
+                except asyncio.CancelledError:
+                    child_cancellations += 1
+                    transfer_cancelled.set()
+        finally:
+            transfer_finished.set()
+
+    transfer = asyncio.create_task(
+        _blocking_transfer(), name="test-blocking-art-transfer"
+    )
+    art._transfer_tasks.add(transfer)
+    await transfer_started.wait()
+    close_task = asyncio.create_task(art.close())
+    await transfer_cancelled.wait()
+
+    for _ in range(cancel_count):
+        close_task.cancel()
+        await asyncio.sleep(0)
+        assert not close_task.done()
+    release_transfer.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    assert transfer.done()
+    assert transfer_finished.is_set()
+    assert child_cancellations >= 1
+    assert not art._transfer_tasks
+    assert ws.closed
+    assert ws.state is State.CLOSED
+    assert art.connection is None
+    assert isinstance(pending.exception(), ConnectionFailure)
+    assert not art._pending
+    assert not art._closing
+    assert_no_art_close_tasks()
+
+
+@pytest.mark.parametrize("cancel_count", [1, 2], ids=["single", "repeated"])
+async def test_close_remembers_caller_cancellation_during_receiver_drain(
+    cancel_count,
+):
+    art = make_art()
+    ws = FakeWebSocket([])
+    recv_started = asyncio.Event()
+    recv_forever = asyncio.Event()
+    socket_close_started = asyncio.Event()
+    release_socket_close = asyncio.Event()
+    socket_close_finished = asyncio.Event()
+
+    async def _recv():
+        recv_started.set()
+        await recv_forever.wait()
+
+    async def _cancellation_resistant_close():
+        socket_close_started.set()
+        try:
+            while not release_socket_close.is_set():
+                try:
+                    await release_socket_close.wait()
+                except asyncio.CancelledError:
+                    continue
+        finally:
+            ws.closed = True
+            ws.state = State.CLOSED
+            socket_close_finished.set()
+
+    ws.recv = _recv
+    ws.close = _cancellation_resistant_close
+    art.connection = ws
+    pending = register_pending_response(art)
+    receiver = asyncio.create_task(
+        art._receive_loop(), name="test-blocking-art-receiver"
+    )
+    art._recv_loop = receiver
+    await recv_started.wait()
+    close_task = asyncio.create_task(art.close())
+    await socket_close_started.wait()
+
+    for _ in range(cancel_count):
+        close_task.cancel()
+        await asyncio.sleep(0)
+        assert not close_task.done()
+    release_socket_close.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    assert receiver.done()
+    assert socket_close_finished.is_set()
+    assert ws.closed
+    assert ws.state is State.CLOSED
+    assert art.connection is None
+    assert art._recv_loop is None
+    assert isinstance(pending.exception(), ConnectionFailure)
+    assert not art._pending
+    assert not art._closing
+    assert_no_art_close_tasks()
+
+
+@pytest.mark.parametrize(
+    "caller_cancel", [False, True], ids=["deadline", "caller-cancel"]
+)
+async def test_close_retains_transfer_that_outlives_drain_deadline(
+    caller_cancel,
+):
+    art = make_art()
+    ws = FakeWebSocket([])
+    art.connection = ws
+    pending_response = register_pending_response(art)
+    transfer_started = asyncio.Event()
+    transfer_cancelled = asyncio.Event()
+    release_transfer = asyncio.Event()
+
+    async def _resistant_transfer():
+        transfer_started.set()
+        while not release_transfer.is_set():
+            try:
+                await release_transfer.wait()
+            except asyncio.CancelledError:
+                transfer_cancelled.set()
+
+    transfer = asyncio.create_task(
+        _resistant_transfer(), name="test-resistant-art-transfer"
+    )
+    art._transfer_tasks.add(transfer)
+    await transfer_started.wait()
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+        0.01,
+    ):
+        first_close = asyncio.create_task(art.close())
+        await transfer_cancelled.wait()
+        if caller_cancel:
+            first_close.cancel()
+        result = (await asyncio.gather(first_close, return_exceptions=True))[0]
+
+    try:
+        if caller_cancel:
+            assert isinstance(result, asyncio.CancelledError)
+        else:
+            assert isinstance(result, ConnectionFailure)
+            assert str(result) == "Art tasks did not stop"
+        assert not transfer.done()
+        assert transfer in art._transfer_tasks
+        assert ws.closed
+        assert ws.state is State.CLOSED
+        assert art.connection is None
+        assert isinstance(pending_response.exception(), ConnectionFailure)
+        assert not art._pending
+        assert not art._closing
+    finally:
+        release_transfer.set()
+        await transfer
+
+    await art.close()
+    await art.close()
+    assert not art._transfer_tasks
+    assert_no_art_close_tasks()
+
+
+@pytest.mark.parametrize(
+    "caller_cancel", [False, True], ids=["deadline", "caller-cancel"]
+)
+async def test_close_retains_receiver_that_outlives_drain_deadline(
+    caller_cancel,
+):
+    art = make_art()
+    ws = FakeWebSocket([])
+    recv_started = asyncio.Event()
+    recv_cancelled = asyncio.Event()
+    release_recv = asyncio.Event()
+
+    async def _resistant_recv():
+        recv_started.set()
+        while not release_recv.is_set():
+            try:
+                await release_recv.wait()
+            except asyncio.CancelledError:
+                recv_cancelled.set()
+        raise ConnectionFailure("released receiver")
+
+    ws.recv = _resistant_recv
+    art.connection = ws
+    pending_response = register_pending_response(art)
+    receiver = asyncio.create_task(
+        art._receive_loop(), name="test-resistant-art-receiver"
+    )
+    art._recv_loop = receiver
+    await recv_started.wait()
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+        0.01,
+    ):
+        first_close = asyncio.create_task(art.close())
+        await recv_cancelled.wait()
+        if caller_cancel:
+            first_close.cancel()
+        result = (await asyncio.gather(first_close, return_exceptions=True))[0]
+
+    try:
+        if caller_cancel:
+            assert isinstance(result, asyncio.CancelledError)
+        else:
+            assert isinstance(result, ConnectionFailure)
+            assert str(result) == "Art tasks did not stop"
+        assert not receiver.done()
+        assert art._recv_loop is receiver
+        assert ws.closed
+        assert ws.state is State.CLOSED
+        assert art.connection is None
+        assert isinstance(pending_response.exception(), ConnectionFailure)
+        assert not art._pending
+        assert not art._closing
+    finally:
+        release_recv.set()
+        await receiver
+
+    await art.close()
+    await art.close()
+    assert art._recv_loop is None
+    assert_no_art_close_tasks()
+
+
+async def test_open_fences_retained_receiver_until_its_finally_completes():
+    art = make_art()
+    old_websocket = FakeWebSocket([])
+    new_websocket = FakeWebSocket(handshake_frames())
+    recv_started = asyncio.Event()
+    recv_cancelled = asyncio.Event()
+    release_recv = asyncio.Event()
+
+    async def _resistant_recv():
+        recv_started.set()
+        while not release_recv.is_set():
+            try:
+                await release_recv.wait()
+            except asyncio.CancelledError:
+                recv_cancelled.set()
+        raise ConnectionFailure("released receiver")
+
+    old_websocket.recv = _resistant_recv
+    art.connection = old_websocket
+    receiver = asyncio.create_task(
+        art._receive_loop(), name="test-fenced-art-receiver"
+    )
+    art._recv_loop = receiver
+    art._receiver_connection = old_websocket
+    await recv_started.wait()
+    with patch(
+        "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+        0.01,
+    ):
+        result = (
+            await asyncio.gather(art.close(), return_exceptions=True)
+        )[0]
+    assert isinstance(result, ConnectionFailure)
+    assert recv_cancelled.is_set()
+    assert not receiver.done()
+    assert art.connection is None
+    assert art._receiver_connection is old_websocket
+
+    connect_mock = AsyncMock(return_value=new_websocket)
+    pending = None
+    try:
+        live_children = getattr(art, "has_live_children", None)
+        assert callable(live_children)
+        assert live_children()
+        with (
+            patch(
+                "custom_components.samsungtv_frame.frame_art.connect",
+                connect_mock,
+            ),
+            pytest.raises(
+                ConnectionFailure, match="^Art cleanup pending$"
+            ) as caught,
+        ):
+            await art.open()
+        assert type(caught.value).__name__ == "ArtCleanupPending"
+        connect_mock.assert_not_awaited()
+        assert art.connection is None
+        assert art._recv_loop is receiver
+
+        release_recv.set()
+        await receiver
+        assert not live_children()
+        assert art._recv_loop is None
+        assert art._receiver_connection is None
+
+        with patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            connect_mock,
+        ):
+            assert await art.open() is new_websocket
+            await art.start_listening()
+        connect_mock.assert_awaited_once()
+        assert art._receiver_connection is new_websocket
+        pending = register_pending_response(art)
+        await asyncio.sleep(0)
+        assert not pending.done()
+    finally:
+        release_recv.set()
+        await asyncio.gather(receiver, return_exceptions=True)
+        await art.close()
+
+    assert pending is not None
+    assert isinstance(pending.exception(), ConnectionFailure)
+
+
+async def test_open_fences_current_transfer_until_outer_finally_untracks():
+    art = make_art()
+    old_websocket = FakeWebSocket([])
+    new_websocket = FakeWebSocket(handshake_frames())
+    art.connection = old_websocket
+    close_returned = asyncio.Event()
+    release_transfer = asyncio.Event()
+
+    async def _current_transfer_owner():
+        current = asyncio.current_task()
+        assert current is not None
+        art._transfer_tasks.add(current)
+        try:
+            await art.close()
+            close_returned.set()
+            await release_transfer.wait()
+        finally:
+            art._transfer_tasks.discard(current)
+
+    transfer = asyncio.create_task(
+        _current_transfer_owner(), name="test-current-art-transfer"
+    )
+    await close_returned.wait()
+    connect_mock = AsyncMock(return_value=new_websocket)
+    try:
+        assert not transfer.done()
+        assert art.has_live_children()
+        with (
+            patch(
+                "custom_components.samsungtv_frame.frame_art.connect",
+                connect_mock,
+            ),
+            pytest.raises(
+                ConnectionFailure, match="^Art cleanup pending$"
+            ) as caught,
+        ):
+            await art.open()
+        assert type(caught.value).__name__ == "ArtCleanupPending"
+        connect_mock.assert_not_awaited()
+        assert art.connection is None
+
+        release_transfer.set()
+        await transfer
+        assert not art.has_live_children()
+        with patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            connect_mock,
+        ):
+            assert await art.open() is new_websocket
+        connect_mock.assert_awaited_once()
+    finally:
+        release_transfer.set()
+        await asyncio.gather(transfer, return_exceptions=True)
+        await art.close()
+
+
+async def test_receiver_finished_close_failure_force_aborts_and_detaches():
+    art = make_art()
+    ws = FakeWebSocket([])
+    ws.close = AsyncMock(side_effect=OSError("close failed"))
+    art.connection = ws
+
+    await art._receiver_finished(ws)
+
+    ws.transport.abort.assert_called_once_with()
+    assert art.connection is None
 
 
 async def test_close_serializes_with_in_progress_open():

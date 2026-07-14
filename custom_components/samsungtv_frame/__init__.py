@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from samsungtvws.helper import get_ssl_context
 
 from .const import (
@@ -26,12 +27,16 @@ async def _async_stop_after_setup_failure(device: FrameDevice) -> None:
             ART_CONNECT_DEADLINE + ART_CLOSE_DEADLINE
         ):
             await device.async_stop()
+    except asyncio.CancelledError:
+        raise
     except BaseException:  # noqa: BLE001 - preserve the setup error
         LOGGER.warning("Device cleanup after setup failure did not finish")
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> bool:
     """Set up Samsung Frame TV from a config entry."""
+    if not entry.data.get(CONF_TOKEN):
+        raise ConfigEntryAuthFailed("Authentication required")
     ssl_context = await hass.async_add_executor_job(get_ssl_context)
 
     def task_factory(coroutine, name):
@@ -81,34 +86,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> boo
 async def async_unload_entry(hass: HomeAssistant, entry: FrameConfigEntry) -> bool:
     """Unload a config entry."""
     coordinator = entry.runtime_data
-    coordinator.device.set_art_session_state_callback(None)
-    coordinator.device.set_remote_token_callback(None)
-    coordinator.device.set_remote_reauth_callback(None)
+
+    def _restore_callbacks() -> None:
+        coordinator.device.set_art_session_state_callback(
+            coordinator.handle_art_session_state
+        )
+        coordinator.device.set_remote_token_callback(
+            coordinator.handle_remote_token
+        )
+        coordinator.device.set_remote_reauth_callback(
+            coordinator.handle_remote_reauth
+        )
+
     try:
+        # Stop new remote work and drain in-flight work before callbacks can
+        # disappear. This boundary remains reversible until platforms unload.
+        await coordinator.device.async_quiesce_remote()
+        coordinator.device.set_art_session_state_callback(None)
+        coordinator.device.set_remote_token_callback(None)
+        coordinator.device.set_remote_reauth_callback(None)
         unloaded = await hass.config_entries.async_unload_platforms(
             entry, PLATFORMS
         )
     except BaseException:
-        coordinator.device.set_art_session_state_callback(
-            coordinator.handle_art_session_state
-        )
-        coordinator.device.set_remote_token_callback(
-            coordinator.handle_remote_token
-        )
-        coordinator.device.set_remote_reauth_callback(
-            coordinator.handle_remote_reauth
-        )
+        _restore_callbacks()
+        coordinator.device.resume_remote()
         raise
     if not unloaded:
-        coordinator.device.set_art_session_state_callback(
-            coordinator.handle_art_session_state
-        )
-        coordinator.device.set_remote_token_callback(
-            coordinator.handle_remote_token
-        )
-        coordinator.device.set_remote_reauth_callback(
-            coordinator.handle_remote_reauth
-        )
+        _restore_callbacks()
+        coordinator.device.resume_remote()
         return False
     await coordinator.device.async_stop()
     return True

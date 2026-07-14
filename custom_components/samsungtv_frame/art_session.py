@@ -11,6 +11,7 @@ from typing import Any, cast
 from samsungtvws.exceptions import ConnectionFailure
 
 from .const import (
+    ART_CLEANUP_RECHECK,
     ART_CLOSE_DEADLINE,
     ART_CONNECT_DEADLINE,
     ART_DORMANT_SECONDS,
@@ -20,7 +21,12 @@ from .const import (
     DOMAIN,
     LOGGER,
 )
-from .frame_art import ArtHostUnavailable, FrameArt, TaskFactory
+from .frame_art import (
+    ArtCleanupPending,
+    ArtHostUnavailable,
+    FrameArt,
+    TaskFactory,
+)
 
 
 class ArtSessionState(StrEnum):
@@ -215,8 +221,8 @@ class ArtSession:
         if callback is not None:
             try:
                 callback(state)
-            except Exception as err:  # noqa: BLE001
-                LOGGER.warning("Art session state callback failed: %s", err)
+            except Exception:  # noqa: BLE001
+                LOGGER.warning("Art session state callback failed")
 
     def _reset_failures(self) -> None:
         self._failure_count = 0
@@ -322,6 +328,11 @@ class ArtSession:
                 )
             await self._close_transport(force=self._late_close_required())
             raise
+        except ArtCleanupPending:
+            if self._started and not self._terminal:
+                self._next_retry_at = self._clock() + ART_CLEANUP_RECHECK
+                self._set_state(ArtSessionState.BACKOFF)
+            return False
         except ArtHostUnavailable as err:
             if self._started and not self._terminal:
                 self._record_failure(err)
@@ -420,5 +431,5 @@ class ArtSession:
                 await self._art.close()
         except TimeoutError:
             LOGGER.debug("Art transport close exceeded its deadline")
-        except Exception as err:  # noqa: BLE001
-            LOGGER.debug("Art transport close failed: %s", err)
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Art transport close failed")

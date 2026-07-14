@@ -4,19 +4,26 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Coroutine
+import json
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from samsungtvws.exceptions import ConnectionFailure
+from websockets.protocol import State
 
 from custom_components.samsungtv_frame import art_session as art_session_module
+from custom_components.samsungtv_frame import frame_art as frame_art_module
 from custom_components.samsungtv_frame.art_session import (
     ArtSession,
     ArtSessionState,
     ArtSessionTrigger,
 )
-from custom_components.samsungtv_frame.frame_art import ArtHostUnavailable
+from custom_components.samsungtv_frame.frame_art import (
+    ArtHostUnavailable,
+    FrameArt,
+)
 
 
 class FakeClock:
@@ -904,9 +911,10 @@ async def test_state_callback_changes_without_replay_and_runs_once_per_change():
 async def test_state_callback_failure_does_not_corrupt_session(caplog):
     art = FakeArt()
     clock = FakeClock()
+    secret = "private-art-state-callback-exception"
 
     def broken_callback(_state: ArtSessionState) -> None:
-        raise RuntimeError("callback failed")
+        raise RuntimeError(secret)
 
     session, _ = make_session(
         art, clock, state_callback=broken_callback
@@ -918,3 +926,247 @@ async def test_state_callback_failure_does_not_corrupt_session(caplog):
     assert session.state is ArtSessionState.READY
     assert session.ready
     assert "Art session state callback failed" in caplog.text
+    assert secret not in caplog.text
+
+
+async def test_transport_close_failure_log_is_sanitized(caplog):
+    secret = "private-art-transport-close-exception"
+    art = FakeArt()
+    art.close = AsyncMock(side_effect=OSError(secret))
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    caplog.set_level(logging.DEBUG)
+    await session.async_start()
+
+    await session.async_connection_failed(ConnectionFailure("lost"))
+
+    assert "Art transport close failed" in caplog.text
+    assert secret not in caplog.text
+
+
+async def test_real_session_fences_retained_receiver_then_recovers(
+    monkeypatch,
+):
+    release_old_receiver = asyncio.Event()
+    old_receiver_cancelled = asyncio.Event()
+
+    class OldWebSocket:
+        state = State.OPEN
+
+        def __init__(self) -> None:
+            self.transport = MagicMock()
+
+        async def recv(self):
+            while not release_old_receiver.is_set():
+                try:
+                    await release_old_receiver.wait()
+                except asyncio.CancelledError:
+                    old_receiver_cancelled.set()
+            raise ConnectionFailure("old receiver released")
+
+        async def close(self) -> None:
+            self.state = State.CLOSED
+
+    class NewWebSocket:
+        state = State.OPEN
+
+        def __init__(self) -> None:
+            self.transport = MagicMock()
+            self.frames = asyncio.Queue()
+            self.frames.put_nowait(
+                json.dumps(
+                    {
+                        "event": "ms.channel.connect",
+                        "data": {"clients": [{"isHost": True}]},
+                    }
+                )
+            )
+            self.frames.put_nowait(
+                json.dumps({"event": "ms.channel.ready"})
+            )
+
+        async def recv(self):
+            return await self.frames.get()
+
+        async def close(self) -> None:
+            self.state = State.CLOSED
+
+    monkeypatch.setattr(
+        art_session_module, "ART_CLOSE_DEADLINE", 0.05, raising=False
+    )
+    monkeypatch.setattr(frame_art_module, "ART_CLOSE_DEADLINE", 0.01)
+    factory = RecordingTaskFactory()
+    old_websocket = OldWebSocket()
+    new_websocket = NewWebSocket()
+    connect_mock = AsyncMock(return_value=new_websocket)
+    monkeypatch.setattr(frame_art_module, "connect", connect_mock)
+    art = FrameArt(
+        "1.2.3.4",
+        token="tok",
+        ssl_context=MagicMock(),
+        task_factory=factory,
+        event_callback=None,
+    )
+    art.connection = old_websocket
+    old_receiver = factory(art._receive_loop(), "test-old-art-receiver")
+    art._recv_loop = old_receiver
+    art._receiver_connection = old_websocket
+    session = ArtSession(
+        art,
+        task_factory=factory,
+        clock=FakeClock(),
+        jitter=lambda delay: delay,
+    )
+
+    try:
+        await session.async_start()
+        assert await session.async_ensure_ready(ArtSessionTrigger.USER)
+        assert session.generation == 1
+
+        await session.async_connection_failed(ConnectionFailure("lost"))
+        assert old_receiver_cancelled.is_set()
+        assert not old_receiver.done()
+        assert art.connection is None
+
+        assert not await session.async_ensure_ready(ArtSessionTrigger.USER)
+        connect_mock.assert_not_awaited()
+        assert session.generation == 1
+        assert session.state is ArtSessionState.BACKOFF
+        assert not session.ready
+        assert not art.is_alive()
+
+        release_old_receiver.set()
+        await old_receiver
+        assert art._recv_loop is None
+        assert art._receiver_connection is None
+
+        assert await session.async_ensure_ready(ArtSessionTrigger.USER)
+        connect_mock.assert_awaited_once()
+        assert session.generation == 2
+        assert session.state is ArtSessionState.READY
+        assert session.ready
+        assert art._recv_loop is not old_receiver
+        assert art._receiver_connection is new_websocket
+    finally:
+        release_old_receiver.set()
+        await asyncio.gather(old_receiver, return_exceptions=True)
+        await session.async_stop()
+
+
+async def test_cleanup_contention_uses_short_recheck_without_failure_or_close(
+    caplog,
+):
+    cleanup_error = getattr(frame_art_module, "ArtCleanupPending", None)
+    assert cleanup_error is not None
+    assert issubclass(cleanup_error, ConnectionFailure)
+    assert str(cleanup_error("Art cleanup pending")) == "Art cleanup pending"
+    recheck = getattr(art_session_module, "ART_CLEANUP_RECHECK", None)
+    assert recheck == 2.0
+    art = FakeArt(
+        [cleanup_error("Art cleanup pending") for _ in range(3)]
+    )
+    clock = FakeClock()
+    session, _ = make_session(art, clock)
+    caplog.set_level(logging.DEBUG)
+    await session.async_start()
+
+    for trigger in (
+        ArtSessionTrigger.USER,
+        ArtSessionTrigger.BACKGROUND,
+        ArtSessionTrigger.USER,
+    ):
+        assert not await session.async_ensure_ready(trigger)
+        assert session.state is ArtSessionState.BACKOFF
+        assert session._failure_count == 0
+        assert session._host_failure_count == 0
+        assert session._next_retry_at == clock.now + 2.0
+        assert art.close.await_count == 0
+        clock.now = session._next_retry_at
+
+    assert art.start_listening.await_count == 3
+    assert "Art cleanup pending" not in caplog.text
+
+
+async def test_terminal_stop_aborts_real_cancellation_resistant_art_socket(
+    monkeypatch,
+):
+    recv_started = asyncio.Event()
+    recv_forever = asyncio.Event()
+    abort_seen = asyncio.Event()
+    close_finished = asyncio.Event()
+
+    class CancellationResistantWebSocket:
+        state = State.OPEN
+
+        def __init__(self) -> None:
+            self.transport = MagicMock()
+            self.transport.abort.side_effect = self._abort
+
+        def _abort(self) -> None:
+            self.state = State.CLOSED
+            abort_seen.set()
+
+        async def recv(self):
+            recv_started.set()
+            await recv_forever.wait()
+
+        async def close(self) -> None:
+            try:
+                await abort_seen.wait()
+            except asyncio.CancelledError:
+                await abort_seen.wait()
+            finally:
+                self.state = State.CLOSED
+                close_finished.set()
+
+    monkeypatch.setattr(
+        art_session_module, "ART_CLOSE_DEADLINE", 0.05, raising=False
+    )
+    monkeypatch.setattr(
+        "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+        0.01,
+    )
+    factory = RecordingTaskFactory()
+    websocket = CancellationResistantWebSocket()
+    art = FrameArt(
+        "1.2.3.4",
+        token="tok",
+        ssl_context=MagicMock(),
+        task_factory=factory,
+        event_callback=None,
+    )
+    art.connection = websocket
+    receiver = factory(art._receive_loop(), "test-real-art-receiver")
+    art._recv_loop = receiver
+    await recv_started.wait()
+    session = ArtSession(
+        art,
+        task_factory=factory,
+        clock=FakeClock(),
+        jitter=lambda delay: delay,
+    )
+    await session.async_start()
+
+    stop_waiter = asyncio.create_task(session.async_stop())
+    done, _pending = await asyncio.wait({stop_waiter}, timeout=0.2)
+    try:
+        assert stop_waiter in done
+        await stop_waiter
+    finally:
+        abort_seen.set()
+        if not stop_waiter.done():
+            stop_waiter.cancel()
+        await asyncio.gather(stop_waiter, return_exceptions=True)
+
+    websocket.transport.abort.assert_called_once_with()
+    assert websocket.state is State.CLOSED
+    assert close_finished.is_set()
+    assert receiver.done()
+    assert art.connection is None
+    assert art._recv_loop is None
+    assert session.state is ArtSessionState.STOPPED
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == "samsungtv_frame-art-socket-close"
+    ]

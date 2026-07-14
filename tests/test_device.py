@@ -5,7 +5,12 @@ from inspect import signature
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from samsungtvws.exceptions import ConnectionFailure, ResponseError
+from samsungtvws.exceptions import (
+    ConnectionFailure,
+    ResponseError,
+    UnauthorizedError,
+)
+from websockets.protocol import State
 
 from custom_components.samsungtv_frame.art_session import (
     ArtSessionState,
@@ -244,6 +249,51 @@ async def test_app_status_failure_does_not_log_identifier_or_error(
     assert private_value not in caplog.text
     assert private_app_id not in caplog.text
     assert "REST app status request failed" in caplog.text
+
+
+async def test_device_info_response_body_is_not_logged(
+    hass, device, aioclient_mock, caplog
+):
+    private_sentinel = "private-device-response-sentinel"
+    response = {
+        "device": {
+            "PowerState": "on",
+            "name": private_sentinel,
+            "wifiMac": "A0:D0:5B:86:CE:B7",
+        }
+    }
+    aioclient_mock.get(
+        "http://1.2.3.4:8001/api/v2/",
+        json=response,
+    )
+    caplog.set_level(logging.DEBUG)
+    caplog.clear()
+
+    assert await device.async_device_info() == response["device"]
+
+    assert private_sentinel not in caplog.text
+    assert "A0:D0:5B:86:CE:B7" not in caplog.text
+    assert "1.2.3.4" not in caplog.text
+
+
+async def test_app_status_response_and_identifier_are_not_logged(
+    hass, device, aioclient_mock, caplog
+):
+    private_app_id = "private-app-id-sentinel"
+    private_response = "private-app-response-sentinel"
+    response = {"visible": True, "metadata": private_response}
+    aioclient_mock.get(
+        f"http://1.2.3.4:8001/api/v2/applications/{private_app_id}",
+        json=response,
+    )
+    caplog.set_level(logging.DEBUG)
+    caplog.clear()
+
+    assert await device.async_app_status(private_app_id) == response
+
+    assert private_response not in caplog.text
+    assert private_app_id not in caplog.text
+    assert "1.2.3.4" not in caplog.text
 
 
 async def test_get_artmode_true(hass, device):
@@ -613,7 +663,7 @@ async def test_device_stop_stops_session_and_remote_once(device):
         await release_shutdown.wait()
 
     device._art_session.async_stop = AsyncMock(side_effect=stop_session)
-    device._remote.close = AsyncMock(side_effect=close_remote)
+    device._remote.async_stop = AsyncMock(side_effect=close_remote)
 
     cancelled_waiter = asyncio.create_task(device.async_stop())
     surviving_waiter = None
@@ -638,7 +688,7 @@ async def test_device_stop_stops_session_and_remote_once(device):
     await device.async_stop()
 
     device._art_session.async_stop.assert_awaited_once()
-    device._remote.close.assert_awaited_once()
+    device._remote.async_stop.assert_awaited_once()
     assert device._stopped is True
     assert len(device._test_task_factory_calls) == 1
 
@@ -685,7 +735,7 @@ async def test_cancelled_stop_owner_finishes_shared_cleanup(device):
         await release_shutdown.wait()
 
     device._art_session.async_stop = AsyncMock(side_effect=stop_session)
-    device._remote.close = AsyncMock(side_effect=close_remote)
+    device._remote.async_stop = AsyncMock(side_effect=close_remote)
     first_waiter = asyncio.create_task(device.async_stop())
     await session_started.wait()
     await remote_started.wait()
@@ -706,7 +756,7 @@ async def test_cancelled_stop_owner_finishes_shared_cleanup(device):
     assert first_result == [None]
     assert second_result == [None]
     device._art_session.async_stop.assert_awaited_once()
-    device._remote.close.assert_awaited_once()
+    device._remote.async_stop.assert_awaited_once()
 
 
 async def test_stop_recovers_if_owner_is_cancelled_before_start(device):
@@ -721,13 +771,13 @@ async def test_stop_recovers_if_owner_is_cancelled_before_start(device):
         return task
 
     device._task_factory = cancel_first_owner
-    device._remote.close = AsyncMock()
+    device._remote.async_stop = AsyncMock()
 
     await asyncio.wait_for(device.async_stop(), timeout=0.1)
 
     assert task_factory_calls == 2
     device._art_session.async_stop.assert_awaited_once()
-    device._remote.close.assert_awaited_once()
+    device._remote.async_stop.assert_awaited_once()
 
 
 async def test_stop_task_factory_failure_does_not_close_admission(device):
@@ -735,44 +785,47 @@ async def test_stop_task_factory_failure_does_not_close_admission(device):
         raise RuntimeError("factory failed")
 
     device._task_factory = broken_task_factory
-    device._remote.close = AsyncMock()
+    device._remote.async_stop = AsyncMock()
     with pytest.raises(RuntimeError, match="factory failed"):
         await device.async_stop()
 
     assert device._stopped is False
     assert device._stop_task is None
     device._art_session.async_stop.assert_not_awaited()
-    device._remote.close.assert_not_awaited()
+    device._remote.async_stop.assert_not_awaited()
 
 
-async def test_stop_bounds_wedged_remote_close_once(device):
+async def test_stop_bounds_wedged_remote_terminal_stop_once(device):
     never_finishes = asyncio.Event()
-    device._remote.close = AsyncMock(side_effect=never_finishes.wait)
+    device._remote.async_stop = AsyncMock(side_effect=never_finishes.wait)
 
     with patch(
-        "custom_components.samsungtv_frame.device.ART_CLOSE_DEADLINE",
+        "custom_components.samsungtv_frame.device.REMOTE_CLOSE_DEADLINE",
         0.01,
     ):
         await asyncio.wait_for(device.async_stop(), timeout=0.1)
         await asyncio.wait_for(device.async_stop(), timeout=0.1)
 
     device._art_session.async_stop.assert_awaited_once()
-    device._remote.close.assert_awaited_once()
+    device._remote.async_stop.assert_awaited_once()
 
 
 async def test_send_key_clicks_remote(hass, device):
     remote = MagicMock()
+    remote.open = AsyncMock()
     remote.send_commands = AsyncMock()
     with patch.object(device, "_remote", remote):
         await device.async_send_key("KEY_HOME")
     cmds = remote.send_commands.call_args.args[0]
     assert cmds[0].params["DataOfCmd"] == "KEY_HOME"
     assert cmds[0].params["Cmd"] == "Click"
+    remote.open.assert_awaited_once_with()
 
 
 async def test_remote_timeout_requests_reauth_without_retry(hass, device):
     remote = MagicMock()
     error = RemotePairingRequired("remote authorization required")
+    remote.open = AsyncMock()
     remote.send_commands = AsyncMock(side_effect=error)
     remote.close = AsyncMock()
     reauth = MagicMock()
@@ -791,9 +844,93 @@ async def test_remote_timeout_requests_reauth_without_retry(hass, device):
     assert device.remote_confirmed is False
 
 
+async def test_remote_open_timeout_requests_reauth_without_send(hass, device):
+    remote = MagicMock(token="tok")
+    error = RemotePairingRequired("remote authorization required")
+    remote.open = AsyncMock(side_effect=error)
+    remote.send_commands = AsyncMock()
+    remote.close = AsyncMock()
+    reauth = MagicMock()
+    device.set_remote_reauth_callback(reauth)
+
+    with (
+        patch.object(device, "_remote", remote),
+        pytest.raises(RemotePairingRequired) as raised,
+    ):
+        await device.async_send_key("KEY_HOME")
+
+    assert raised.value is error
+    remote.open.assert_awaited_once_with()
+    remote.send_commands.assert_not_awaited()
+    remote.close.assert_not_awaited()
+    reauth.assert_called_once_with()
+    assert device.remote_confirmed is False
+
+
+async def test_remote_open_unauthorized_requests_reauth_without_retry(
+    hass, device, caplog
+):
+    private_error = "private-open-unauthorized-sentinel"
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock(side_effect=UnauthorizedError(private_error))
+    remote.send_commands = AsyncMock()
+    remote.close = AsyncMock()
+    reauth = MagicMock()
+    device.set_remote_reauth_callback(reauth)
+    device.remote_confirmed = True
+
+    with (
+        patch.object(device, "_remote", remote),
+        pytest.raises(UnauthorizedError) as raised,
+    ):
+        await device.async_send_key("KEY_HOME")
+
+    assert str(raised.value) == "Remote authorization rejected"
+    assert raised.value.__suppress_context__ is True
+    assert raised.value.__cause__ is None
+    assert private_error not in caplog.text
+    remote.open.assert_awaited_once_with()
+    remote.send_commands.assert_not_awaited()
+    remote.close.assert_not_awaited()
+    reauth.assert_called_once_with()
+    assert device.remote_confirmed is False
+
+
+async def test_remote_send_unauthorized_requests_reauth_without_retry(
+    hass, device, caplog
+):
+    private_error = "private-send-unauthorized-sentinel"
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock()
+    remote.send_commands = AsyncMock(
+        side_effect=UnauthorizedError(private_error)
+    )
+    remote.close = AsyncMock()
+    reauth = MagicMock()
+    device.set_remote_reauth_callback(reauth)
+    device.remote_confirmed = True
+
+    with (
+        patch.object(device, "_remote", remote),
+        pytest.raises(UnauthorizedError) as raised,
+    ):
+        await device.async_send_key("KEY_HOME")
+
+    assert str(raised.value) == "Remote authorization rejected"
+    assert raised.value.__suppress_context__ is True
+    assert raised.value.__cause__ is None
+    assert private_error not in caplog.text
+    remote.open.assert_awaited_once_with()
+    remote.send_commands.assert_awaited_once()
+    remote.close.assert_not_awaited()
+    reauth.assert_called_once_with()
+    assert device.remote_confirmed is False
+
+
 async def test_remote_timeout_on_stale_retry_requests_reauth(hass, device):
     remote = MagicMock()
     error = RemotePairingRequired("remote authorization required")
+    remote.open = AsyncMock()
     remote.send_commands = AsyncMock(side_effect=[OSError("stale"), error])
     remote.close = AsyncMock()
     reauth = MagicMock()
@@ -812,10 +949,77 @@ async def test_remote_timeout_on_stale_retry_requests_reauth(hass, device):
     assert device.remote_confirmed is False
 
 
+async def test_remote_timeout_on_retry_open_requests_reauth_without_send(
+    hass, device
+):
+    remote = MagicMock(token="tok")
+    error = RemotePairingRequired("remote authorization required")
+    remote.open = AsyncMock(side_effect=[OSError("stale"), error])
+    remote.send_commands = AsyncMock()
+    remote.close = AsyncMock()
+    reauth = MagicMock()
+    device.set_remote_reauth_callback(reauth)
+
+    with (
+        patch.object(device, "_remote", remote),
+        pytest.raises(RemotePairingRequired) as raised,
+    ):
+        await device.async_send_key("KEY_HOME")
+
+    assert raised.value is error
+    assert remote.open.await_count == 2
+    remote.send_commands.assert_not_awaited()
+    remote.close.assert_awaited_once()
+    reauth.assert_called_once_with()
+    assert device.remote_confirmed is False
+
+
+async def test_generic_remote_open_failure_retries_once(hass, device):
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock(side_effect=[OSError("stale"), None])
+    remote.send_commands = AsyncMock()
+    remote.close = AsyncMock()
+    device.remote_confirmed = True
+
+    with patch.object(device, "_remote", remote):
+        await device.async_send_key("KEY_HOME")
+
+    assert remote.open.await_count == 2
+    remote.send_commands.assert_awaited_once()
+    remote.close.assert_awaited_once()
+    assert device.remote_confirmed is True
+
+
+async def test_initial_remote_open_cancellation_propagates_without_callbacks(
+    hass, device
+):
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock(side_effect=asyncio.CancelledError())
+    remote.send_commands = AsyncMock()
+    remote.close = AsyncMock()
+    reauth = MagicMock()
+    persist = MagicMock()
+    device.set_remote_reauth_callback(reauth)
+    device.set_remote_token_callback(persist)
+
+    with (
+        patch.object(device, "_remote", remote),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await device.async_send_key("KEY_HOME")
+
+    remote.open.assert_awaited_once_with()
+    remote.send_commands.assert_not_awaited()
+    remote.close.assert_not_awaited()
+    reauth.assert_not_called()
+    persist.assert_not_called()
+
+
 async def test_initial_remote_send_cancellation_propagates_without_callbacks(
     hass, device
 ):
-    remote = MagicMock(token="new-token")
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock()
     remote.send_commands = AsyncMock(side_effect=asyncio.CancelledError())
     remote.close = AsyncMock()
     reauth = MagicMock()
@@ -838,7 +1042,8 @@ async def test_initial_remote_send_cancellation_propagates_without_callbacks(
 async def test_stale_remote_close_cancellation_propagates_without_callbacks(
     hass, device
 ):
-    remote = MagicMock(token="new-token")
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock()
     remote.send_commands = AsyncMock(side_effect=[OSError("stale"), None])
     remote.close = AsyncMock(side_effect=asyncio.CancelledError())
     reauth = MagicMock()
@@ -856,12 +1061,39 @@ async def test_stale_remote_close_cancellation_propagates_without_callbacks(
     remote.close.assert_awaited_once()
     reauth.assert_not_called()
     persist.assert_not_called()
+    assert device.remote_confirmed is False
+
+
+async def test_stale_remote_close_failure_is_sanitized_without_retry(
+    hass, device
+):
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock()
+    remote.send_commands = AsyncMock(side_effect=OSError("private-stale-send"))
+    remote.close = AsyncMock(side_effect=OSError("private-reset-failure"))
+    reauth = MagicMock()
+    device.set_remote_reauth_callback(reauth)
+
+    with (
+        patch.object(device, "_remote", remote),
+        pytest.raises(ConnectionFailure) as raised,
+    ):
+        await device.async_send_key("KEY_HOME")
+
+    assert str(raised.value) == "Remote control reset failed"
+    assert raised.value.__suppress_context__ is True
+    remote.open.assert_awaited_once_with()
+    remote.send_commands.assert_awaited_once()
+    remote.close.assert_awaited_once()
+    reauth.assert_not_called()
+    assert device.remote_confirmed is False
 
 
 async def test_second_remote_send_cancellation_propagates_without_callbacks(
     hass, device
 ):
-    remote = MagicMock(token="new-token")
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock()
     remote.send_commands = AsyncMock(
         side_effect=[OSError("stale"), asyncio.CancelledError()]
     )
@@ -881,15 +1113,18 @@ async def test_second_remote_send_cancellation_propagates_without_callbacks(
     remote.close.assert_awaited_once()
     reauth.assert_not_called()
     persist.assert_not_called()
+    assert device.remote_confirmed is False
 
 
 async def test_stale_remote_retry_closes_captured_client_once(hass, device):
     remote = MagicMock()
+    remote.open = AsyncMock()
     remote.send_commands = AsyncMock(side_effect=[OSError("stale"), None])
     remote.close = AsyncMock()
     with patch.object(device, "_remote", remote):
         await device.async_send_key("KEY_VOLUP")
     assert remote.send_commands.await_count == 2
+    assert remote.open.await_count == 2
     remote.close.assert_awaited_once()
 
 
@@ -898,6 +1133,7 @@ async def test_successful_remote_command_persists_new_token_before_return(
 ):
     order = []
     remote = MagicMock(token="new-token")
+    remote.open = AsyncMock(side_effect=lambda: order.append("opened"))
     remote.send_commands = AsyncMock(
         side_effect=lambda commands: order.append("sent")
     )
@@ -910,7 +1146,7 @@ async def test_successful_remote_command_persists_new_token_before_return(
         await device.async_send_key("KEY_HOME")
         order.append("returned")
 
-    assert order == ["sent", "persisted", "returned"]
+    assert order == ["opened", "persisted", "sent", "returned"]
     persist.assert_called_once_with("new-token")
     assert device.remote_confirmed is True
 
@@ -920,6 +1156,7 @@ async def test_successful_remote_command_skips_absent_or_unchanged_token(
     hass, device, token
 ):
     remote = MagicMock(token=token)
+    remote.open = AsyncMock()
     remote.send_commands = AsyncMock()
     persist = MagicMock()
     device.set_remote_token_callback(persist)
@@ -934,9 +1171,14 @@ async def test_remote_token_callback_failure_fails_foreground_command(
     hass, device
 ):
     remote = MagicMock(token="new-token")
+    remote.open = AsyncMock()
     remote.send_commands = AsyncMock()
+    remote.close = AsyncMock()
     persist_error = RuntimeError("persistence failed")
-    device.set_remote_token_callback(MagicMock(side_effect=persist_error))
+    persist = MagicMock(side_effect=persist_error)
+    reauth = MagicMock()
+    device.set_remote_token_callback(persist)
+    device.set_remote_reauth_callback(reauth)
 
     with (
         patch.object(device, "_remote", remote),
@@ -945,72 +1187,385 @@ async def test_remote_token_callback_failure_fails_foreground_command(
         await device.async_send_key("KEY_HOME")
 
     assert raised.value is persist_error
-    remote.send_commands.assert_awaited_once()
+    remote.open.assert_awaited_once_with()
+    persist.assert_called_once_with("new-token")
+    remote.send_commands.assert_not_awaited()
+    remote.close.assert_not_awaited()
+    reauth.assert_not_called()
 
 
-async def test_app_list_timeout_never_requests_reauth(hass, device):
+async def test_stale_retry_persists_new_token_before_second_send(hass, device):
+    order = []
     remote = MagicMock(token="tok")
-    remote.app_list = AsyncMock(
-        side_effect=RemotePairingRequired("remote authorization required")
-    )
-    reauth = MagicMock()
-    device.set_remote_reauth_callback(reauth)
-    device.remote_confirmed = True
+    open_count = 0
+
+    async def _open():
+        nonlocal open_count
+        open_count += 1
+        order.append(f"open-{open_count}")
+        if open_count == 2:
+            remote.token = "new-token"
+
+    send_count = 0
+
+    async def _send(_commands):
+        nonlocal send_count
+        send_count += 1
+        order.append(f"send-{send_count}")
+        if send_count == 1:
+            raise OSError("stale")
+
+    remote.open = AsyncMock(side_effect=_open)
+    remote.send_commands = AsyncMock(side_effect=_send)
+    remote.close = AsyncMock(side_effect=lambda: order.append("closed"))
+
+    def _persist(token):
+        order.append("persisted")
+        device.update_token(token)
+
+    device.set_remote_token_callback(MagicMock(side_effect=_persist))
 
     with patch.object(device, "_remote", remote):
-        assert await device.async_app_list() is None
+        await device.async_send_key("KEY_HOME")
 
-    reauth.assert_not_called()
+    assert order == [
+        "open-1",
+        "send-1",
+        "closed",
+        "open-2",
+        "persisted",
+        "send-2",
+    ]
+    assert device.remote_confirmed is True
+
+
+async def test_second_generic_remote_failure_stays_unconfirmed(hass, device):
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock()
+    remote.send_commands = AsyncMock(
+        side_effect=[OSError("stale"), OSError("still stale")]
+    )
+    remote.close = AsyncMock()
+
+    device.remote_confirmed = True
+    with (
+        patch.object(device, "_remote", remote),
+        pytest.raises(ConnectionFailure) as raised,
+    ):
+        await device.async_send_key("KEY_HOME")
+
+    assert str(raised.value) == "Remote control connection failed"
+    assert remote.open.await_count == 2
+    assert remote.send_commands.await_count == 2
+    remote.close.assert_awaited_once()
     assert device.remote_confirmed is False
 
 
-async def test_app_list_cancellation_propagates_without_callbacks(hass, device):
-    remote = MagicMock(token="new-token")
-    remote.app_list = AsyncMock(side_effect=asyncio.CancelledError())
-    reauth = MagicMock()
-    persist = MagicMock()
-    device.set_remote_reauth_callback(reauth)
-    device.set_remote_token_callback(persist)
+async def test_final_generic_remote_failure_is_sanitized(hass, device, caplog):
+    secret = "private-final-network-failure"
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock()
+    remote.send_commands = AsyncMock(
+        side_effect=[OSError("stale"), OSError(secret)]
+    )
+    remote.close = AsyncMock()
 
     with (
         patch.object(device, "_remote", remote),
-        pytest.raises(asyncio.CancelledError),
+        pytest.raises(ConnectionFailure) as raised,
     ):
-        await device.async_app_list()
+        await device.async_send_key("KEY_HOME")
 
-    remote.app_list.assert_awaited_once()
-    reauth.assert_not_called()
-    persist.assert_not_called()
+    assert str(raised.value) == "Remote control connection failed"
+    assert raised.value.__suppress_context__ is True
+    assert secret not in caplog.text
+    assert device.remote_confirmed is False
 
 
-async def test_successful_app_list_captures_changed_remote_token(hass, device):
-    remote = MagicMock(token="new-token")
-    remote.app_list = AsyncMock(return_value=[])
+async def test_app_list_is_inert_and_never_delays_foreground_remote_work(
+    hass, device
+):
+    remote = device._remote
+    assert remote is not None
+    websocket = MagicMock()
+    websocket.send = AsyncMock()
+    websocket.recv = AsyncMock(
+        side_effect=AssertionError("app discovery must not receive frames")
+    )
+    remote.connection = websocket
+    remote.key_press_delay = 0
+    existing_future = asyncio.get_running_loop().create_future()
+    remote._app_list_futures.add(existing_future)
+    futures_before = set(remote._app_list_futures)
     persist = MagicMock()
+    reauth = MagicMock()
+    device.set_remote_token_callback(persist)
+    device.set_remote_reauth_callback(reauth)
+    device.remote_confirmed = True
+
+    app_list_task = asyncio.create_task(device.async_app_list())
+    command_task = asyncio.create_task(device.async_send_key("KEY_HOME"))
+    try:
+        app_list_result, command_result = await asyncio.wait_for(
+            asyncio.gather(app_list_task, command_task), timeout=0.05
+        )
+
+        assert app_list_result is None
+        assert command_result is None
+        websocket.send.assert_awaited_once()
+        payload = websocket.send.await_args.args[0]
+        assert "ms.remote.control" in payload
+        assert "ed.installedApp.get" not in payload
+        websocket.recv.assert_not_awaited()
+        assert remote._app_list_futures == futures_before
+        assert not existing_future.done()
+        assert remote.connection is websocket
+        assert not device._remote_operation_lock.locked()
+        assert device._active_remote_operation is None
+        assert device.remote_confirmed is True
+        assert device._token == "tok"
+        assert remote.token == "tok"
+        persist.assert_not_called()
+        reauth.assert_not_called()
+    finally:
+        for task in (app_list_task, command_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(
+            app_list_task, command_task, return_exceptions=True
+        )
+        for future in remote._app_list_futures:
+            future.cancel()
+        remote._app_list_futures.clear()
+
+
+async def test_remote_quiesce_waits_for_operation_and_blocks_post_open_effects(
+    hass, device
+):
+    open_started = asyncio.Event()
+    release_open = asyncio.Event()
+    remote = MagicMock(token="new-token")
+
+    async def _open():
+        open_started.set()
+        await release_open.wait()
+
+    remote.open = AsyncMock(side_effect=_open)
+    remote.send_commands = AsyncMock()
+    persist = MagicMock(side_effect=device.update_token)
+    reauth = MagicMock()
+    device.set_remote_token_callback(persist)
+    device.set_remote_reauth_callback(reauth)
+
+    with patch.object(device, "_remote", remote):
+        command = asyncio.create_task(device.async_send_key("KEY_HOME"))
+        await open_started.wait()
+        quiesce = asyncio.create_task(device.async_quiesce_remote())
+        await asyncio.sleep(0)
+        assert not quiesce.done()
+        release_open.set()
+
+        with pytest.raises(ConnectionFailure, match="Remote control is unavailable"):
+            await command
+        await quiesce
+
+    remote.send_commands.assert_not_awaited()
+    persist.assert_called_once_with("new-token")
+    reauth.assert_not_called()
+    assert device._token == "new-token"
+    assert device._art.token == "new-token"
+    assert remote.token == "new-token"
+
+
+async def test_remote_quiesce_cancels_long_running_operation(hass, device):
+    send_started = asyncio.Event()
+    send_cancelled = asyncio.Event()
+    never_finishes = asyncio.Event()
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock()
+
+    async def _send(_commands):
+        send_started.set()
+        try:
+            await never_finishes.wait()
+        finally:
+            send_cancelled.set()
+
+    remote.send_commands = AsyncMock(side_effect=_send)
+    command = None
+    with (
+        patch.object(device, "_remote", remote),
+        patch(
+            "custom_components.samsungtv_frame.device.REMOTE_DRAIN_DEADLINE",
+            0.01,
+            create=True,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.device.REMOTE_CANCEL_DEADLINE",
+            0.05,
+            create=True,
+        ),
+    ):
+        command = asyncio.create_task(device.async_send_key("KEY_HOME"))
+        await send_started.wait()
+        try:
+            await asyncio.wait_for(
+                device.async_quiesce_remote(), timeout=0.2
+            )
+        finally:
+            if not command.done():
+                command.cancel()
+            await asyncio.gather(command, return_exceptions=True)
+
+    assert send_cancelled.is_set()
+    assert command.cancelled()
+
+
+async def test_remote_resume_reopens_admission_after_reversible_quiesce(
+    hass, device
+):
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock()
+    remote.send_commands = AsyncMock()
+
+    with patch.object(device, "_remote", remote):
+        await device.async_quiesce_remote()
+        with pytest.raises(ConnectionFailure, match="Remote control is unavailable"):
+            await device.async_send_key("KEY_HOME")
+        device.resume_remote()
+        await device.async_send_key("KEY_HOME")
+
+    remote.open.assert_awaited_once_with()
+    remote.send_commands.assert_awaited_once()
+
+
+async def test_device_stop_joins_inflight_remote_before_terminal_stop(
+    hass, device
+):
+    open_started = asyncio.Event()
+    release_open = asyncio.Event()
+    remote = MagicMock(token="new-token")
+
+    async def _open():
+        open_started.set()
+        await release_open.wait()
+
+    remote.open = AsyncMock(side_effect=_open)
+    remote.send_commands = AsyncMock()
+    remote.async_stop = AsyncMock()
+    persist = MagicMock(side_effect=device.update_token)
     device.set_remote_token_callback(persist)
 
     with patch.object(device, "_remote", remote):
-        assert await device.async_app_list() == []
+        command = asyncio.create_task(device.async_send_key("KEY_HOME"))
+        await open_started.wait()
+        stop = asyncio.create_task(device.async_stop())
+        await asyncio.sleep(0)
+        remote.async_stop.assert_not_awaited()
+        release_open.set()
 
+        with pytest.raises(ConnectionFailure, match="Remote control is unavailable"):
+            await command
+        await stop
+
+    remote.send_commands.assert_not_awaited()
     persist.assert_called_once_with("new-token")
-    assert device.remote_confirmed is True
+    assert device._token == "new-token"
+    assert device._art.token == "new-token"
+    assert remote.token == "new-token"
+    remote.async_stop.assert_awaited_once_with()
+
+
+async def test_device_stop_bounds_resistant_operation_and_aborts_remote_socket(
+    hass, device
+):
+    send_started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release_send = asyncio.Event()
+
+    class _Socket:
+        state = State.OPEN
+
+        def __init__(self):
+            self.transport = MagicMock()
+
+        async def send(self, _payload):
+            send_started.set()
+            try:
+                await release_send.wait()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+                await release_send.wait()
+
+        async def close(self):
+            raise OSError("close failed")
+
+    socket = _Socket()
+    remote = FrameRemote(
+        "1.2.3.4",
+        token="tok",
+        ssl_context=MagicMock(),
+        timeout=8,
+    )
+    remote.key_press_delay = 0
+    remote.connection = socket
+
+    with (
+        patch.object(device, "_remote", remote),
+        patch(
+            "custom_components.samsungtv_frame.device.REMOTE_DRAIN_DEADLINE",
+            0.01,
+            create=True,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.device.REMOTE_CANCEL_DEADLINE",
+            0.01,
+            create=True,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.frame_remote.REMOTE_CLOSE_DEADLINE",
+            0.05,
+        ),
+    ):
+        command = asyncio.create_task(device.async_send_key("KEY_HOME"))
+        await send_started.wait()
+        try:
+            await asyncio.wait_for(device.async_stop(), timeout=0.2)
+            assert cancellation_seen.is_set()
+            assert remote.connection is None
+            socket.transport.abort.assert_called_once_with()
+        finally:
+            release_send.set()
+            await asyncio.gather(command, return_exceptions=True)
+
+
+async def test_remote_command_after_stop_has_zero_network_or_reauth(hass, device):
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock()
+    remote.send_commands = AsyncMock()
+    remote.async_stop = AsyncMock()
+    reauth = MagicMock()
+    device.set_remote_reauth_callback(reauth)
+
+    with patch.object(device, "_remote", remote):
+        await device.async_stop()
+        with pytest.raises(ConnectionFailure, match="Remote control is unavailable"):
+            await device.async_send_key("KEY_HOME")
+
+    remote.open.assert_not_awaited()
+    remote.send_commands.assert_not_awaited()
+    reauth.assert_not_called()
 
 
 async def test_launch_app_emits_channel_command(hass, device):
     remote = MagicMock()
+    remote.open = AsyncMock()
     remote.send_commands = AsyncMock()
     with patch.object(device, "_remote", remote):
         await device.async_launch_app("11101200001", "DEEP_LINK")
     cmds = remote.send_commands.call_args.args[0]
     assert cmds[0].params["event"] == "ed.apps.launch"
     assert cmds[0].params["data"]["appId"] == "11101200001"
-
-
-async def test_app_list_failure_returns_none(hass, device):
-    remote = MagicMock()
-    remote.app_list = AsyncMock(side_effect=OSError("nope"))
-    with patch.object(device, "_remote", remote):
-        assert await device.async_app_list() is None
 
 
 async def test_set_slideshow_delegates_to_art(hass, device):
@@ -1197,10 +1752,24 @@ async def test_set_volume_scales_to_percent(hass, device):
 
 
 async def test_turn_off_holds_power_key(hass, device):
-    remote = MagicMock()
-    remote.send_commands = AsyncMock()
+    order = []
+    remote = MagicMock(token="new-token")
+    remote.open = AsyncMock(side_effect=lambda: order.append("opened"))
+
+    async def _send(commands):
+        order.append("sent")
+        assert commands[0].params["DataOfCmd"] == "KEY_POWER"
+        assert commands[0].params["Cmd"] == "Press"
+
+    remote.send_commands = AsyncMock(side_effect=_send)
+    persist = MagicMock(side_effect=lambda token: order.append("persisted"))
+    device.set_remote_token_callback(persist)
+
     with patch.object(device, "_remote", remote):
         await device.async_turn_off()
+
+    assert order == ["opened", "persisted", "sent"]
+    persist.assert_called_once_with("new-token")
     remote.send_commands.assert_awaited_once()
     cmd = remote.send_commands.call_args.args[0]
     # Verify the command is a 3-second hold of KEY_POWER
@@ -1210,3 +1779,25 @@ async def test_turn_off_holds_power_key(hass, device):
     assert cmd[1].delay == 3
     assert cmd[2].params["DataOfCmd"] == "KEY_POWER"
     assert cmd[2].params["Cmd"] == "Release"
+
+
+@pytest.mark.parametrize("send_fails", [False, True])
+async def test_turn_off_always_invalidates_remote_confirmation(
+    hass, device, send_fails
+):
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock()
+    remote.send_commands = AsyncMock(
+        side_effect=OSError("power send failed") if send_fails else None
+    )
+    remote.close = AsyncMock()
+    device.remote_confirmed = True
+
+    with patch.object(device, "_remote", remote):
+        if send_fails:
+            with pytest.raises(ConnectionFailure):
+                await device.async_turn_off()
+        else:
+            await device.async_turn_off()
+
+    assert device.remote_confirmed is False

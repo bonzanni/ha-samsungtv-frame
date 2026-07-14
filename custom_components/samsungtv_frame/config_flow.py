@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from typing import Any
 
 import voluptuous as vol
@@ -15,10 +14,11 @@ from homeassistant.config_entries import (
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import format_mac
-from samsungtvws.async_rest import SamsungTVAsyncRest
 from samsungtvws.helper import get_ssl_context
+from websockets.protocol import State
 
 from .const import (
+    ART_CLOSE_DEADLINE,
     CONF_HOST,
     CONF_MAC,
     CONF_MODEL,
@@ -32,6 +32,7 @@ from .const import (
 )
 from .frame_art import FrameArt
 from .frame_remote import FrameRemote, RemotePairingRequired
+from .rest import PrivacySafeSamsungTVAsyncRest
 
 
 class NotAFrameError(Exception):
@@ -42,19 +43,80 @@ class CannotConnect(Exception):
     """Could not reach the TV."""
 
 
-async def _async_close_pairing_client(client: Any | None) -> None:
-    """Close a temporary pairing client without replacing the flow result."""
-    if client is None:
+def _force_abort_temporary_socket(
+    client: Any,
+    connection: Any | None,
+    *,
+    abort_detached: bool = True,
+) -> None:
+    """Detach and abort a temporary socket that graceful cleanup did not close."""
+    if connection is None:
         return
-    with contextlib.suppress(Exception, TimeoutError):
+    if not abort_detached and getattr(client, "connection", None) is not connection:
+        return
+    if getattr(connection, "state", None) is not State.CLOSED:
+        transport = getattr(connection, "transport", None)
+        abort = getattr(transport, "abort", None)
+        if callable(abort):
+            try:
+                abort()
+            except Exception:
+                pass
+    if getattr(client, "connection", None) is connection:
+        client.connection = None
+
+
+async def _async_cleanup_temporary_art(art: FrameArt) -> None:
+    """Bound Art cleanup and force-abort the socket captured before close."""
+    connection = art.connection
+    try:
+        async with asyncio.timeout(ART_CLOSE_DEADLINE):
+            await art.close()
+    except BaseException:
+        pass
+    finally:
+        _force_abort_temporary_socket(art, connection)
+
+
+async def _async_cleanup_temporary_remote(remote: FrameRemote) -> None:
+    """Terminally stop the temporary remote without exposing cleanup errors."""
+    connection = remote.connection
+    try:
         async with asyncio.timeout(REMOTE_CLOSE_DEADLINE):
-            await client.close()
+            await remote.async_stop()
+    except BaseException:
+        pass
+    finally:
+        _force_abort_temporary_socket(
+            remote, connection, abort_detached=False
+        )
+
+
+async def _async_cleanup_pairing_clients(
+    art: FrameArt | None, remote: FrameRemote
+) -> None:
+    """Finish concurrent owned cleanup before propagating caller cancellation."""
+    tasks = [asyncio.create_task(_async_cleanup_temporary_remote(remote))]
+    if art is not None:
+        tasks.append(asyncio.create_task(_async_cleanup_temporary_art(art)))
+    cleanup = asyncio.gather(*tasks, return_exceptions=True)
+    cancellation: asyncio.CancelledError | None = None
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError as err:
+            cancellation = err
+    await cleanup
+    if cancellation is not None:
+        raise cancellation
 
 
 async def validate_and_pair(hass, host: str) -> dict[str, Any]:
     """Confirm it is a Frame, then pair (one-time Allow) and capture the token."""
     session = async_get_clientsession(hass)
-    rest = SamsungTVAsyncRest(host, session=session, port=PORT_REST, timeout=8)
+    rest = PrivacySafeSamsungTVAsyncRest(
+        host, session=session, port=PORT_REST, timeout=8
+    )
     try:
         info = (await rest.rest_device_info()) or {}
     except Exception as err:  # noqa: BLE001
@@ -92,8 +154,7 @@ async def validate_and_pair(hass, host: str) -> dict[str, Any]:
     except Exception as err:  # noqa: BLE001
         raise CannotConnect from err
     finally:
-        await _async_close_pairing_client(art)
-        await _async_close_pairing_client(remote)
+        await _async_cleanup_pairing_clients(art, remote)
     return {
         CONF_MAC: format_mac(device.get("wifiMac", "")),
         CONF_TOKEN: token,

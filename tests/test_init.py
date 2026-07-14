@@ -2,6 +2,8 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
+from homeassistant.exceptions import ConfigEntryAuthFailed
+from samsungtvws.exceptions import ConnectionFailure
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -13,14 +15,82 @@ from custom_components.samsungtv_frame.const import (
     CONF_HOST, CONF_MAC, CONF_TOKEN, DOMAIN,
 )
 from custom_components.samsungtv_frame.coordinator import FrameCoordinator
+from custom_components.samsungtv_frame.device import FrameDevice
 
 
-def _make_entry() -> MockConfigEntry:
+_MISSING_TOKEN = object()
+
+
+def _make_entry(token="tok") -> MockConfigEntry:
+    data = {
+        CONF_HOST: "1.2.3.4",
+        CONF_MAC: "A0:D0:5B:86:CE:B7",
+    }
+    if token is not _MISSING_TOKEN:
+        data[CONF_TOKEN] = token
     return MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4", CONF_MAC: "A0:D0:5B:86:CE:B7", CONF_TOKEN: "tok"},
+        data=data,
         unique_id="a0:d0:5b:86:ce:b7",
     )
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        pytest.param(_MISSING_TOKEN, id="missing"),
+        pytest.param(None, id="none"),
+        pytest.param("", id="empty"),
+    ],
+)
+async def test_setup_without_canonical_token_starts_reauth_before_work(
+    hass, mock_device, token
+):
+    entry = _make_entry(token)
+    entry.add_to_hass(hass)
+    coordinator = MagicMock(spec=FrameCoordinator)
+    coordinator.async_config_entry_first_refresh = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.samsungtv_frame.get_ssl_context"
+        ) as get_context,
+        patch.object(
+            hass,
+            "async_add_executor_job",
+            AsyncMock(),
+        ) as executor_job,
+        patch(
+            "custom_components.samsungtv_frame.FrameDevice",
+            return_value=mock_device,
+        ) as device_cls,
+        patch(
+            "custom_components.samsungtv_frame.FrameCoordinator",
+            return_value=coordinator,
+        ) as coordinator_cls,
+        patch.object(
+            entry,
+            "async_create_background_task",
+            wraps=entry.async_create_background_task,
+        ) as create_background_task,
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            AsyncMock(),
+        ) as forward_setups,
+        pytest.raises(ConfigEntryAuthFailed) as raised,
+    ):
+        await async_setup_entry(hass, entry)
+
+    assert str(raised.value) == "Authentication required"
+    executor_job.assert_not_awaited()
+    get_context.assert_not_called()
+    device_cls.assert_not_called()
+    coordinator_cls.assert_not_called()
+    create_background_task.assert_not_called()
+    coordinator.async_config_entry_first_refresh.assert_not_awaited()
+    forward_setups.assert_not_awaited()
+    assert not hasattr(entry, "runtime_data")
 
 
 async def test_setup_and_unload(hass, mock_device):
@@ -159,6 +229,7 @@ async def test_setup_and_unload(hass, mock_device):
         await task
 
         assert await hass.config_entries.async_unload(entry.entry_id)
+        mock_device.async_quiesce_remote.assert_awaited_once_with()
         mock_device.async_stop.assert_awaited()
         assert (
             mock_device.set_art_session_state_callback.call_args_list[-1]
@@ -263,6 +334,45 @@ async def test_setup_start_failure_clears_callback_and_bounds_cleanup(
     assert mock_device.set_remote_token_callback.call_args_list[-1] == call(None)
     assert mock_device.set_remote_reauth_callback.call_args_list[-1] == call(None)
     assert private_value not in caplog.text
+
+
+async def test_setup_failure_propagates_cancellation_during_cleanup(
+    hass, mock_device
+):
+    entry = _make_entry()
+    entry.add_to_hass(hass)
+    cleanup_started = asyncio.Event()
+    cleanup_cancelled = asyncio.Event()
+    never_finishes = asyncio.Event()
+    mock_device.async_start_art_session.side_effect = RuntimeError(
+        "session start failed"
+    )
+
+    async def _blocked_stop():
+        cleanup_started.set()
+        try:
+            await never_finishes.wait()
+        finally:
+            cleanup_cancelled.set()
+
+    mock_device.async_stop.side_effect = _blocked_stop
+    with (
+        patch(
+            "custom_components.samsungtv_frame.FrameDevice",
+            return_value=mock_device,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.get_ssl_context",
+            return_value=object(),
+        ),
+    ):
+        setup = asyncio.create_task(async_setup_entry(hass, entry))
+        await asyncio.wait_for(cleanup_started.wait(), timeout=0.2)
+        setup.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await setup
+
+    assert cleanup_cancelled.is_set()
 
 
 async def test_setup_first_refresh_failure_clears_callback_and_bounds_cleanup(
@@ -428,12 +538,16 @@ async def test_unload_removes_state_callback_before_platforms_and_stop(
         order.append("platform-unload")
         return True
 
+    async def _quiesce_remote():
+        order.append("remote-quiesce")
+
     async def _stop():
         order.append("device-stop")
 
     mock_device.set_art_session_state_callback.side_effect = _set_callback
     mock_device.set_remote_token_callback.side_effect = _set_token_callback
     mock_device.set_remote_reauth_callback.side_effect = _set_reauth_callback
+    mock_device.async_quiesce_remote.side_effect = _quiesce_remote
     mock_device.async_stop.side_effect = _stop
     with patch.object(
         hass.config_entries,
@@ -443,6 +557,7 @@ async def test_unload_removes_state_callback_before_platforms_and_stop(
         assert await async_unload_entry(hass, entry)
 
     assert order == [
+        "remote-quiesce",
         "state-clear",
         "token-clear",
         "reauth-clear",
@@ -482,6 +597,8 @@ async def test_unload_restores_state_callback_when_platform_unload_fails(
         call(None),
         call(coordinator.handle_remote_reauth),
     ]
+    mock_device.async_quiesce_remote.assert_awaited_once_with()
+    mock_device.resume_remote.assert_called_once_with()
     mock_device.async_stop.assert_not_awaited()
 
 
@@ -518,4 +635,214 @@ async def test_unload_restores_state_callback_when_platform_unload_raises(
         call(None),
         call(coordinator.handle_remote_reauth),
     ]
+    mock_device.async_quiesce_remote.assert_awaited_once_with()
+    mock_device.resume_remote.assert_called_once_with()
     mock_device.async_stop.assert_not_awaited()
+
+
+async def test_successful_unload_drains_inflight_remote_before_callbacks_and_stop(
+    hass,
+):
+    entry = _make_entry()
+    open_started = asyncio.Event()
+    release_open = asyncio.Event()
+    order: list[str] = []
+
+    device = FrameDevice(
+        hass,
+        host="1.2.3.4",
+        mac="A0:D0:5B:86:CE:B7",
+        token="tok",
+        ssl_context=MagicMock(),
+        task_factory=lambda coroutine, name: asyncio.create_task(
+            coroutine, name=name
+        ),
+    )
+    device._art_session = MagicMock(async_stop=AsyncMock())
+    remote = MagicMock(token="new-token")
+
+    async def _open():
+        open_started.set()
+        await release_open.wait()
+
+    remote.open = AsyncMock(side_effect=_open)
+    remote.send_commands = AsyncMock()
+    remote.async_stop = AsyncMock(side_effect=lambda: order.append("remote-stop"))
+    device._remote = remote
+    coordinator = MagicMock(spec=FrameCoordinator)
+    coordinator.device = device
+    entry.runtime_data = coordinator
+
+    def _persist(token: str) -> None:
+        order.append("persist")
+        device.update_token(token)
+
+    persist = MagicMock(side_effect=_persist)
+    device.set_remote_token_callback(persist)
+
+    async def _unload_platforms(_entry, _platforms):
+        order.append("platform-unload")
+        return True
+
+    with patch.object(
+        hass.config_entries,
+        "async_unload_platforms",
+        AsyncMock(side_effect=_unload_platforms),
+    ):
+        command = asyncio.create_task(device.async_send_key("KEY_HOME"))
+        await open_started.wait()
+        unload = asyncio.create_task(async_unload_entry(hass, entry))
+        await asyncio.sleep(0)
+        assert not unload.done()
+        release_open.set()
+
+        with pytest.raises(ConnectionFailure, match="Remote control is unavailable"):
+            await command
+        assert await unload is True
+
+    remote.send_commands.assert_not_awaited()
+    persist.assert_called_once_with("new-token")
+    assert device._token == "new-token"
+    assert device._art.token == "new-token"
+    assert remote.token == "new-token"
+    remote.async_stop.assert_awaited_once_with()
+    assert order == ["persist", "platform-unload", "remote-stop"]
+
+
+async def test_unload_cancels_long_remote_operation_and_completes(hass):
+    entry = _make_entry()
+    send_started = asyncio.Event()
+    send_cancelled = asyncio.Event()
+    never_finishes = asyncio.Event()
+    device = FrameDevice(
+        hass,
+        host="1.2.3.4",
+        mac="A0:D0:5B:86:CE:B7",
+        token="tok",
+        ssl_context=MagicMock(),
+        task_factory=lambda coroutine, name: asyncio.create_task(
+            coroutine, name=name
+        ),
+    )
+    device._art_session = MagicMock(async_stop=AsyncMock())
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock()
+
+    async def _send(_commands):
+        send_started.set()
+        try:
+            await never_finishes.wait()
+        finally:
+            send_cancelled.set()
+
+    remote.send_commands = AsyncMock(side_effect=_send)
+    remote.async_stop = AsyncMock()
+    device._remote = remote
+    coordinator = MagicMock(spec=FrameCoordinator)
+    coordinator.device = device
+    entry.runtime_data = coordinator
+    unload_platforms = AsyncMock(return_value=True)
+
+    with (
+        patch.object(
+            hass.config_entries,
+            "async_unload_platforms",
+            unload_platforms,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.device.REMOTE_DRAIN_DEADLINE",
+            0.01,
+            create=True,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.device.REMOTE_CANCEL_DEADLINE",
+            0.05,
+            create=True,
+        ),
+    ):
+        command = asyncio.create_task(device.async_send_key("KEY_HOME"))
+        await send_started.wait()
+        try:
+            assert await asyncio.wait_for(
+                async_unload_entry(hass, entry), timeout=0.2
+            )
+        finally:
+            if not command.done():
+                command.cancel()
+            result = await asyncio.gather(command, return_exceptions=True)
+
+    assert isinstance(result[0], asyncio.CancelledError)
+    assert send_cancelled.is_set()
+    unload_platforms.assert_awaited_once()
+    remote.async_stop.assert_awaited_once_with()
+
+
+async def test_unload_resistant_remote_operation_fails_bounded_and_restores(
+    hass,
+):
+    entry = _make_entry()
+    send_started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release_send = asyncio.Event()
+    device = FrameDevice(
+        hass,
+        host="1.2.3.4",
+        mac="A0:D0:5B:86:CE:B7",
+        token="tok",
+        ssl_context=MagicMock(),
+        task_factory=lambda coroutine, name: asyncio.create_task(
+            coroutine, name=name
+        ),
+    )
+    device._art_session = MagicMock(async_stop=AsyncMock())
+    remote = MagicMock(token="tok")
+    remote.open = AsyncMock()
+
+    async def _resistant_send(_commands):
+        send_started.set()
+        try:
+            await release_send.wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_send.wait()
+
+    remote.send_commands = AsyncMock(side_effect=_resistant_send)
+    remote.async_stop = AsyncMock()
+    device._remote = remote
+    coordinator = MagicMock(spec=FrameCoordinator)
+    coordinator.device = device
+    entry.runtime_data = coordinator
+    unload_platforms = AsyncMock(return_value=True)
+
+    with (
+        patch.object(
+            hass.config_entries,
+            "async_unload_platforms",
+            unload_platforms,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.device.REMOTE_DRAIN_DEADLINE",
+            0.01,
+            create=True,
+        ),
+        patch(
+            "custom_components.samsungtv_frame.device.REMOTE_CANCEL_DEADLINE",
+            0.01,
+            create=True,
+        ),
+    ):
+        command = asyncio.create_task(device.async_send_key("KEY_HOME"))
+        await send_started.wait()
+        try:
+            with pytest.raises(ConnectionFailure) as raised:
+                await asyncio.wait_for(
+                    async_unload_entry(hass, entry), timeout=0.2
+                )
+            assert str(raised.value) == "Remote operation did not stop"
+            assert cancellation_seen.is_set()
+            assert device._remote_quiescing is False
+            unload_platforms.assert_not_awaited()
+            remote.async_stop.assert_not_awaited()
+        finally:
+            release_send.set()
+            await asyncio.gather(command, return_exceptions=True)

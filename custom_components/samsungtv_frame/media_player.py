@@ -232,8 +232,8 @@ class FrameMediaPlayer(FrameEntity, MediaPlayerEntity):
         app = app_map.get(source)
         if app is None:
             raise ServiceValidationError(
-                f"Unknown source '{source}'; the TV reports "
-                f"{len(app_map)} installed apps"
+                f"Unknown source '{source}'; choose an app from the curated "
+                "built-in catalog"
             )
         app_type = "DEEP_LINK" if app.get("app_type") == 2 else "NATIVE_LAUNCH"
         try:

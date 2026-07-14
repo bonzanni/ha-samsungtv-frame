@@ -38,6 +38,8 @@ def mock_device() -> MagicMock:
     device.async_turn_on = AsyncMock()
     device.async_turn_off = AsyncMock()
     device.async_stop = AsyncMock()
+    device.async_quiesce_remote = AsyncMock()
+    device.resume_remote = MagicMock()
     device.async_send_key = AsyncMock()
     device.async_launch_app = AsyncMock()
     device.async_app_list = AsyncMock(return_value=None)

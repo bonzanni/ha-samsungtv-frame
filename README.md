@@ -5,9 +5,11 @@ Accurate OFF / WATCHING / ART-MODE state for Samsung Frame TVs, plus power and b
 ## Entities
 - `media_player.samsung_frame_tv` — power on (Wake-on-LAN) / off (3 s hold), absolute volume +
   real mute state (via the TV's UPnP service) plus step keys, play/pause/stop, channel up/down,
-  and source selection (launches the TV's installed apps, e.g. Netflix). While watching,
-  `source`/`app_name` report the foreground app ("TV" when on live TV or an HDMI input).
-  What plays *inside* an app is not exposed by the TV's local API.
+  and source selection from a curated built-in app catalog (e.g. Netflix). The dropdown is
+  not a discovered list of apps installed on the TV, so it can include apps unavailable on
+  a particular set. While watching, `source`/`app_name` report a recognized foreground app
+  ("TV" when on live TV or an HDMI input). What plays *inside* an app is not exposed by the
+  TV's local API.
 - `remote.samsung_frame_tv` — send arbitrary key sequences:
   `remote.send_command` with `command: [KEY_HOME, KEY_RIGHT, KEY_ENTER]`, plus
   `num_repeats` / `delay_secs` / `hold_secs` support.
@@ -33,8 +35,9 @@ Accurate OFF / WATCHING / ART-MODE state for Samsung Frame TVs, plus power and b
   `MY-C0002` my pictures, `MY-C0004` favourites, `MY-C0008` store
 - `samsungtv_frame.change_matte` / `set_photo_filter` / `set_favourite` — style an artwork
   (all default to the currently displayed one)
-- `media_player.play_media` with `media_content_type: app` — launch an app, optionally with
-  deep-link content: `extra: {meta_tag: "v=VIDEO_ID"}` (support varies per app)
+- `media_player.play_media` with `media_content_type: app` — launch a catalog app name or a
+  raw Tizen app id, optionally with deep-link content:
+  `extra: {meta_tag: "v=VIDEO_ID"}` (support varies per app)
 
 ## Device triggers
 "Turned off", "Started watching" and "Entered art mode" are available directly in the
@@ -46,18 +49,30 @@ default 10). Push events (art mode changes) arrive instantly regardless of the h
 The IP address can be changed later via the entry's Reconfigure menu.
 
 ## Reliability
-Version 0.6.8 supervises the Art websocket as one long-lived session. When the TV's
-internal Art host is unavailable, Home Assistant now backs off instead of reconnecting
-on every heartbeat; healthy state remains push-driven with periodic reconciliation over
-the existing socket. No configuration migration is required when upgrading.
+Version 0.6.9 pairs the remote-control channel first and uses its returned token for
+both remote control and Art. A changed remote token is stored before a successful
+foreground command returns, including power-off. Ordinary stale remote connections
+close the exact failed client before one same-credential retry. An
+`ms.channel.timeOut` protocol response during a foreground remote command starts Home
+Assistant reauthorization instead of silently retrying without a token. This response
+is indeterminate and is not treated as proof that the stored credential is invalid;
+background polling never opens a pairing prompt.
+
+Since version 0.6.8, the integration supervises the Art websocket as one
+long-lived session. When the TV's internal Art host is unavailable, Home Assistant
+backs off instead of reconnecting on every heartbeat; healthy state remains push-driven
+with periodic reconciliation over the existing socket. No configuration migration is
+required when upgrading.
 
 Art commands, push events, thumbnails, uploads, pairing, and shutdown use cancellable
 async I/O.
 
 ## Setup
 Settings → Devices & Services → Add Integration → "Samsung Frame TV" → enter the IP.
-**Accept the "Allow" prompt on the TV once** (do it while the TV is showing normal content, not
-art mode). The token is stored; you won't be asked again unless you reset the TV.
+During first setup or reauthorization, show normal TV or app content, accept the
+**"Allow"** prompt on the TV, and leave **Access Notification** set to **First Time
+Only**. The integration pairs the remote-control channel and validates Art with the
+returned token. It never opens a pairing prompt from background polling.
 
 ## UI notes
 - **Volume**: the media player exposes absolute volume, so HA shows a slider; the mute

@@ -13,9 +13,11 @@ from custom_components.samsungtv_frame.const import (
     CONF_HOST,
     CONF_MAC,
     CONF_TOKEN,
+    DEFAULT_APP_MAP,
     DOMAIN,
 )
 from custom_components.samsungtv_frame.coordinator import FrameCoordinator
+from custom_components.samsungtv_frame.device import FrameDevice
 from custom_components.samsungtv_frame.models import FrameData, TvMode
 
 
@@ -893,6 +895,33 @@ async def test_push_art_on_then_learned_standby_is_off(hass, mock_device):
     _assert_art_getter_count(mock_device, 0)
 
 
+async def test_reachable_logical_off_invalidates_remote_confirmation(
+    hass, mock_device
+):
+    """A REST-reachable standby shutdown is still a remote power boundary."""
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.remote_confirmed = True
+    coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=5,
+        color_temperature=3,
+    )
+    coord.data = await coord._async_update_data()
+    assert coord.data.tv_mode is TvMode.ART_MODE
+
+    mock_device.async_device_info.return_value = {"PowerState": "standby"}
+    coord.data = await coord._async_update_data()
+
+    assert coord.data.tv_mode is TvMode.OFF
+    assert mock_device.remote_confirmed is False
+
+
 async def test_unavailable_session_becomes_unknown_without_network_attempts(
     hass, mock_device
 ):
@@ -1132,15 +1161,11 @@ async def test_cancelled_reconcile_reserves_window(hass, mock_device):
     assert mock_device.async_get_color_temperature.await_count == 0
 
 
-async def test_app_fetch_retries_and_replaces_catalog(hass, mock_device):
-    from custom_components.samsungtv_frame.const import (
-        APP_FETCH_POLL_SPACING,
-        DEFAULT_APP_MAP,
-    )
-
+async def test_confirmed_online_polls_never_schedule_app_discovery(
+    hass, mock_device
+):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.remote_confirmed = True
-    mock_device.async_app_list.return_value = None  # booting TV: fetch fails
     coord = _make(hass, mock_device)
     _seed_ready_art(
         mock_device,
@@ -1152,58 +1177,28 @@ async def test_app_fetch_retries_and_replaces_catalog(hass, mock_device):
         brightness=None,
         color_temperature=None,
     )
-    await coord._async_update_data()
+    for _ in range(12):
+        coord.data = await coord._async_update_data()
     await hass.async_block_till_done()
-    # Catalog serves from the start, even while real fetches fail.
-    assert set(coord.app_map) == set(DEFAULT_APP_MAP)
 
-    mock_device.async_app_list.return_value = [
-        {"name": "Netflix", "appId": "X", "app_type": 2}
-    ]
-    # Attempts are spaced APP_FETCH_POLL_SPACING polls apart.
-    for _ in range(APP_FETCH_POLL_SPACING):
-        await coord._async_update_data()
-    await hass.async_block_till_done()
-    # The TV's real list replaces the catalog once it answers.
-    assert coord.app_map == {
-        "Netflix": {"name": "Netflix", "appId": "X", "app_type": 2}
-    }
-
-
-async def test_no_background_app_fetch_before_remote_confirmed(hass, mock_device):
-    """A remote connect can pop an authorization prompt on the TV; background
-    fetches must never be the trigger — only user-initiated remote use."""
-    mock_device.async_device_info.return_value = {"PowerState": "on"}
-    mock_device.remote_confirmed = False
-    coord = _make(hass, mock_device)
-    _seed_ready_art(
-        mock_device,
-        coord,
-        generation=1,
-        now=0.0,
-        art_mode=False,
-        current_art=None,
-        brightness=None,
-        color_temperature=None,
+    assert coord.app_map == DEFAULT_APP_MAP
+    assert coord.app_map is not DEFAULT_APP_MAP
+    assert all(
+        coord.app_map[name] is not DEFAULT_APP_MAP[name]
+        for name in DEFAULT_APP_MAP
     )
-    for _ in range(6):
-        await coord._async_update_data()
-    await hass.async_block_till_done()
     mock_device.async_app_list.assert_not_awaited()
-
-
-async def test_catalog_kept_after_exhaustion_and_power_cycle(hass, mock_device):
-    """TVs that never answer the installed-apps request keep the built-in
-    catalog through attempt exhaustion and power cycles — sources always work."""
-    from custom_components.samsungtv_frame.const import (
-        APP_FETCH_MAX_ATTEMPTS,
-        APP_FETCH_POLL_SPACING,
-        DEFAULT_APP_MAP,
+    assert all(
+        call.args[2] != f"{DOMAIN}-app-list"
+        for call in coord.config_entry.async_create_background_task.call_args_list
     )
 
+
+async def test_repeated_power_cycles_never_schedule_app_discovery(
+    hass, mock_device
+):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.remote_confirmed = True
-    mock_device.async_app_list.return_value = None
     coord = _make(hass, mock_device)
     _seed_ready_art(
         mock_device,
@@ -1215,20 +1210,25 @@ async def test_catalog_kept_after_exhaustion_and_power_cycle(hass, mock_device):
         brightness=None,
         color_temperature=None,
     )
-    for _ in range(APP_FETCH_MAX_ATTEMPTS * APP_FETCH_POLL_SPACING):
-        await coord._async_update_data()
-    await hass.async_block_till_done()
-    assert set(coord.app_map) == set(DEFAULT_APP_MAP)
-    assert mock_device.async_app_list.await_count == APP_FETCH_MAX_ATTEMPTS
 
-    # A power cycle re-arms the real-list attempts; catalog keeps serving.
-    mock_device.async_device_info.return_value = None
-    await coord._async_update_data()
-    mock_device.async_device_info.return_value = {"PowerState": "on"}
-    await coord._async_update_data()
+    for _ in range(4):
+        mock_device.async_device_info.return_value = {"PowerState": "on"}
+        mock_device.remote_confirmed = True
+        coord.data = await coord._async_update_data()
+        mock_device.async_device_info.return_value = None
+        coord.data = await coord._async_update_data()
+        mock_device.async_device_info.return_value = {"PowerState": "on"}
+        coord.data = await coord._async_update_data()
+        mock_device.remote_confirmed = True
+        coord.data = await coord._async_update_data()
     await hass.async_block_till_done()
-    assert set(coord.app_map) == set(DEFAULT_APP_MAP)
-    assert mock_device.async_app_list.await_count == APP_FETCH_MAX_ATTEMPTS + 1
+
+    assert coord.app_map == DEFAULT_APP_MAP
+    mock_device.async_app_list.assert_not_awaited()
+    assert all(
+        call.args[2] != f"{DOMAIN}-app-list"
+        for call in coord.config_entry.async_create_background_task.call_args_list
+    )
 
 
 async def test_volume_polled_when_powered_on(hass, mock_device):
@@ -1283,7 +1283,7 @@ async def test_reachable_heartbeat_captures_token_while_art_unavailable(
     _assert_art_getter_count(mock_device, 0)
 
 
-def test_handle_remote_token_adopts_clients_before_updating_entry(
+def test_handle_remote_token_updates_entry_before_adopting_clients(
     hass, mock_device
 ):
     coord = _make(hass, mock_device)
@@ -1303,23 +1303,127 @@ def test_handle_remote_token_adopts_clients_before_updating_entry(
     ) as update:
         coord.handle_remote_token("new-token")
 
-    assert order == ["device", "entry"]
+    assert order == ["entry", "device"]
     mock_device.update_token.assert_called_once_with("new-token")
     update.assert_called_once()
 
 
-@pytest.mark.parametrize("token", ["", "old-token"])
-def test_handle_remote_token_ignores_missing_or_unchanged(
-    hass, mock_device, token
-):
+def test_handle_remote_token_ignores_missing(hass, mock_device):
     coord = _make(hass, mock_device)
     coord.config_entry.data = {CONF_TOKEN: "old-token"}
 
     with patch.object(hass.config_entries, "async_update_entry") as update:
-        coord.handle_remote_token(token)
+        coord.handle_remote_token("")
 
     mock_device.update_token.assert_not_called()
     update.assert_not_called()
+
+
+def test_handle_remote_token_adopts_stale_runtime_when_entry_matches(
+    hass, mock_device
+):
+    coord = _make(hass, mock_device)
+    coord.config_entry.data = {CONF_TOKEN: "new-token"}
+
+    with patch.object(hass.config_entries, "async_update_entry") as update:
+        coord.handle_remote_token("new-token")
+
+    update.assert_not_called()
+    mock_device.update_token.assert_called_once_with("new-token")
+
+
+def test_handle_remote_token_does_not_adopt_when_entry_update_fails(
+    hass, mock_device
+):
+    coord = _make(hass, mock_device)
+    coord.config_entry.data = {CONF_TOKEN: "old-token"}
+    error = RuntimeError("entry update failed")
+
+    with (
+        patch.object(
+            hass.config_entries,
+            "async_update_entry",
+            side_effect=error,
+        ),
+        pytest.raises(RuntimeError) as raised,
+    ):
+        coord.handle_remote_token("new-token")
+
+    assert raised.value is error
+    mock_device.update_token.assert_not_called()
+
+
+async def test_remote_token_persistence_failure_retries_before_send(hass):
+    device = FrameDevice(
+        hass,
+        host="1.2.3.4",
+        mac="A0:D0:5B:86:CE:B7",
+        token="old-token",
+        ssl_context=MagicMock(),
+        task_factory=lambda coroutine, name: asyncio.create_task(
+            coroutine, name=name
+        ),
+    )
+    device._art_session = MagicMock(async_stop=AsyncMock())
+    remote = MagicMock(token="new-token")
+    order: list[str] = []
+    remote.open = AsyncMock(side_effect=lambda: order.append("open"))
+    remote.send_commands = AsyncMock(side_effect=lambda _commands: order.append("send"))
+    remote.close = AsyncMock()
+    device._remote = remote
+    entry = MagicMock(spec=ConfigEntry)
+    entry.entry_id = "abc"
+    entry.options = {}
+    entry.data = {CONF_TOKEN: "old-token"}
+    coord = FrameCoordinator(hass, entry, device)
+    device.set_remote_token_callback(coord.handle_remote_token)
+    update_error = RuntimeError("entry update failed")
+    update_attempt = 0
+
+    def _update_entry(updated_entry, *, data):
+        nonlocal update_attempt
+        assert updated_entry is entry
+        update_attempt += 1
+        order.append(f"persist-{update_attempt}")
+        if update_attempt == 1:
+            raise update_error
+        entry.data = data
+
+    original_update_token = device.update_token
+
+    def _adopt_token(token):
+        order.append("adopt")
+        original_update_token(token)
+
+    with (
+        patch.object(
+            hass.config_entries,
+            "async_update_entry",
+            side_effect=_update_entry,
+        ),
+        patch.object(device, "update_token", side_effect=_adopt_token),
+    ):
+        with pytest.raises(RuntimeError) as raised:
+            await device.async_send_key("KEY_HOME")
+        assert raised.value is update_error
+        assert device._token == "old-token"
+        assert device._art.token == "old-token"
+        assert remote.token == "new-token"
+        remote.send_commands.assert_not_awaited()
+
+        await device.async_send_key("KEY_HOME")
+
+    assert order == [
+        "open",
+        "persist-1",
+        "open",
+        "persist-2",
+        "adopt",
+        "send",
+    ]
+    assert device._token == "new-token"
+    assert device._art.token == "new-token"
+    assert remote.send_commands.await_count == 1
 
 
 async def test_duplicate_remote_reauth_is_suppressed_by_home_assistant(
