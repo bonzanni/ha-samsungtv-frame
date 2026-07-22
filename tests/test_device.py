@@ -18,6 +18,7 @@ from custom_components.samsungtv_frame.art_session import (
     ArtSessionTrigger,
 )
 from custom_components.samsungtv_frame.device import FrameDevice
+from custom_components.samsungtv_frame.frame_art import ArtProbeTimeout
 from custom_components.samsungtv_frame.frame_remote import (
     FrameRemote,
     RemotePairingRequired,
@@ -471,6 +472,75 @@ async def test_correlated_aggregate_response_error_uses_legacy_for_generation(
     device._art_session.async_connection_failed.assert_not_awaited()
 
 
+async def test_aggregate_timeout_with_live_legacy_subset_caches_legacy(device):
+    device._art.get_art_settings_payload = AsyncMock(
+        side_effect=ArtProbeTimeout()
+    )
+    device._art.get_legacy_brightness = AsyncMock(
+        side_effect=ArtProbeTimeout()
+    )
+    device._art.get_legacy_color_temperature = AsyncMock(return_value="-2")
+
+    assert await device.async_get_art_settings() == ArtSettingsSnapshot(
+        supported=frozenset({ArtSettingKey.COLOR_TEMPERATURE}),
+        color_temperature=-2,
+    )
+    assert device._art_settings_dialect.value == "legacy"
+    device._art_session.async_connection_failed.assert_not_awaited()
+
+
+async def test_aggregate_error_proves_two_silent_legacy_getters_live(device):
+    device._art.get_art_settings_payload = AsyncMock(
+        side_effect=ResponseError("aggregate unsupported")
+    )
+    device._art.get_legacy_brightness = AsyncMock(
+        side_effect=ArtProbeTimeout()
+    )
+    device._art.get_legacy_color_temperature = AsyncMock(
+        side_effect=ArtProbeTimeout()
+    )
+
+    assert await device.async_get_art_settings() == ArtSettingsSnapshot()
+    assert device._art_settings_dialect.value == "legacy"
+    device._art_session.async_connection_failed.assert_not_awaited()
+
+
+async def test_all_silent_settings_probes_retire_exactly_once(device):
+    device._art.get_art_settings_payload = AsyncMock(
+        side_effect=ArtProbeTimeout()
+    )
+    device._art.get_legacy_brightness = AsyncMock(
+        side_effect=ArtProbeTimeout()
+    )
+    final_timeout = ArtProbeTimeout()
+    device._art.get_legacy_color_temperature = AsyncMock(
+        side_effect=final_timeout
+    )
+
+    assert await device.async_get_art_settings() is None
+    assert device._art_settings_dialect.value == "unknown"
+    device._art_session.async_connection_failed.assert_awaited_once_with(
+        final_timeout
+    )
+
+
+async def test_cached_aggregate_silence_uses_live_legacy_fallback(device):
+    device._optional_dialect_generation = device.art_generation
+    device._art_settings_dialect = (
+        device._art_settings_dialect.__class__.AGGREGATE
+    )
+    device._art.get_art_settings_payload = AsyncMock(
+        side_effect=ArtProbeTimeout()
+    )
+    device._art.get_legacy_brightness = AsyncMock(return_value="7")
+    device._art.get_legacy_color_temperature = AsyncMock(return_value="-2")
+
+    result = await device.async_get_art_settings()
+    assert result is not None
+    assert device._art_settings_dialect.value == "legacy"
+    device._art_session.async_connection_failed.assert_not_awaited()
+
+
 async def test_malformed_aggregate_keeps_dialect_unknown_and_retries(device):
     device._art.get_art_settings_payload = AsyncMock(
         side_effect=[{"data": "not-json"}, VALID_ART_SETTINGS_PAYLOAD]
@@ -550,6 +620,77 @@ async def test_modern_slideshow_response_error_probes_legacy_once(device):
     device._art.get_auto_rotation_status.assert_awaited_once_with()
     assert device._art.get_legacy_slideshow_status.await_count == 2
     device._art_session.async_connection_failed.assert_not_awaited()
+
+
+@pytest.mark.parametrize("cached_auto", [False, True])
+async def test_modern_slideshow_probe_timeout_falls_back_to_live_legacy(
+    device, cached_auto
+):
+    if cached_auto:
+        device._optional_dialect_generation = device.art_generation
+        device._slideshow_dialect = (
+            device._slideshow_dialect.__class__.AUTO_ROTATION
+        )
+    timeout = ArtProbeTimeout()
+    device._art.get_auto_rotation_status = AsyncMock(side_effect=timeout)
+    device._art.get_legacy_slideshow_status = AsyncMock(
+        return_value=LEGACY_SLIDESHOW_PAYLOAD
+    )
+
+    assert await device.async_get_slideshow_state() == EXPECTED_LEGACY_SLIDESHOW
+    assert device._slideshow_dialect.value == "legacy"
+    device._art_session.async_connection_failed.assert_not_awaited()
+
+
+async def test_two_silent_slideshow_probes_retire_exactly_once(device):
+    modern = ArtProbeTimeout()
+    legacy = ArtProbeTimeout()
+    device._art.get_auto_rotation_status = AsyncMock(side_effect=modern)
+    device._art.get_legacy_slideshow_status = AsyncMock(side_effect=legacy)
+
+    assert await device.async_get_slideshow_state() is None
+    assert device._slideshow_dialect.value == "unknown"
+    device._art_session.async_connection_failed.assert_awaited_once_with(legacy)
+
+
+async def test_modern_correlated_error_proves_legacy_silence_is_unsupported(
+    device,
+):
+    device._art.get_auto_rotation_status = AsyncMock(
+        side_effect=ResponseError("modern unsupported")
+    )
+    device._art.get_legacy_slideshow_status = AsyncMock(
+        side_effect=ArtProbeTimeout()
+    )
+
+    assert await device.async_get_slideshow_state() is None
+    assert device._slideshow_dialect.value == "unsupported"
+    device._art_session.async_connection_failed.assert_not_awaited()
+
+
+async def test_cached_legacy_slideshow_silence_retires_without_escape(device):
+    device._optional_dialect_generation = device.art_generation
+    device._slideshow_dialect = device._slideshow_dialect.__class__.LEGACY
+    timeout = ArtProbeTimeout()
+    device._art.get_legacy_slideshow_status = AsyncMock(side_effect=timeout)
+
+    assert await device.async_get_slideshow_state() is None
+    device._art_session.async_connection_failed.assert_awaited_once_with(timeout)
+
+
+async def test_probe_timeout_then_transport_failure_retires_only_once(device):
+    transport_error = OSError("lost")
+    device._art.get_auto_rotation_status = AsyncMock(
+        side_effect=ArtProbeTimeout()
+    )
+    device._art.get_legacy_slideshow_status = AsyncMock(
+        side_effect=transport_error
+    )
+
+    assert await device.async_get_slideshow_state() is None
+    device._art_session.async_connection_failed.assert_awaited_once_with(
+        transport_error
+    )
 
 
 async def test_two_correlated_slideshow_errors_cache_unsupported(device):
@@ -704,20 +845,36 @@ async def test_generation_loss_discards_optional_result_without_cache_write(
         ),
     ],
 )
+@pytest.mark.parametrize(
+    "probe_error",
+    [
+        pytest.param(
+            ResponseError("unsupported on stale generation"),
+            id="response-error",
+        ),
+        pytest.param(ArtProbeTimeout(), id="probe-timeout"),
+    ],
+)
 async def test_correlated_error_after_generation_loss_does_not_select_fallback(
-    device, method, delegate, payload, expected, legacy_delegate
+    device,
+    method,
+    delegate,
+    payload,
+    expected,
+    legacy_delegate,
+    probe_error,
 ):
     calls = 0
 
-    async def lose_generation_with_response_error():
+    async def lose_generation_with_probe_error():
         nonlocal calls
         calls += 1
         if calls == 1:
             device._art_session.generation += 1
-            raise ResponseError("unsupported on stale generation")
+            raise probe_error
         return payload
 
-    operation = AsyncMock(side_effect=lose_generation_with_response_error)
+    operation = AsyncMock(side_effect=lose_generation_with_probe_error)
     legacy = AsyncMock()
     setattr(device._art, delegate, operation)
     setattr(device._art, legacy_delegate, legacy)
@@ -737,6 +894,22 @@ async def test_correlated_error_after_generation_loss_does_not_select_fallback(
     assert await getattr(device, method)() == expected
     assert operation.await_count == 2
     legacy.assert_not_awaited()
+
+
+async def test_generation_change_after_probe_timeout_skips_fallback(device):
+    async def timeout_after_generation_change():
+        device._art_session.generation += 1
+        raise ArtProbeTimeout()
+
+    device._art.get_auto_rotation_status = AsyncMock(
+        side_effect=timeout_after_generation_change
+    )
+    device._art.get_legacy_slideshow_status = AsyncMock()
+
+    assert await device.async_get_slideshow_state() is None
+    assert device._slideshow_dialect.value == "unknown"
+    device._art.get_legacy_slideshow_status.assert_not_awaited()
+    device._art_session.async_connection_failed.assert_not_awaited()
 
 
 async def test_malformed_modern_slideshow_retains_proven_dialect(device):

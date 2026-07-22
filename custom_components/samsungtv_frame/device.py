@@ -37,6 +37,7 @@ from .const import (
 )
 from .frame_art import (
     ArtEventCallback,
+    ArtProbeTimeout,
     FrameArt,
     InvalidArtSettingError,
     TaskFactory,
@@ -301,7 +302,7 @@ class FrameDevice:
             return _ART_READ_FAILED
         try:
             return await operation()
-        except ResponseError:
+        except (ResponseError, ArtProbeTimeout):
             raise
         except Exception as err:  # noqa: BLE001
             await self._art_session.async_connection_failed(err)
@@ -324,11 +325,15 @@ class FrameDevice:
         )
 
     async def _async_get_legacy_art_settings(
-        self, generation: int
+        self,
+        generation: int,
+        *,
+        liveness_proven: bool = False,
     ) -> ArtSettingsSnapshot | None:
         """Read supported legacy settings without confusing absence and loss."""
         supported: set[ArtSettingKey] = set()
         normalized: dict[ArtSettingKey, int | str | bool | None] = {}
+        last_timeout: ArtProbeTimeout | None = None
         getters = (
             (ArtSettingKey.BRIGHTNESS, self._art.get_legacy_brightness),
             (
@@ -340,17 +345,28 @@ class FrameDevice:
             try:
                 value = await self._async_art_read_response(getter)
             except ResponseError:
-                if not self._optional_generation_is_current(generation):
-                    return None
+                liveness_proven = True
                 continue
-            if (
-                value is _ART_READ_FAILED
-                or not self._optional_generation_is_current(generation)
-            ):
+            except ArtProbeTimeout as err:
+                last_timeout = err
+                continue
+
+            if value is _ART_READ_FAILED:
                 return None
+            if not self._optional_generation_is_current(generation):
+                return None
+            liveness_proven = True
             supported.add(key)
             normalized[key] = normalize_art_setting(key, value)
 
+        if not self._optional_generation_is_current(generation):
+            return None
+        if not liveness_proven:
+            assert last_timeout is not None
+            await self._art_session.async_connection_failed(last_timeout)
+            return None
+
+        self._art_settings_dialect = _ArtSettingsDialect.LEGACY
         return ArtSettingsSnapshot(
             supported=frozenset(supported),
             brightness=normalized.get(ArtSettingKey.BRIGHTNESS),
@@ -395,54 +411,55 @@ class FrameDevice:
         return None
 
     async def async_get_art_settings(self) -> ArtSettingsSnapshot | None:
-        """Return normalized Art settings without opening the Art session."""
+        """Return normalized settings with same-pass liveness evidence."""
         generation = self.art_generation
         self._reset_optional_dialects_for_generation(generation)
         if self._art_settings_dialect is _ArtSettingsDialect.LEGACY:
             return await self._async_get_legacy_art_settings(generation)
+
+        liveness_proven = False
         try:
             payload = await self._async_art_read_response(
                 self._art.get_art_settings_payload
             )
         except ResponseError:
-            if not self._optional_generation_is_current(generation):
+            liveness_proven = True
+        except ArtProbeTimeout:
+            pass
+        else:
+            if (
+                payload is _ART_READ_FAILED
+                or not self._optional_generation_is_current(generation)
+            ):
                 return None
-            self._art_settings_dialect = _ArtSettingsDialect.LEGACY
-            return await self._async_get_legacy_art_settings(generation)
-        if (
-            payload is _ART_READ_FAILED
-            or not self._optional_generation_is_current(generation)
-        ):
+            snapshot = (
+                parse_art_settings(payload)
+                if isinstance(payload, dict)
+                else None
+            )
+            if (
+                snapshot is not None
+                and self._optional_generation_is_current(generation)
+            ):
+                self._art_settings_dialect = _ArtSettingsDialect.AGGREGATE
+            return snapshot
+
+        if not self._optional_generation_is_current(generation):
             return None
-        snapshot = (
-            parse_art_settings(payload) if isinstance(payload, dict) else None
+        return await self._async_get_legacy_art_settings(
+            generation,
+            liveness_proven=liveness_proven,
         )
-        if (
-            snapshot is not None
-            and self._optional_generation_is_current(generation)
-        ):
-            self._art_settings_dialect = _ArtSettingsDialect.AGGREGATE
-        return snapshot
 
     async def async_get_slideshow_state(self) -> SlideshowState | None:
-        """Return normalized slideshow state using one cached dialect."""
+        """Return slideshow state using same-pass liveness evidence."""
         generation = self.art_generation
         self._reset_optional_dialects_for_generation(generation)
         dialect = self._slideshow_dialect
         if dialect is _SlideshowDialect.UNSUPPORTED:
             return None
+
         if dialect is _SlideshowDialect.LEGACY:
-            getter = self._art.get_legacy_slideshow_status
-        else:
-            getter = self._art.get_auto_rotation_status
-        try:
-            payload = await self._async_art_read_response(getter)
-        except ResponseError:
-            if not self._optional_generation_is_current(generation):
-                return None
-            if dialect is _SlideshowDialect.LEGACY:
-                self._slideshow_dialect = _SlideshowDialect.UNSUPPORTED
-                return None
             try:
                 payload = await self._async_art_read_response(
                     self._art.get_legacy_slideshow_status
@@ -451,19 +468,68 @@ class FrameDevice:
                 if self._optional_generation_is_current(generation):
                     self._slideshow_dialect = _SlideshowDialect.UNSUPPORTED
                 return None
-            dialect = _SlideshowDialect.LEGACY
-        else:
-            dialect = (
-                _SlideshowDialect.LEGACY
-                if dialect is _SlideshowDialect.LEGACY
-                else _SlideshowDialect.AUTO_ROTATION
+            except ArtProbeTimeout as err:
+                if self._optional_generation_is_current(generation):
+                    await self._art_session.async_connection_failed(err)
+                return None
+            if (
+                payload is _ART_READ_FAILED
+                or not self._optional_generation_is_current(generation)
+            ):
+                return None
+            return (
+                parse_slideshow(payload)
+                if isinstance(payload, dict)
+                else None
             )
+
+        liveness_proven = False
+        try:
+            payload = await self._async_art_read_response(
+                self._art.get_auto_rotation_status
+            )
+        except ResponseError:
+            liveness_proven = True
+        except ArtProbeTimeout:
+            pass
+        else:
+            if (
+                payload is _ART_READ_FAILED
+                or not self._optional_generation_is_current(generation)
+            ):
+                return None
+            self._slideshow_dialect = _SlideshowDialect.AUTO_ROTATION
+            return (
+                parse_slideshow(payload)
+                if isinstance(payload, dict)
+                else None
+            )
+
+        if not self._optional_generation_is_current(generation):
+            return None
+        try:
+            payload = await self._async_art_read_response(
+                self._art.get_legacy_slideshow_status
+            )
+        except ResponseError:
+            if self._optional_generation_is_current(generation):
+                self._slideshow_dialect = _SlideshowDialect.UNSUPPORTED
+            return None
+        except ArtProbeTimeout as err:
+            if not self._optional_generation_is_current(generation):
+                return None
+            if liveness_proven:
+                self._slideshow_dialect = _SlideshowDialect.UNSUPPORTED
+            else:
+                await self._art_session.async_connection_failed(err)
+            return None
+
         if (
             payload is _ART_READ_FAILED
             or not self._optional_generation_is_current(generation)
         ):
             return None
-        self._slideshow_dialect = dialect
+        self._slideshow_dialect = _SlideshowDialect.LEGACY
         return parse_slideshow(payload) if isinstance(payload, dict) else None
 
     async def async_set_art_brightness(self, value: int) -> None:
