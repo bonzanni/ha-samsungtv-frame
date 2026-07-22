@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.1
+
+- Treat silently unsupported optional Art capability reads as bounded probes,
+  allowing modern-to-legacy fallback without closing a healthy websocket.
+- Require same-generation correlated liveness before caching Art settings or
+  slideshow dialects, while retaining supervised recovery for ambiguous
+  all-silent transports.
+- Route slideshow writes through the read-proven generation dialect so older
+  Frame firmware does not time out on an unsupported modern command.
+
 ## 0.7.0
 
 - Read all advertised local Art settings as one aggregate, generation-scoped snapshot
