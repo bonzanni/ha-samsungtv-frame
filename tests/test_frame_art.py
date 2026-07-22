@@ -518,15 +518,24 @@ async def test_favourite_rejects_invalid_status():
     art.request.assert_not_awaited()
 
 
-async def test_slideshow_uses_auto_rotation_request():
+@pytest.mark.parametrize(
+    ("method", "request_name"),
+    [
+        ("set_auto_rotation", "set_auto_rotation_status"),
+        ("set_legacy_slideshow", "set_slideshow_status"),
+    ],
+)
+async def test_exact_slideshow_setters_send_one_normal_request(
+    method, request_name
+):
     art = make_art()
     art.request = AsyncMock(return_value={"event": "changed"})
 
-    assert await art.set_slideshow(15, True, "MY-C0004") == {
+    assert await getattr(art, method)(15, True, "MY-C0004") == {
         "event": "changed"
     }
     art.request.assert_awaited_once_with(
-        "set_auto_rotation_status",
+        request_name,
         value="15",
         category_id="MY-C0004",
         type="shuffleslideshow",

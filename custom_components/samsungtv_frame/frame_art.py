@@ -510,19 +510,47 @@ class FrameArt(SamsungTVWSAsyncConnection):
             status=self._on_off(status),
         )
 
-    async def set_slideshow(
-        self, duration: int, shuffle: bool, category_id: str
-    ) -> dict[str, Any]:
-        """Configure slideshow playback, with the legacy command fallback."""
-        params = {
+    @staticmethod
+    def _slideshow_params(
+        duration: int, shuffle: bool, category_id: str
+    ) -> dict[str, str]:
+        """Build the shared slideshow command parameters."""
+        return {
             "value": str(duration) if duration > 0 else "off",
             "category_id": category_id,
             "type": "shuffleslideshow" if shuffle else "slideshow",
         }
+
+    async def set_auto_rotation(
+        self, duration: int, shuffle: bool, category_id: str
+    ) -> dict[str, Any]:
+        """Configure slideshow playback with the modern command."""
+        return await self.request(
+            "set_auto_rotation_status",
+            **self._slideshow_params(duration, shuffle, category_id),
+        )
+
+    async def set_legacy_slideshow(
+        self, duration: int, shuffle: bool, category_id: str
+    ) -> dict[str, Any]:
+        """Configure slideshow playback with the legacy command."""
+        return await self.request(
+            "set_slideshow_status",
+            **self._slideshow_params(duration, shuffle, category_id),
+        )
+
+    async def set_slideshow(
+        self, duration: int, shuffle: bool, category_id: str
+    ) -> dict[str, Any]:
+        """Configure slideshow playback, with the legacy command fallback."""
         try:
-            return await self.request("set_auto_rotation_status", **params)
+            return await self.set_auto_rotation(
+                duration, shuffle, category_id
+            )
         except ResponseError:
-            return await self.request("set_slideshow_status", **params)
+            return await self.set_legacy_slideshow(
+                duration, shuffle, category_id
+            )
 
     async def _open_d2d(
         self, conn_info: dict[str, Any]

@@ -502,6 +502,8 @@ async def test_aggregate_error_proves_two_silent_legacy_getters_live(device):
 
     assert await device.async_get_art_settings() == ArtSettingsSnapshot()
     assert device._art_settings_dialect.value == "legacy"
+    device._art.get_legacy_brightness.assert_awaited_once_with()
+    device._art.get_legacy_color_temperature.assert_awaited_once_with()
     device._art_session.async_connection_failed.assert_not_awaited()
 
 
@@ -622,6 +624,31 @@ async def test_modern_slideshow_response_error_probes_legacy_once(device):
     device._art_session.async_connection_failed.assert_not_awaited()
 
 
+async def test_ls03b_live_matrix_keeps_generation_and_publishes_optionals(
+    device,
+):
+    generation = device.art_generation
+    device._art.get_art_settings_payload = AsyncMock(
+        return_value=VALID_ART_SETTINGS_PAYLOAD
+    )
+    device._art.get_auto_rotation_status = AsyncMock(
+        side_effect=ArtProbeTimeout()
+    )
+    device._art.get_legacy_slideshow_status = AsyncMock(
+        return_value={"value": "off", "type": "slideshow"}
+    )
+
+    settings = await device.async_get_art_settings()
+    slideshow = await device.async_get_slideshow_state()
+
+    assert settings == EXPECTED_ART_SETTINGS
+    assert slideshow == SlideshowState(SlideshowMode.OFF, 0)
+    assert device.art_generation == generation
+    assert device._art_settings_dialect.value == "aggregate"
+    assert device._slideshow_dialect.value == "legacy"
+    device._art_session.async_connection_failed.assert_not_awaited()
+
+
 @pytest.mark.parametrize("cached_auto", [False, True])
 async def test_modern_slideshow_probe_timeout_falls_back_to_live_legacy(
     device, cached_auto
@@ -665,6 +692,23 @@ async def test_modern_correlated_error_proves_legacy_silence_is_unsupported(
 
     assert await device.async_get_slideshow_state() is None
     assert device._slideshow_dialect.value == "unsupported"
+    device._art.get_legacy_slideshow_status.assert_awaited_once_with()
+    device._art_session.async_connection_failed.assert_not_awaited()
+
+
+async def test_modern_slideshow_timeout_then_legacy_error_is_unsupported(
+    device,
+):
+    device._art.get_auto_rotation_status = AsyncMock(
+        side_effect=ArtProbeTimeout()
+    )
+    device._art.get_legacy_slideshow_status = AsyncMock(
+        side_effect=ResponseError("legacy unsupported")
+    )
+
+    assert await device.async_get_slideshow_state() is None
+    assert device._slideshow_dialect.value == "unsupported"
+    device._art.get_legacy_slideshow_status.assert_awaited_once_with()
     device._art_session.async_connection_failed.assert_not_awaited()
 
 
@@ -1308,6 +1352,15 @@ async def test_all_art_mutations_ensure_user_and_execute_once(
 ):
     operation = AsyncMock(return_value="MY_F0100")
     setattr(device._art, delegate, operation)
+    other_slideshow_operations = []
+    if method == "async_set_slideshow":
+        for other_delegate in (
+            "set_auto_rotation",
+            "set_legacy_slideshow",
+        ):
+            other_operation = AsyncMock()
+            setattr(device._art, other_delegate, other_operation)
+            other_slideshow_operations.append(other_operation)
 
     await getattr(device, method)(*args)
 
@@ -1315,6 +1368,8 @@ async def test_all_art_mutations_ensure_user_and_execute_once(
         ArtSessionTrigger.USER
     )
     operation.assert_awaited_once_with(*delegate_args)
+    for other_operation in other_slideshow_operations:
+        other_operation.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -2355,10 +2410,63 @@ async def test_launch_app_emits_channel_command(hass, device):
     assert cmds[0].params["data"]["appId"] == "11101200001"
 
 
-async def test_set_slideshow_delegates_to_art(hass, device):
+@pytest.mark.parametrize(
+    ("dialect_name", "expected_delegate"),
+    [
+        ("LEGACY", "set_legacy_slideshow"),
+        ("AUTO_ROTATION", "set_auto_rotation"),
+        ("UNKNOWN", "set_slideshow"),
+        ("UNSUPPORTED", "set_slideshow"),
+    ],
+)
+async def test_slideshow_write_routes_dialect_without_cache_write(
+    device, dialect_name, expected_delegate
+):
+    dialect_type = device._slideshow_dialect.__class__
+    device._optional_dialect_generation = device.art_generation
+    expected_dialect = getattr(dialect_type, dialect_name)
+    device._slideshow_dialect = expected_dialect
+    device._art.set_auto_rotation = AsyncMock()
+    device._art.set_legacy_slideshow = AsyncMock()
     device._art.set_slideshow = AsyncMock()
+
     await device.async_set_slideshow(60, True, "MY-C0002")
-    device._art.set_slideshow.assert_awaited_once_with(60, True, "MY-C0002")
+
+    getattr(device._art, expected_delegate).assert_awaited_once_with(
+        60, True, "MY-C0002"
+    )
+    for delegate in (
+        "set_auto_rotation",
+        "set_legacy_slideshow",
+        "set_slideshow",
+    ):
+        if delegate != expected_delegate:
+            getattr(device._art, delegate).assert_not_awaited()
+    assert device._slideshow_dialect is expected_dialect
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.USER
+    )
+
+
+async def test_slideshow_write_does_not_reuse_previous_generation_dialect(
+    device,
+):
+    dialect_type = device._slideshow_dialect.__class__
+    device._optional_dialect_generation = device.art_generation - 1
+    device._slideshow_dialect = dialect_type.LEGACY
+    device._art.set_slideshow = AsyncMock()
+    device._art.set_legacy_slideshow = AsyncMock()
+
+    await device.async_set_slideshow(60, False, "MY-C0002")
+
+    device._art.set_slideshow.assert_awaited_once_with(
+        60, False, "MY-C0002"
+    )
+    device._art.set_legacy_slideshow.assert_not_awaited()
+    assert device._slideshow_dialect is dialect_type.UNKNOWN
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.USER
+    )
 
 
 async def test_upload_art_returns_content_id(hass, device):
@@ -2452,6 +2560,8 @@ async def test_all_art_operations_stay_off_executor(hass, device):
     device._art.set_photo_filter = AsyncMock()
     device._art.set_favourite = AsyncMock()
     device._art.set_color_temperature = AsyncMock()
+    device._art.set_auto_rotation = AsyncMock()
+    device._art.set_legacy_slideshow = AsyncMock()
     device._art.set_slideshow = AsyncMock()
     device._art.set_motion_timer = AsyncMock()
     device._art.set_motion_sensitivity = AsyncMock()

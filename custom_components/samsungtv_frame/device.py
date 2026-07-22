@@ -591,10 +591,25 @@ class FrameDevice:
     async def async_set_slideshow(
         self, duration: int, shuffle: bool, category_id: str
     ) -> None:
-        """Configure the art slideshow."""
-        await self._async_art_mutation(
-            lambda: self._art.set_slideshow(duration, shuffle, category_id)
-        )
+        """Configure slideshow using this generation's read-proven dialect."""
+
+        async def _set() -> None:
+            self._reset_optional_dialects_for_generation(
+                self.art_generation
+            )
+            if self._slideshow_dialect is _SlideshowDialect.LEGACY:
+                await self._art.set_legacy_slideshow(
+                    duration, shuffle, category_id
+                )
+                return
+            if self._slideshow_dialect is _SlideshowDialect.AUTO_ROTATION:
+                await self._art.set_auto_rotation(
+                    duration, shuffle, category_id
+                )
+                return
+            await self._art.set_slideshow(duration, shuffle, category_id)
+
+        await self._async_art_mutation(_set)
 
     async def async_set_motion_timer(self, value: str) -> None:
         """Set the Art Mode motion timer after one user readiness probe."""
