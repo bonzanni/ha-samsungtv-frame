@@ -49,10 +49,10 @@ async def _setup(
         domain=DOMAIN,
         data={
             CONF_HOST: "1.2.3.4",
-            CONF_MAC: "A0:D0:5B:86:CE:B7",
+            CONF_MAC: "02:00:00:00:00:01",
             CONF_TOKEN: "t",
         },
-        unique_id="a0:d0:5b:86:ce:b7",
+        unique_id="02:00:00:00:00:01",
     )
     entry.add_to_hass(hass)
     with patch(
@@ -129,7 +129,7 @@ async def test_brightness_sensor_category_and_stable_id(hass, mock_device):
     entry = er.async_get(hass).async_get(BRIGHTNESS_SENSOR)
     assert entry is not None
     assert entry.unique_id == (
-        "A0:D0:5B:86:CE:B7_art_brightness_sensor"
+        "02:00:00:00:00:01_art_brightness_sensor"
     )
     assert entry.entity_category is EntityCategory.CONFIG
 

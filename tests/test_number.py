@@ -74,10 +74,10 @@ async def _setup(
         domain=DOMAIN,
         data={
             CONF_HOST: "1.2.3.4",
-            CONF_MAC: "A0:D0:5B:86:CE:B7",
+            CONF_MAC: "02:00:00:00:00:01",
             CONF_TOKEN: "t",
         },
-        unique_id="a0:d0:5b:86:ce:b7",
+        unique_id="02:00:00:00:00:01",
     )
     entry.add_to_hass(hass)
     with patch(

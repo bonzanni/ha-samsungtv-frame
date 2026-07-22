@@ -86,10 +86,10 @@ async def _setup(
         domain=DOMAIN,
         data={
             CONF_HOST: "1.2.3.4",
-            CONF_MAC: "A0:D0:5B:86:CE:B7",
+            CONF_MAC: "02:00:00:00:00:01",
             CONF_TOKEN: "t",
         },
-        unique_id="a0:d0:5b:86:ce:b7",
+        unique_id="02:00:00:00:00:01",
     )
     entry.add_to_hass(hass)
     with patch(
@@ -123,9 +123,9 @@ async def test_select_platform_states_options_categories_and_stable_ids(
 
     registry = er.async_get(hass)
     expected_ids = {
-        SLEEP_AFTER: "A0:D0:5B:86:CE:B7_art_sleep_after",
+        SLEEP_AFTER: "02:00:00:00:00:01_art_sleep_after",
         MOTION_SENSITIVITY: (
-            "A0:D0:5B:86:CE:B7_art_motion_sensitivity"
+            "02:00:00:00:00:01_art_motion_sensitivity"
         ),
     }
     for entity_id, unique_id in expected_ids.items():

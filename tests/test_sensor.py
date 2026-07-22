@@ -48,10 +48,10 @@ async def _setup(
         domain=DOMAIN,
         data={
             CONF_HOST: "1.2.3.4",
-            CONF_MAC: "A0:D0:5B:86:CE:B7",
+            CONF_MAC: "02:00:00:00:00:01",
             CONF_TOKEN: "t",
         },
-        unique_id="a0:d0:5b:86:ce:b7",
+        unique_id="02:00:00:00:00:01",
     )
     entry.add_to_hass(hass)
     with patch(
@@ -102,7 +102,7 @@ async def test_slideshow_state_options_attributes_and_stable_id(
 
     registry_entry = er.async_get(hass).async_get(SLIDESHOW)
     assert registry_entry is not None
-    assert registry_entry.unique_id == "A0:D0:5B:86:CE:B7_art_slideshow"
+    assert registry_entry.unique_id == "02:00:00:00:00:01_art_slideshow"
 
 
 async def test_slideshow_unavailable_without_authoritative_state(

@@ -1815,7 +1815,7 @@ async def test_remote_token_persistence_failure_retries_before_send(hass):
     device = FrameDevice(
         hass,
         host="1.2.3.4",
-        mac="A0:D0:5B:86:CE:B7",
+        mac="02:00:00:00:00:01",
         token="old-token",
         ssl_context=MagicMock(),
         task_factory=lambda coroutine, name: asyncio.create_task(
@@ -1892,10 +1892,10 @@ async def test_duplicate_remote_reauth_is_suppressed_by_home_assistant(
         title="Frame TV",
         data={
             CONF_HOST: "1.2.3.4",
-            CONF_MAC: "A0:D0:5B:86:CE:B7",
+            CONF_MAC: "02:00:00:00:00:01",
             CONF_TOKEN: "tok",
         },
-        unique_id="a0:d0:5b:86:ce:b7",
+        unique_id="02:00:00:00:00:01",
     )
     entry.add_to_hass(hass)
     coord = FrameCoordinator(hass, entry, mock_device)
