@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 - Read all advertised local Art settings as one aggregate, generation-scoped snapshot
   and expose the live-verified Sleep After, neutral motion-sensitivity, and automatic
