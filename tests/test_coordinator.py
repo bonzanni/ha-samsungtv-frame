@@ -138,6 +138,188 @@ def _assert_art_getter_count(mock_device, expected: int) -> None:
     assert mock_device.async_get_slideshow_state.await_count == expected
 
 
+def _assert_mock_device_idle(mock_device) -> None:
+    """Assert diagnostics did not call or await any mocked device method."""
+    mock_device.assert_not_called()
+    assert mock_device.method_calls == []
+    for value in vars(mock_device).values():
+        if isinstance(value, AsyncMock):
+            value.assert_not_awaited()
+        if isinstance(value, MagicMock):
+            value.assert_not_called()
+
+
+def test_diagnostics_snapshot_current_generation_is_strictly_allowlisted(
+    hass, mock_device
+):
+    current_art_canary = "__DIAG_COORD_CURRENT_ART_CANARY__"
+    running_app_canary = "__DIAG_COORD_RUNNING_APP_CANARY__"
+    host_canary = "__DIAG_COORD_HOST_CANARY__"
+    mac_canary = "__DIAG_COORD_MAC_CANARY__"
+    token_canary = "__DIAG_COORD_TOKEN_CANARY__"
+    coord = _make(hass, mock_device)
+    coord.config_entry.data = {
+        CONF_HOST: host_canary,
+        CONF_MAC: mac_canary,
+        CONF_TOKEN: token_canary,
+    }
+    coord.last_update_success = False
+    coord._art_fail_streak = 3
+    coord._upnp_fail_streak = 4
+    coord._unreachable_count = 2
+    coord._art_implies_power_on = True
+    coord.data = FrameData(
+        reachable=True,
+        power_state="standby",
+        art_mode=True,
+        tv_mode=TvMode.ART_MODE,
+        current_art=current_art_canary,
+        running_app=running_app_canary,
+        volume_level=0.61,
+        is_muted=True,
+        art_settings=ArtSettingsSnapshot(
+            supported=frozenset(
+                {
+                    ArtSettingKey.MOTION_TIMER,
+                    ArtSettingKey.BRIGHTNESS_SENSOR,
+                    ArtSettingKey.BRIGHTNESS,
+                }
+            ),
+            brightness=7,
+            motion_timer="30",
+            brightness_sensor_enabled=True,
+        ),
+        slideshow=SlideshowState(
+            mode=SlideshowMode.SHUFFLE,
+            duration_minutes=30,
+            category_id="__DIAG_COORD_CATEGORY_CANARY__",
+        ),
+        optional_art_generation=7,
+    )
+    mock_device.art_generation = 7
+    mock_device.art_ready = True
+    mock_device.art_session_state = ArtSessionState.READY
+    mock_device.remote_confirmed = True
+
+    snapshot = coord.diagnostics_snapshot()
+
+    assert snapshot == {
+        "last_update_success": False,
+        "reachable": True,
+        "power_state": "standby",
+        "tv_mode": "art_mode",
+        "art_mode_known": True,
+        "art_session_state": "ready",
+        "art_session_ready": True,
+        "art_session_generation": 7,
+        "art_failures": 3,
+        "upnp_failures": 4,
+        "unreachable_failures": 2,
+        "standby_precedence_learned": True,
+        "supported_settings": [
+            "brightness",
+            "brightness_sensor_setting",
+            "motion_timer",
+        ],
+        "slideshow_known": True,
+        "remote_confirmed": True,
+    }
+    assert {
+        "current_art",
+        "running_app",
+        "volume_level",
+        "is_muted",
+        "host",
+        "mac",
+        "token",
+    }.isdisjoint(snapshot)
+    serialized = repr(snapshot)
+    for canary in (
+        current_art_canary,
+        running_app_canary,
+        host_canary,
+        mac_canary,
+        token_canary,
+        "__DIAG_COORD_CATEGORY_CANARY__",
+    ):
+        assert canary not in serialized
+    _assert_mock_device_idle(mock_device)
+
+
+def test_diagnostics_snapshot_hides_stale_optional_generation(
+    hass, mock_device
+):
+    stale_art_canary = "__DIAG_COORD_STALE_ART_CANARY__"
+    stale_app_canary = "__DIAG_COORD_STALE_APP_CANARY__"
+    coord = _make(hass, mock_device)
+    coord.last_update_success = True
+    coord._art_fail_streak = 5
+    coord._upnp_fail_streak = 6
+    coord._unreachable_count = 7
+    coord._art_implies_power_on = False
+    coord.data = FrameData(
+        reachable=False,
+        power_state=None,
+        art_mode=None,
+        tv_mode=TvMode.OFF,
+        current_art=stale_art_canary,
+        running_app=stale_app_canary,
+        volume_level=0.42,
+        is_muted=False,
+        art_settings=ArtSettingsSnapshot(
+            supported=frozenset({ArtSettingKey.MOTION_SENSITIVITY}),
+            motion_sensitivity="3",
+        ),
+        slideshow=SlideshowState(
+            mode=SlideshowMode.SEQUENTIAL,
+            duration_minutes=15,
+            category_id="__DIAG_COORD_STALE_CATEGORY_CANARY__",
+        ),
+        optional_art_generation=7,
+    )
+    mock_device.art_generation = 8
+    mock_device.art_ready = False
+    mock_device.art_session_state = ArtSessionState.BACKOFF
+    mock_device.remote_confirmed = False
+
+    snapshot = coord.diagnostics_snapshot()
+
+    assert snapshot == {
+        "last_update_success": True,
+        "reachable": False,
+        "power_state": None,
+        "tv_mode": "off",
+        "art_mode_known": False,
+        "art_session_state": "backoff",
+        "art_session_ready": False,
+        "art_session_generation": 8,
+        "art_failures": 5,
+        "upnp_failures": 6,
+        "unreachable_failures": 7,
+        "standby_precedence_learned": False,
+        "supported_settings": [],
+        "slideshow_known": False,
+        "remote_confirmed": False,
+    }
+    assert {
+        "current_art",
+        "running_app",
+        "volume_level",
+        "is_muted",
+        "host",
+        "mac",
+        "token",
+    }.isdisjoint(snapshot)
+    serialized = repr(snapshot)
+    for canary in (
+        stale_art_canary,
+        stale_app_canary,
+        "__DIAG_COORD_STALE_CATEGORY_CANARY__",
+    ):
+        assert canary not in serialized
+    _assert_mock_device_idle(mock_device)
+
+
 async def test_update_watching(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     coord = _make(hass, mock_device)

@@ -93,6 +93,36 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             name: dict(app) for name, app in DEFAULT_APP_MAP.items()
         }
 
+    def diagnostics_snapshot(self) -> dict[str, Any]:
+        """Return the strict, zero-I/O diagnostics allowlist."""
+        data = self.data
+        generation = self.device.art_generation
+        optional_current = data.optional_art_generation == generation
+        settings = data.art_settings if optional_current else None
+        return {
+            "last_update_success": self.last_update_success,
+            "reachable": data.reachable,
+            "power_state": data.power_state,
+            "tv_mode": data.tv_mode.value,
+            "art_mode_known": data.art_mode is not None,
+            "art_session_state": self.device.art_session_state.value,
+            "art_session_ready": self.device.art_ready,
+            "art_session_generation": generation,
+            "art_failures": self._art_fail_streak,
+            "upnp_failures": self._upnp_fail_streak,
+            "unreachable_failures": self._unreachable_count,
+            "standby_precedence_learned": self._art_implies_power_on,
+            "supported_settings": (
+                sorted(setting.value for setting in settings.supported)
+                if settings is not None
+                else []
+            ),
+            "slideshow_known": (
+                optional_current and data.slideshow is not None
+            ),
+            "remote_confirmed": self.device.remote_confirmed,
+        }
+
     def _last_stable(self) -> TvMode:
         if self.data is not None and self.data.tv_mode is not TvMode.UNKNOWN:
             return self.data.tv_mode
