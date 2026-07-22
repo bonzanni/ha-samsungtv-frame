@@ -856,14 +856,41 @@ async def test_invalid_optional_setting_does_not_fail_healthy_session(
 ):
     device._art.request = AsyncMock()
 
-    with pytest.raises(ValueError, match=f"^{message}$"):
+    with pytest.raises(ValueError, match=f"^{message}$") as raised:
         await getattr(device, method)(argument)
 
+    assert type(raised.value).__name__ == "InvalidArtSettingError"
     device._art_session.async_ensure_ready.assert_awaited_once_with(
         ArtSessionTrigger.USER
     )
     device._art.request.assert_not_awaited()
     device._art_session.async_connection_failed.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(ValueError("invalid protocol value"), id="value-error"),
+        pytest.param(
+            json.JSONDecodeError("invalid response", "{", 0),
+            id="json-decode-error",
+        ),
+    ],
+)
+async def test_non_setting_value_error_reports_mutation_connection_failure(
+    device, error
+):
+    device._art.upload = AsyncMock(side_effect=error)
+
+    with pytest.raises(type(error)) as raised:
+        await device.async_upload_art(b"image", "jpg", "none")
+
+    assert raised.value is error
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.USER
+    )
+    device._art.upload.assert_awaited_once_with(b"image", "jpg", "none")
+    device._art_session.async_connection_failed.assert_awaited_once_with(error)
 
 
 @pytest.mark.parametrize(

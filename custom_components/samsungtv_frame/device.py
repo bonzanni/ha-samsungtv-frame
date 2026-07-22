@@ -35,7 +35,12 @@ from .const import (
     REMOTE_CLOSE_DEADLINE,
     REMOTE_DRAIN_DEADLINE,
 )
-from .frame_art import ArtEventCallback, FrameArt, TaskFactory
+from .frame_art import (
+    ArtEventCallback,
+    FrameArt,
+    InvalidArtSettingError,
+    TaskFactory,
+)
 from .frame_remote import FrameRemote, RemotePairingRequired
 from .models import ArtSettingKey, ArtSettingsSnapshot, SlideshowState
 from .rest import PrivacySafeSamsungTVAsyncRest
@@ -366,7 +371,7 @@ class FrameDevice:
             raise ConnectionFailure("Art session is unavailable")
         try:
             return await operation()
-        except (ResponseError, ValueError):
+        except (ResponseError, InvalidArtSettingError):
             raise
         except Exception as err:  # noqa: BLE001
             await self._art_session.async_connection_failed(err)

@@ -61,6 +61,10 @@ class ArtCleanupPending(ConnectionFailure):
     """A prior Art generation still owns live cleanup work."""
 
 
+class InvalidArtSettingError(ValueError):
+    """A local Art setting value is outside its supported domain."""
+
+
 @dataclass(slots=True)
 class _PendingResponse:
     """A response waiter registered with the receiver."""
@@ -409,13 +413,13 @@ class FrameArt(SamsungTVWSAsyncConnection):
     async def set_motion_timer(self, value: str) -> dict[str, Any]:
         """Set the motion timer to one supported wire value."""
         if not isinstance(value, str) or value not in MOTION_TIMERS:
-            raise ValueError("Invalid motion timer")
+            raise InvalidArtSettingError("Invalid motion timer")
         return await self.request("set_motion_timer", value=value)
 
     async def set_motion_sensitivity(self, value: str) -> dict[str, Any]:
         """Set motion sensitivity to one supported wire value."""
         if not isinstance(value, str) or value not in MOTION_SENSITIVITIES:
-            raise ValueError("Invalid motion sensitivity")
+            raise InvalidArtSettingError("Invalid motion sensitivity")
         return await self.request("set_motion_sensitivity", value=value)
 
     async def set_brightness_sensor_setting(
@@ -423,7 +427,9 @@ class FrameArt(SamsungTVWSAsyncConnection):
     ) -> dict[str, Any]:
         """Enable or disable automatic Art Mode brightness."""
         if not isinstance(enabled, bool):
-            raise ValueError("Brightness sensor state must be boolean")
+            raise InvalidArtSettingError(
+                "Brightness sensor state must be boolean"
+            )
         return await self.request(
             "set_brightness_sensor_setting",
             value="on" if enabled else "off",
