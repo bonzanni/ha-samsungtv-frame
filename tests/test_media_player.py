@@ -1,5 +1,5 @@
 # tests/test_media_player.py
-from unittest.mock import patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
@@ -295,14 +295,39 @@ async def test_delete_art_service(hass, mock_device):
 async def test_set_slideshow_service(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = False
-    await _setup(hass, mock_device)
-    await hass.services.async_call(
-        DOMAIN, "set_slideshow",
-        {"entity_id": ENTITY, "duration_minutes": 60, "shuffle": False,
-         "category_id": "MY-C0004"},
-        blocking=True,
-    )
-    mock_device.async_set_slideshow.assert_awaited_once_with(60, False, "MY-C0004")
+    entry = await _setup(hass, mock_device)
+    coordinator = entry.runtime_data
+    with (
+        patch.object(
+            coordinator,
+            "async_request_art_reconcile",
+            new_callable=AsyncMock,
+        ) as reconcile,
+        patch.object(
+            coordinator,
+            "async_request_refresh",
+            new_callable=AsyncMock,
+        ) as ordinary_refresh,
+    ):
+        await hass.services.async_call(
+            DOMAIN, "set_slideshow",
+            {"entity_id": ENTITY, "duration_minutes": 60, "shuffle": False,
+             "category_id": "MY-C0004"},
+            blocking=True,
+        )
+        await hass.services.async_call(
+            DOMAIN, "set_slideshow",
+            {"entity_id": ENTITY, "duration_minutes": 30, "shuffle": True,
+             "category_id": "MY-C0002"},
+            blocking=True,
+        )
+
+    assert mock_device.async_set_slideshow.await_args_list == [
+        call(60, False, "MY-C0004"),
+        call(30, True, "MY-C0002"),
+    ]
+    assert reconcile.await_count == 2
+    ordinary_refresh.assert_not_awaited()
 
 
 async def test_change_matte_defaults_to_current_art(hass, mock_device):

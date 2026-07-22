@@ -8,7 +8,8 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import CONF_MAC
 from .coordinator import FrameConfigEntry, FrameCoordinator
-from .entity import FrameEntity
+from .entity import FrameEntity, art_setting_available
+from .models import ArtSettingKey
 
 PARALLEL_UPDATES = 0
 
@@ -45,14 +46,25 @@ class FrameArtBrightnessNumber(FrameEntity, NumberEntity):
 
     @property
     def native_value(self) -> int | None:
-        return self.coordinator.data.art_brightness
+        settings = self.coordinator.data.art_settings
+        return settings.brightness if settings is not None else None
+
+    @property
+    def available(self) -> bool:
+        settings = self.coordinator.data.art_settings
+        value = settings.brightness if settings is not None else None
+        return super().available and art_setting_available(
+            self.coordinator,
+            ArtSettingKey.BRIGHTNESS,
+            value,
+        )
 
     async def async_set_native_value(self, value: float) -> None:
         try:
             await self.coordinator.device.async_set_art_brightness(int(value))
         except Exception as err:  # noqa: BLE001
             raise HomeAssistantError("Failed to set art brightness") from err
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_request_art_reconcile()
 
 
 class FrameArtColorTempNumber(FrameEntity, NumberEntity):
@@ -74,11 +86,24 @@ class FrameArtColorTempNumber(FrameEntity, NumberEntity):
 
     @property
     def native_value(self) -> int | None:
-        return self.coordinator.data.art_color_temperature
+        settings = self.coordinator.data.art_settings
+        return settings.color_temperature if settings is not None else None
+
+    @property
+    def available(self) -> bool:
+        settings = self.coordinator.data.art_settings
+        value = (
+            settings.color_temperature if settings is not None else None
+        )
+        return super().available and art_setting_available(
+            self.coordinator,
+            ArtSettingKey.COLOR_TEMPERATURE,
+            value,
+        )
 
     async def async_set_native_value(self, value: float) -> None:
         try:
             await self.coordinator.device.async_set_color_temperature(int(value))
         except Exception as err:  # noqa: BLE001
             raise HomeAssistantError("Failed to set art color temperature") from err
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_request_art_reconcile()

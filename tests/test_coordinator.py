@@ -506,13 +506,11 @@ async def test_reconcile_reads_one_settings_snapshot_and_one_slideshow(
     assert data.art_settings is SETTINGS
     assert data.slideshow is SLIDESHOW
     assert data.optional_art_generation == 4
-    assert data.art_brightness == SETTINGS.brightness
-    assert data.art_color_temperature == SETTINGS.color_temperature
+    assert not hasattr(data, "art_brightness")
+    assert not hasattr(data, "art_color_temperature")
     mock_device.async_get_current_art.assert_awaited_once()
     mock_device.async_get_art_settings.assert_awaited_once()
     mock_device.async_get_slideshow_state.assert_awaited_once()
-    mock_device.async_get_art_brightness.assert_not_awaited()
-    mock_device.async_get_color_temperature.assert_not_awaited()
 
 
 async def test_art_extras_skipped_when_watching_but_cache_held(hass, mock_device):
@@ -568,8 +566,6 @@ async def test_off_hides_all_art_snapshots_and_optional_generation(
     data = await coord._async_update_data()  # past OFF debounce
     assert data.tv_mode is TvMode.OFF
     assert data.current_art is None
-    assert data.art_brightness is None
-    assert data.art_color_temperature is None
     assert data.art_settings is None
     assert data.slideshow is None
     assert data.optional_art_generation is None
@@ -579,7 +575,8 @@ async def test_image_selected_push_updates_current_art(hass, mock_device):
     coord = _make(hass, mock_device)
     coord.data = FrameData(
         reachable=True, power_state="on", art_mode=True,
-        tv_mode=TvMode.ART_MODE, current_art="MY_F0001", art_brightness=5,
+        tv_mode=TvMode.ART_MODE, current_art="MY_F0001",
+        art_settings=SETTINGS,
     )
     coord._art_mode = True
     coord.handle_art_event(
@@ -588,7 +585,7 @@ async def test_image_selected_push_updates_current_art(hass, mock_device):
     )
     assert coord.data.current_art == "MY_F0042"
     assert coord.data.tv_mode is TvMode.ART_MODE  # mode untouched
-    assert coord.data.art_brightness == 5
+    assert coord.data.art_settings is SETTINGS
 
 
 @pytest.mark.parametrize(
@@ -617,8 +614,6 @@ async def test_named_push_events_preserve_optional_snapshots_by_identity(
         art_mode=False,
         tv_mode=TvMode.WATCHING,
         current_art="MY_F0001",
-        art_brightness=SETTINGS.brightness,
-        art_color_temperature=SETTINGS.color_temperature,
         art_settings=SETTINGS,
         slideshow=SLIDESHOW,
         optional_art_generation=4,
@@ -677,7 +672,6 @@ async def test_ready_transition_exposes_generation_mismatch_while_refresh_blocke
         art_mode=True,
         tv_mode=TvMode.ART_MODE,
         current_art="MY_F0001",
-        art_brightness=SETTINGS_ONE.brightness,
         art_settings=SETTINGS_ONE,
         slideshow=SLIDESHOW_ONE,
         optional_art_generation=1,
@@ -959,17 +953,11 @@ async def test_current_art_ready_loss_hides_optional_cache_but_live_none_is_curr
     after_live_none = await coord._async_update_data()
 
     assert after_loss.current_art == "MY_F0001"
-    assert after_loss.art_brightness is None
-    assert after_loss.art_color_temperature is None
     assert after_loss.art_settings is None
     assert after_loss.slideshow is None
     assert after_loss.optional_art_generation is None
     assert calls_after_loss == (2, 2, 1, 1)
-    assert (
-        after_live_none.current_art,
-        after_live_none.art_brightness,
-        after_live_none.art_color_temperature,
-    ) == (None, None, None)
+    assert after_live_none.current_art is None
     assert after_live_none.art_settings is None
     assert after_live_none.slideshow is None
     assert after_live_none.optional_art_generation == 3
@@ -1022,8 +1010,6 @@ async def test_generation_loss_discards_both_optional_snapshots(
     data = await coord._async_update_data()
 
     assert data.tv_mode is TvMode.ART_MODE
-    assert data.art_brightness is None
-    assert data.art_color_temperature is None
     assert data.art_settings is None
     assert data.slideshow is None
     assert data.optional_art_generation is None

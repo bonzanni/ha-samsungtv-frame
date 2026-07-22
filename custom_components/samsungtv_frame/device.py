@@ -466,10 +466,6 @@ class FrameDevice:
         self._slideshow_dialect = dialect
         return parse_slideshow(payload) if isinstance(payload, dict) else None
 
-    async def async_get_art_brightness(self) -> int | None:
-        settings = await self.async_get_art_settings()
-        return settings.brightness if settings is not None else None
-
     async def async_set_art_brightness(self, value: int) -> None:
         await self._async_art_mutation(
             lambda: self._art.set_brightness(value)
@@ -520,10 +516,6 @@ class FrameDevice:
         await self._async_art_mutation(
             lambda: self._art.set_favourite(content_id, favourite)
         )
-
-    async def async_get_color_temperature(self) -> int | None:
-        settings = await self.async_get_art_settings()
-        return settings.color_temperature if settings is not None else None
 
     async def async_set_color_temperature(self, value: int) -> None:
         await self._async_art_mutation(

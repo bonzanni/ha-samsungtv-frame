@@ -45,12 +45,38 @@
       "art_brightness": {"name": "Art brightness"},
       "art_color_temperature": {"name": "Art color temperature"}
     },
+    "select": {
+      "art_sleep_after": {
+        "name": "Art sleep after",
+        "state": {
+          "off": "Off",
+          "5": "5 minutes",
+          "15": "15 minutes",
+          "30": "30 minutes",
+          "60": "1 hour",
+          "120": "2 hours",
+          "240": "4 hours"
+        }
+      },
+      "art_motion_sensitivity": {"name": "Art motion sensitivity"}
+    },
     "sensor": {
       "tv_mode": {"name": "TV mode",
         "state": {"off": "Off", "watching": "Watching", "art_mode": "Art mode"}},
-      "current_art": {"name": "Current art"}
+      "current_art": {"name": "Current art"},
+      "art_slideshow": {
+        "name": "Art slideshow",
+        "state": {
+          "off": "Off",
+          "sequential": "Sequential",
+          "shuffle": "Shuffle"
+        }
+      }
     },
-    "switch": {"art_mode_switch": {"name": "Art mode switch"}}
+    "switch": {
+      "art_mode_switch": {"name": "Art mode switch"},
+      "art_brightness_sensor": {"name": "Art brightness sensor"}
+    }
   },
   "device_automation": {
     "trigger_type": {

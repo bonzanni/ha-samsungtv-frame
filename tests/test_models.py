@@ -1,4 +1,4 @@
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 
 import pytest
 
@@ -57,6 +57,14 @@ def test_frame_data_optional_art_details_default_unknown():
     assert data.art_settings is None
     assert data.slideshow is None
     assert data.optional_art_generation is None
+
+
+def test_frame_data_has_one_canonical_art_settings_state():
+    field_names = {field.name for field in fields(FrameData)}
+
+    assert "art_brightness" not in field_names
+    assert "art_color_temperature" not in field_names
+    assert "art_settings" in field_names
 
 
 def test_art_detail_snapshots_are_immutable():

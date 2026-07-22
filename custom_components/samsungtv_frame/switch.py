@@ -1,4 +1,4 @@
-"""Art-mode switch for Samsung Frame TV — the clickable art⇄watching toggle."""
+"""Switch entities for Samsung Frame TV."""
 from __future__ import annotations
 
 from typing import Any
@@ -6,12 +6,13 @@ from typing import Any
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import CONF_MAC
 from .coordinator import FrameConfigEntry, FrameCoordinator
-from .entity import FrameEntity
-from .models import TvMode
+from .entity import FrameEntity, art_setting_available
+from .models import ArtSettingKey, TvMode
 
 PARALLEL_UPDATES = 0
 
@@ -21,7 +22,12 @@ async def async_setup_entry(
     entry: FrameConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    async_add_entities([FrameArtModeSwitch(entry.runtime_data)])
+    async_add_entities(
+        [
+            FrameArtModeSwitch(entry.runtime_data),
+            FrameBrightnessSensorSwitch(entry.runtime_data),
+        ]
+    )
 
 
 class FrameArtModeSwitch(FrameEntity, SwitchEntity):
@@ -61,3 +67,50 @@ class FrameArtModeSwitch(FrameEntity, SwitchEntity):
         except Exception as err:  # noqa: BLE001
             raise HomeAssistantError("Failed to switch art mode") from err
         await self.coordinator.async_request_refresh()
+
+
+class FrameBrightnessSensorSwitch(FrameEntity, SwitchEntity):
+    """Configure the Art Mode automatic brightness sensor."""
+
+    _attr_translation_key = "art_brightness_sensor"
+    _attr_name = "Art brightness sensor"
+    _attr_icon = "mdi:brightness-auto"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: FrameCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.config_entry.data[CONF_MAC]}_art_brightness_sensor"
+        )
+
+    @property
+    def available(self) -> bool:
+        settings = self.coordinator.data.art_settings
+        value = (
+            settings.brightness_sensor_enabled if settings is not None else None
+        )
+        return super().available and art_setting_available(
+            self.coordinator,
+            ArtSettingKey.BRIGHTNESS_SENSOR,
+            value,
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        settings = self.coordinator.data.art_settings
+        return (
+            settings.brightness_sensor_enabled if settings is not None else None
+        )
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._async_set(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._async_set(False)
+
+    async def _async_set(self, enabled: bool) -> None:
+        try:
+            await self.coordinator.device.async_set_brightness_sensor(enabled)
+        except Exception as err:  # noqa: BLE001
+            raise HomeAssistantError("Failed to set art brightness sensor") from err
+        await self.coordinator.async_request_art_reconcile()

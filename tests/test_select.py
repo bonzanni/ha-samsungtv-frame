@@ -1,9 +1,12 @@
-# tests/test_number.py
 from dataclasses import replace
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity import EntityCategory
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.samsungtv_frame.const import (
@@ -18,35 +21,38 @@ from custom_components.samsungtv_frame.models import (
     TvMode,
 )
 
-BRIGHTNESS = "number.samsung_frame_tv_art_brightness"
-COLOR_TEMPERATURE = "number.samsung_frame_tv_art_color_temperature"
+SLEEP_AFTER = "select.samsung_frame_tv_art_sleep_after"
+MOTION_SENSITIVITY = "select.samsung_frame_tv_art_motion_sensitivity"
 SETTINGS = ArtSettingsSnapshot(
     supported=frozenset(
-        {ArtSettingKey.BRIGHTNESS, ArtSettingKey.COLOR_TEMPERATURE}
+        {
+            ArtSettingKey.MOTION_TIMER,
+            ArtSettingKey.MOTION_SENSITIVITY,
+        }
     ),
-    brightness=7,
-    color_temperature=-2,
+    motion_timer="30",
+    motion_sensitivity="2",
 )
-NUMBER_CASES = [
+SELECT_CASES = [
     pytest.param(
-        BRIGHTNESS,
-        ArtSettingKey.BRIGHTNESS,
-        "brightness",
-        7,
-        id="brightness",
+        SLEEP_AFTER,
+        ArtSettingKey.MOTION_TIMER,
+        "motion_timer",
+        "30",
+        id="sleep-after",
     ),
     pytest.param(
-        COLOR_TEMPERATURE,
-        ArtSettingKey.COLOR_TEMPERATURE,
-        "color_temperature",
-        -2,
-        id="color-temperature",
+        MOTION_SENSITIVITY,
+        ArtSettingKey.MOTION_SENSITIVITY,
+        "motion_sensitivity",
+        "2",
+        id="motion-sensitivity",
     ),
 ]
 
 
 def _settings_for(
-    key: ArtSettingKey, field: str, value: int | None
+    key: ArtSettingKey, field: str, value: str | None
 ) -> ArtSettingsSnapshot:
     return ArtSettingsSnapshot(
         supported=frozenset({key}),
@@ -89,10 +95,44 @@ async def _setup(
     return entry
 
 
+async def test_select_platform_states_options_categories_and_stable_ids(
+    hass, mock_device
+):
+    await _setup(hass, mock_device)
+
+    sleep = hass.states.get(SLEEP_AFTER)
+    sensitivity = hass.states.get(MOTION_SENSITIVITY)
+    assert sleep.state == "30"
+    assert sleep.attributes["options"] == [
+        "off",
+        "5",
+        "15",
+        "30",
+        "60",
+        "120",
+        "240",
+    ]
+    assert sensitivity.state == "2"
+    assert sensitivity.attributes["options"] == ["1", "2", "3"]
+
+    registry = er.async_get(hass)
+    expected_ids = {
+        SLEEP_AFTER: "A0:D0:5B:86:CE:B7_art_sleep_after",
+        MOTION_SENSITIVITY: (
+            "A0:D0:5B:86:CE:B7_art_motion_sensitivity"
+        ),
+    }
+    for entity_id, unique_id in expected_ids.items():
+        entry = registry.async_get(entity_id)
+        assert entry is not None
+        assert entry.unique_id == unique_id
+        assert entry.entity_category is EntityCategory.CONFIG
+
+
 @pytest.mark.parametrize(
-    ("entity_id", "key", "field", "value"), NUMBER_CASES
+    ("entity_id", "key", "field", "value"), SELECT_CASES
 )
-async def test_optional_number_supported_state(
+async def test_optional_select_supported_state(
     hass, mock_device, entity_id, key, field, value
 ):
     await _setup(
@@ -101,14 +141,14 @@ async def test_optional_number_supported_state(
         settings=_settings_for(key, field, value),
     )
 
-    assert hass.states.get(entity_id).state == str(value)
+    assert hass.states.get(entity_id).state == value
 
 
 @pytest.mark.parametrize(
-    ("entity_id", "key", "field", "value"), NUMBER_CASES
+    ("entity_id", "key", "field", "value"), SELECT_CASES
 )
 @pytest.mark.parametrize("scenario", ["unsupported", "malformed"])
-async def test_optional_number_unavailable_when_capability_not_authoritative(
+async def test_optional_select_unavailable_when_capability_not_authoritative(
     hass, mock_device, entity_id, key, field, value, scenario
 ):
     settings = (
@@ -122,10 +162,10 @@ async def test_optional_number_unavailable_when_capability_not_authoritative(
 
 
 @pytest.mark.parametrize(
-    ("entity_id", "key", "field", "value"), NUMBER_CASES
+    ("entity_id", "key", "field", "value"), SELECT_CASES
 )
 @pytest.mark.parametrize("scenario", ["tv-off", "art-unready"])
-async def test_optional_number_unavailable_without_live_art_state(
+async def test_optional_select_unavailable_without_live_art_state(
     hass, mock_device, entity_id, key, field, value, scenario
 ):
     entry = await _setup(
@@ -148,9 +188,9 @@ async def test_optional_number_unavailable_without_live_art_state(
 
 
 @pytest.mark.parametrize(
-    ("entity_id", "key", "field", "value"), NUMBER_CASES
+    ("entity_id", "key", "field", "value"), SELECT_CASES
 )
-async def test_optional_number_unavailable_for_stale_generation(
+async def test_optional_select_unavailable_for_stale_generation(
     hass, mock_device, entity_id, key, field, value
 ):
     entry = await _setup(
@@ -172,20 +212,20 @@ async def test_optional_number_unavailable_for_stale_generation(
     ("entity_id", "values", "device_method"),
     [
         pytest.param(
-            BRIGHTNESS,
-            (8, 9),
-            "async_set_art_brightness",
-            id="brightness",
+            SLEEP_AFTER,
+            ("5", "120"),
+            "async_set_motion_timer",
+            id="sleep-after",
         ),
         pytest.param(
-            COLOR_TEMPERATURE,
-            (3, 4),
-            "async_set_color_temperature",
-            id="color-temperature",
+            MOTION_SENSITIVITY,
+            ("1", "3"),
+            "async_set_motion_sensitivity",
+            id="motion-sensitivity",
         ),
     ],
 )
-async def test_optional_number_mutations_force_two_direct_art_reconciles(
+async def test_select_mutations_force_two_direct_art_reconciles(
     hass, mock_device, entity_id, values, device_method
 ):
     entry = await _setup(hass, mock_device)
@@ -204,9 +244,9 @@ async def test_optional_number_mutations_force_two_direct_art_reconciles(
     ):
         for value in values:
             await hass.services.async_call(
-                "number",
-                "set_value",
-                {"entity_id": entity_id, "value": value},
+                "select",
+                "select_option",
+                {"entity_id": entity_id, "option": value},
                 blocking=True,
             )
 
@@ -221,20 +261,20 @@ async def test_optional_number_mutations_force_two_direct_art_reconciles(
     ("entity_id", "value", "device_method"),
     [
         pytest.param(
-            BRIGHTNESS,
-            8,
-            "async_set_art_brightness",
-            id="brightness",
+            SLEEP_AFTER,
+            "240",
+            "async_set_motion_timer",
+            id="sleep-after",
         ),
         pytest.param(
-            COLOR_TEMPERATURE,
-            3,
-            "async_set_color_temperature",
-            id="color-temperature",
+            MOTION_SENSITIVITY,
+            "3",
+            "async_set_motion_sensitivity",
+            id="motion-sensitivity",
         ),
     ],
 )
-async def test_optional_number_mutation_error_hides_requested_value(
+async def test_select_mutation_error_hides_requested_value(
     hass, mock_device, entity_id, value, device_method
 ):
     error = RuntimeError(
@@ -245,17 +285,56 @@ async def test_optional_number_mutation_error_hides_requested_value(
 
     with pytest.raises(HomeAssistantError) as raised:
         await hass.services.async_call(
-            "number",
-            "set_value",
-            {"entity_id": entity_id, "value": value},
+            "select",
+            "select_option",
+            {"entity_id": entity_id, "option": value},
             blocking=True,
         )
 
-    assert str(value) not in str(raised.value)
+    assert value not in str(raised.value)
     assert "private protocol" not in str(raised.value)
     expected = {
-        BRIGHTNESS: "Failed to set art brightness",
-        COLOR_TEMPERATURE: "Failed to set art color temperature",
+        SLEEP_AFTER: "Failed to set art sleep after",
+        MOTION_SENSITIVITY: "Failed to set art motion sensitivity",
     }
     assert str(raised.value) == expected[entity_id]
     assert raised.value.__cause__ is error
+
+
+def test_optional_entity_translations_are_exact_and_neutral():
+    root = Path(__file__).parents[1]
+    expected_sleep_states = {
+        "off": "Off",
+        "5": "5 minutes",
+        "15": "15 minutes",
+        "30": "30 minutes",
+        "60": "1 hour",
+        "120": "2 hours",
+        "240": "4 hours",
+    }
+    expected_slideshow_states = {
+        "off": "Off",
+        "sequential": "Sequential",
+        "shuffle": "Shuffle",
+    }
+
+    for relative_path in (
+        "custom_components/samsungtv_frame/strings.json",
+        "custom_components/samsungtv_frame/translations/en.json",
+    ):
+        payload = json.loads((root / relative_path).read_text())
+        entity = payload["entity"]
+        assert entity["select"]["art_sleep_after"] == {
+            "name": "Art sleep after",
+            "state": expected_sleep_states,
+        }
+        assert entity["select"]["art_motion_sensitivity"] == {
+            "name": "Art motion sensitivity"
+        }
+        assert entity["switch"]["art_brightness_sensor"] == {
+            "name": "Art brightness sensor"
+        }
+        assert entity["sensor"]["art_slideshow"] == {
+            "name": "Art slideshow",
+            "state": expected_slideshow_states,
+        }

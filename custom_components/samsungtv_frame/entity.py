@@ -6,6 +6,32 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_MAC, CONF_MODEL, DOMAIN
 from .coordinator import FrameCoordinator
+from .models import ArtSettingKey, TvMode
+
+
+def optional_art_state_fresh(coordinator: FrameCoordinator) -> bool:
+    """Return whether optional Art state is authoritative right now."""
+    return (
+        coordinator.device.art_ready
+        and coordinator.data.optional_art_generation
+        == coordinator.device.art_generation
+        and coordinator.data.tv_mode in (TvMode.WATCHING, TvMode.ART_MODE)
+    )
+
+
+def art_setting_available(
+    coordinator: FrameCoordinator,
+    key: ArtSettingKey,
+    value: object | None,
+) -> bool:
+    """Return whether one advertised setting has a current valid value."""
+    settings = coordinator.data.art_settings
+    return (
+        optional_art_state_fresh(coordinator)
+        and settings is not None
+        and key in settings.supported
+        and value is not None
+    )
 
 
 class FrameEntity(CoordinatorEntity[FrameCoordinator]):

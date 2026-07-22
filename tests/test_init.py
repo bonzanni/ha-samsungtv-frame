@@ -2,6 +2,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
+from homeassistant.const import Platform
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from samsungtvws.exceptions import ConnectionFailure
 
@@ -12,13 +13,17 @@ from custom_components.samsungtv_frame import (
     async_unload_entry,
 )
 from custom_components.samsungtv_frame.const import (
-    CONF_HOST, CONF_MAC, CONF_TOKEN, DOMAIN,
+    CONF_HOST, CONF_MAC, CONF_TOKEN, DOMAIN, PLATFORMS,
 )
 from custom_components.samsungtv_frame.coordinator import FrameCoordinator
 from custom_components.samsungtv_frame.device import FrameDevice
 
 
 _MISSING_TOKEN = object()
+
+
+def test_select_platform_is_registered_for_config_entry_setup():
+    assert Platform.SELECT in PLATFORMS
 
 
 def _make_entry(token="tok") -> MockConfigEntry:

@@ -296,6 +296,7 @@ class FrameMediaPlayer(FrameEntity, MediaPlayerEntity):
             )
         except Exception as err:  # noqa: BLE001
             raise HomeAssistantError("Failed to configure the slideshow") from err
+        await self.coordinator.async_request_art_reconcile()
 
     async def async_change_matte_service(
         self, matte_id: str, content_id: str | None = None

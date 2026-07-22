@@ -367,17 +367,7 @@ async def test_background_art_getter_returns_none_without_session_open(device):
     [
         ("async_get_artmode", (), "get_artmode"),
         ("async_get_current_art", (), "get_current"),
-        (
-            "async_get_art_brightness",
-            (),
-            "get_art_settings_payload",
-        ),
         ("async_get_art_thumbnail", ("MY_F0001",), "get_thumbnail"),
-        (
-            "async_get_color_temperature",
-            (),
-            "get_art_settings_payload",
-        ),
         ("async_get_art_settings", (), "get_art_settings_payload"),
         ("async_get_slideshow_state", (), "get_auto_rotation_status"),
     ],
@@ -399,8 +389,6 @@ async def test_background_art_getters_never_ensure_or_open(
     [
         ("async_get_artmode", "get_artmode"),
         ("async_get_current_art", "get_current"),
-        ("async_get_art_brightness", "get_art_settings_payload"),
-        ("async_get_color_temperature", "get_art_settings_payload"),
         ("async_get_art_settings", "get_art_settings_payload"),
         ("async_get_slideshow_state", "get_auto_rotation_status"),
     ],
@@ -961,23 +949,9 @@ async def test_optional_setting_transport_failure_reports_without_retry(
     device._art_session.async_connection_failed.assert_awaited_once_with(error)
 
 
-@pytest.mark.parametrize(
-    ("method", "attribute", "expected"),
-    [
-        ("async_get_art_brightness", "brightness", 7),
-        ("async_get_color_temperature", "color_temperature", -2),
-    ],
-)
-async def test_numeric_compatibility_getters_project_aggregate_snapshot(
-    device, method, attribute, expected
-):
-    device.async_get_art_settings = AsyncMock(
-        return_value=EXPECTED_ART_SETTINGS
-    )
-
-    assert await getattr(device, method)() == expected
-    device.async_get_art_settings.assert_awaited_once_with()
-    assert getattr(EXPECTED_ART_SETTINGS, attribute) == expected
+def test_numeric_compatibility_getters_are_removed():
+    assert not hasattr(FrameDevice, "async_get_art_brightness")
+    assert not hasattr(FrameDevice, "async_get_color_temperature")
 
 
 @pytest.mark.parametrize(
@@ -985,17 +959,7 @@ async def test_numeric_compatibility_getters_project_aggregate_snapshot(
     [
         ("async_get_artmode", (), "get_artmode"),
         ("async_get_current_art", (), "get_current"),
-        (
-            "async_get_art_brightness",
-            (),
-            "get_art_settings_payload",
-        ),
         ("async_get_art_thumbnail", ("MY_F0001",), "get_thumbnail"),
-        (
-            "async_get_color_temperature",
-            (),
-            "get_art_settings_payload",
-        ),
         ("async_get_art_settings", (), "get_art_settings_payload"),
         ("async_get_slideshow_state", (), "get_auto_rotation_status"),
     ],
@@ -2326,7 +2290,6 @@ async def test_all_art_operations_stay_off_executor(hass, device):
         await device.async_get_current_art()
         await device.async_get_art_settings()
         await device.async_get_slideshow_state()
-        await device.async_get_art_brightness()
         await device.async_set_art_brightness(6)
         await device.async_select_art("MY_F0001", True)
         await device.async_upload_art(b"image", "jpg", "none")
@@ -2335,7 +2298,6 @@ async def test_all_art_operations_stay_off_executor(hass, device):
         await device.async_change_matte("MY_F0001", "shadowbox_polar")
         await device.async_set_photo_filter("MY_F0001", "ink")
         await device.async_set_favourite("MY_F0001", True)
-        await device.async_get_color_temperature()
         await device.async_set_color_temperature(4)
         await device.async_set_slideshow(60, False, "MY-C0002")
         await device.async_set_motion_timer("15")

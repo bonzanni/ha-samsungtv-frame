@@ -233,16 +233,6 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             art_mode=False if is_off else effective_art_mode,
             tv_mode=mode,
             current_art=None if is_off else self._current_art,
-            art_brightness=(
-                published_settings.brightness
-                if published_settings is not None
-                else None
-            ),
-            art_color_temperature=(
-                published_settings.color_temperature
-                if published_settings is not None
-                else None
-            ),
             running_app=running_app,
             volume_level=volume_level,
             is_muted=is_muted,
