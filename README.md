@@ -23,6 +23,20 @@ Accurate OFF / WATCHING / ART-MODE state for Samsung Frame TVs, plus power and b
   your own uploaded images display normally.
 - `number.samsung_frame_tv_art_brightness` — art-mode panel brightness (0–10)
 - `number.samsung_frame_tv_art_color_temperature` — art-mode color temperature (-5…5)
+- `select.samsung_frame_tv_art_sleep_after` — local Sleep After control with `off`, 5, 15,
+  30, 60, 120, and 240-minute choices
+- `select.samsung_frame_tv_art_motion_sensitivity` — local motion-sensitivity control
+  using the TV's verified neutral protocol states `1`, `2`, and `3`
+- `switch.samsung_frame_tv_art_brightness_sensor` — enable or disable the TV's local
+  automatic art-brightness sensor
+- `sensor.samsung_frame_tv_art_slideshow` — read-only slideshow state (`off`,
+  `sequential`, or `shuffle`) with `duration_minutes` and `category_id` attributes
+
+The brightness, color-temperature, Sleep After, motion-sensitivity, brightness-sensor,
+and slideshow entities use authoritative state from the current local Art session; no
+SmartThings or other cloud service is required. An unavailable entity means the TV,
+Art session, or feature does not currently have an authoritative value—for example,
+the TV is off, the session is not ready, or the setting is unsupported or invalid.
 
 ## Services
 - `samsungtv_frame.send_key` — send any Samsung remote key code (e.g. `KEY_HOME`, `KEY_MENU`)
@@ -32,7 +46,9 @@ Accurate OFF / WATCHING / ART-MODE state for Samsung Frame TVs, plus power and b
   inside `allowlist_external_dirs`); optionally shows it immediately
 - `samsungtv_frame.delete_art` — remove an artwork by content id (irreversible)
 - `samsungtv_frame.set_slideshow` — rotate art every N minutes (0 disables); categories:
-  `MY-C0002` my pictures, `MY-C0004` favourites, `MY-C0008` store
+  `MY-C0002` my pictures, `MY-C0004` favourites, `MY-C0008` store. This remains the
+  only writable slideshow surface and applies duration, shuffle order, and category
+  together as one atomic change; `sensor.samsung_frame_tv_art_slideshow` is read-only.
 - `samsungtv_frame.change_matte` / `set_photo_filter` / `set_favourite` — style an artwork
   (all default to the currently displayed one)
 - `media_player.play_media` with `media_content_type: app` — launch a catalog app name or a
@@ -66,6 +82,13 @@ required when upgrading.
 
 Art commands, push events, thumbnails, uploads, pairing, and shutdown use cancellable
 async I/O.
+
+## Diagnostics
+
+Home Assistant's **Download diagnostics** action reports an allowlisted snapshot of
+integration health, Art-session readiness, and known local feature support without
+contacting the TV. It excludes the TV address, MAC, tokens, entry identifiers, artwork
+IDs, app/media state, raw payloads, and arbitrary configuration data.
 
 ## Setup
 Settings → Devices & Services → Add Integration → "Samsung Frame TV" → enter the IP.
