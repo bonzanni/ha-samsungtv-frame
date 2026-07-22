@@ -410,11 +410,22 @@ async def test_optional_setters_correlate_exact_ls03b_payload(
     [
         *[
             ("set_motion_timer", value, "Invalid motion timer")
-            for value in (None, False, 5, "", "0", "1", "10", "241")
+            for value in (
+                None,
+                False,
+                5,
+                "",
+                "0",
+                "1",
+                "10",
+                "241",
+                [],
+                {},
+            )
         ],
         *[
             ("set_motion_sensitivity", value, "Invalid motion sensitivity")
-            for value in (None, False, 1, "", "0", "4")
+            for value in (None, False, 1, "", "0", "4", [], {})
         ],
         *[
             (

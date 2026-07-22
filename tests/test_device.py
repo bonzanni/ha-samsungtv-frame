@@ -832,6 +832,41 @@ async def test_optional_setting_mutations_ensure_user_once(
 
 
 @pytest.mark.parametrize(
+    ("method", "argument", "message"),
+    [
+        (
+            "async_set_motion_timer",
+            "10",
+            "Invalid motion timer",
+        ),
+        (
+            "async_set_motion_sensitivity",
+            "0",
+            "Invalid motion sensitivity",
+        ),
+        (
+            "async_set_brightness_sensor",
+            "on",
+            "Brightness sensor state must be boolean",
+        ),
+    ],
+)
+async def test_invalid_optional_setting_does_not_fail_healthy_session(
+    device, method, argument, message
+):
+    device._art.request = AsyncMock()
+
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        await getattr(device, method)(argument)
+
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.USER
+    )
+    device._art.request.assert_not_awaited()
+    device._art_session.async_connection_failed.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
     ("method", "argument", "delegate"),
     [
         ("async_set_motion_timer", "15", "set_motion_timer"),

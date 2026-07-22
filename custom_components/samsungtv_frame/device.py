@@ -366,7 +366,7 @@ class FrameDevice:
             raise ConnectionFailure("Art session is unavailable")
         try:
             return await operation()
-        except ResponseError:
+        except (ResponseError, ValueError):
             raise
         except Exception as err:  # noqa: BLE001
             await self._art_session.async_connection_failed(err)
