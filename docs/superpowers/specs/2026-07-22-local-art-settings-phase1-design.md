@@ -116,11 +116,14 @@ evidence the UI exposes stable neutral options (`1`, `2`, `3`).
 - `duration_minutes: int`
 - `category_id: str | None`
 
-`FrameData` gains defaulted `art_settings` and `slideshow` fields. Existing
-brightness and color-temperature entities are migrated to the canonical
-`ArtSettingsSnapshot`. If temporary compatibility projections remain during
-implementation, they must be derived from that snapshot rather than cached
-independently.
+`FrameData` gains defaulted `art_settings`, `slideshow`, and
+`optional_art_generation` fields. Existing brightness and color-temperature
+entities are migrated to the canonical `ArtSettingsSnapshot`. If temporary
+compatibility projections remain during implementation, they must be derived
+from that snapshot rather than cached independently. Entity availability
+compares `optional_art_generation` with the live Art-session generation so a
+new READY generation cannot briefly expose the previous generation's values
+while its scheduled refresh is still pending.
 
 Adopting the snapshot freshness rule is an intentional behaviour change for
 the shipped Art brightness and color-temperature entities. Today those
@@ -189,23 +192,18 @@ Validate domains before sending. Mutations run through the existing USER
 readiness path, while background reads must never open, pair, or retry a
 session.
 
-A mutation is successful only when one of these protocol behaviours has been
-verified and fixture-tested:
+Sanitized direct LS03B evidence captured on 2026-07-22 establishes one
+deterministic acknowledgement shape for all three commands: the response
+contains the matching `request_id`, an `event` equal to the request command,
+and the requested `value`. Immediate aggregate readback confirmed each change,
+and every original setting was restored. Therefore each adapter setter uses a
+normal correlated `request()` with no guessed UUID-less sub-event.
 
-1. a terminal response correlates by `request_id`/`id`;
-2. an exact UUID-less terminal sub-event is registered before send; or
-3. the command is deliberately implemented as serialized send followed by an
-   authoritative readback that confirms the requested value.
-
-Do not guess an acknowledgement event and do not treat a timeout as success.
-An acknowledgement timeout is indeterminate: remove its waiter, retire the
-generation, do not retry the mutation, do not update capability/state caches,
-and raise a generic Home Assistant error. Only a correlated `ResponseError`
-can select a protocol fallback.
-
-Before writable settings are released, capture sanitized LS03B protocol
-evidence for the acknowledgement shape. This is a protocol verification gate,
-not permission to deploy integration code to the production N150.
+Do not treat a timeout as success. An acknowledgement timeout is indeterminate:
+the existing request path retires the Art generation, the mutation is not
+retried, cached capability/state is unchanged, and Home Assistant receives a
+generic error. Only a correlated `ResponseError` can select a protocol
+fallback.
 
 ## Capability Semantics
 
@@ -222,8 +220,8 @@ For each setting, the internal state is unknown, supported, or unsupported:
 For slideshow, track the generation-scoped dialect as unknown,
 auto-rotation, legacy, or unsupported. A successful correlated getter chooses
 the dialect. One correlated modern `ResponseError` permits the legacy probe;
-two correlated `ResponseError` results mean unsupported. Mutations never
-promote or demote capability state.
+two correlated `ResponseError` results mean unsupported.
+Mutations never promote or demote capability state.
 
 All optional-feature failures are isolated from Art-mode failure accounting.
 They cannot increment `_art_fail_streak`, make `tv_mode` unknown, or close a
@@ -260,8 +258,8 @@ Add `Platform.SELECT` and `select.py`.
 
 - Entity category: configuration.
 - Stable unique-id suffix: `_art_motion_sensitivity`.
-- Preferred options are translated semantic keys only if their protocol
-  mapping is verified; otherwise use neutral `1`, `2`, `3` options.
+- Options are the neutral protocol states `1`, `2`, `3`; semantic labels are
+  not inferred without verified mapping.
 - Unknown or out-of-domain values make the entity unavailable rather than
   dynamically adding protocol data as options.
 
@@ -278,8 +276,9 @@ Add `Platform.SELECT` and `select.py`.
 
 All optional entities are created unconditionally because Art capabilities
 may be unknown during platform setup. They are available only when the
-coordinator is healthy, the TV is not OFF, the Art generation is READY, the
-capability is supported, and the current value is valid.
+coordinator is healthy, TV mode is one of WATCHING/ART, the Art generation is
+READY, the published optional-state generation matches the live generation,
+the capability is supported, and the current value is valid.
 
 The existing atomic slideshow service remains the only writable slideshow
 surface. Splitting duration, order, enabled state, and category into separate
@@ -356,12 +355,13 @@ Implementation is test-driven. Required coverage includes:
 - exactly one aggregate settings request per reconciliation;
 - legacy brightness/color fallback only on correlated `ResponseError`;
 - no fallback on timeout, transport failure, or malformed data;
-- exact setter payloads and verified acknowledgement fixtures;
 - background reads never ensure readiness;
-- user mutations do ensure readiness;
+- user mutations ensure readiness exactly once and are never retried;
 - `ResponseError` does not reset a healthy Art session;
 - transport/indeterminate failures retire the affected generation without
-  retrying a mutation.
+  retrying a mutation;
+- exact setter request/acknowledgement fixtures match the sanitized live
+  response shapes.
 
 ### Coordinator
 
@@ -378,8 +378,8 @@ Implementation is test-driven. Required coverage includes:
 
 - states, options, attributes, translations, categories, and stable unique IDs;
 - TV-off, unready, unknown, unsupported, and malformed-value availability;
-- successful calls followed by forced reconciliation;
-- generic error messages.
+- successful calls are followed by forced reconciliation;
+- mutation failures use generic error messages.
 
 ### Diagnostics and regression
 
@@ -398,6 +398,6 @@ The increment is complete only when:
 1. the new tests fail before their implementation and pass afterward;
 2. the full regression and lint suites pass;
 3. Terra and Fable review the implementation/spec conformance;
-4. setter acknowledgement fixtures reflect sanitized observed LS03B protocol
-   evidence, or the affected writable feature is deferred;
-5. no production N150 deployment or reload has occurred.
+4. setter acknowledgement fixtures match the sanitized observed LS03B shapes
+   and all live probe settings were restored;
+5. no production N150 deployment, unload, or reload has occurred.

@@ -17,13 +17,13 @@
 - Publish optional state only when fresh for the current READY generation. Optional failures never increment `_art_fail_streak` or change the core OFF/WATCHING/ART result.
 - Legacy brightness/color and slideshow fallback occurs only after a correlated `ResponseError`, never after malformed data, timeout, disconnect, or generation loss.
 - Motion timer wire values are exactly `off`, `5`, `15`, `30`, `60`, `120`, `240`; sensitivity wire values are exactly `1`, `2`, `3`; brightness-sensor wire values are exactly `on`, `off`.
-- Use neutral sensitivity options `1`, `2`, `3` unless direct LS03B evidence proves the semantic low/medium/high mapping.
+- Use neutral sensitivity options `1`, `2`, `3`; do not infer low/medium/high mapping.
 - Diagnostics perform no I/O and never include host, MAC, token, entry identifiers/title, content IDs, app names, volume/mute, raw payloads, exception text, or arbitrary options/private attributes.
 - Preserve existing entity unique IDs and config-entry schema/version. Add `Platform.SELECT`; diagnostics are auto-discovered and are not a platform.
 - Follow strict red-green-refactor: observe each production behavior test fail before implementing it.
 - Call external Claude only through the `claude-lesina` shell function. Prefer Fable for plan/code review; use Terra for independent architecture/spec-conformance review.
-- Do not deploy, reload new code, or run acceptance against the production N150. A setter protocol probe may temporarily unload/reload the already-installed integration only if needed to obtain sanitized acknowledgement evidence and must restore every setting; it must not copy or activate branch code.
-- If deterministic setter acknowledgement cannot be established without deploying branch code, defer the affected writable entity while retaining its read-only state; do not guess an acknowledgement schema.
+- Do not unload, reload, deploy, or run branch acceptance against the production N150. The authorized direct-TV evidence probe used only the installed library, correlated all three setters, restored all original settings, and copied no branch code; no further production probe is part of this plan.
+- Run the complete test suite before every task commit, in addition to that task's focused tests.
 
 ---
 
@@ -31,8 +31,8 @@
 
 - Create `custom_components/samsungtv_frame/art_settings.py`: pure parsing and normalization for aggregate Art settings and slideshow payloads.
 - Modify `custom_components/samsungtv_frame/models.py`: immutable Art-settings/slideshow enums and snapshots carried by `FrameData`.
-- Modify `custom_components/samsungtv_frame/frame_art.py`: raw aggregate/slideshow getters and domain-validated setting setters.
-- Modify `custom_components/samsungtv_frame/device.py`: background-only optional reads, generation-scoped dialect caches, and USER-triggered mutations.
+- Modify `custom_components/samsungtv_frame/frame_art.py`: raw aggregate/slideshow and direct legacy getters plus live-verified setting setters.
+- Modify `custom_components/samsungtv_frame/device.py`: background-only optional reads, generation-scoped dialect caches, and USER-triggered setting mutations.
 - Modify `custom_components/samsungtv_frame/coordinator.py`: aggregate generation-fenced reconciliation, direct post-write refresh, field-preserving push updates, and allowlisted diagnostics snapshot.
 - Modify `custom_components/samsungtv_frame/entity.py`: shared optional Art-setting availability predicate.
 - Modify `custom_components/samsungtv_frame/number.py`: migrate brightness/color to the snapshot and remove stale normal-refresh behavior.
@@ -62,6 +62,7 @@
 - Produces: `ArtSettingKey`, `ArtSettingsSnapshot`, `SlideshowMode`, `SlideshowState`.
 - Produces: `parse_art_settings(payload: dict[str, Any]) -> ArtSettingsSnapshot | None`.
 - Produces: `parse_slideshow(payload: dict[str, Any]) -> SlideshowState | None`.
+- Produces: `normalize_art_setting(key: ArtSettingKey, value: Any) -> int | str | bool | None` for correlated legacy responses.
 - `None` means the whole optional payload is unknown/malformed; a valid snapshot with a missing key means that key is unsupported.
 
 - [ ] **Step 1: Write failing immutable-model tests**
@@ -85,6 +86,7 @@ def test_frame_data_optional_art_details_default_unknown():
     data = FrameData(True, "on", True, TvMode.ART_MODE)
     assert data.art_settings is None
     assert data.slideshow is None
+    assert data.optional_art_generation is None
 
 
 def test_art_detail_snapshots_are_immutable():
@@ -215,6 +217,7 @@ Append to `FrameData`:
 ```python
     art_settings: ArtSettingsSnapshot | None = None
     slideshow: SlideshowState | None = None
+    optional_art_generation: int | None = None
 ```
 
 - [ ] **Step 5: Implement strict pure parsers**
@@ -271,7 +274,9 @@ def _on_off(value: Any) -> bool | None:
     return None
 
 
-def _normalize_setting(key: ArtSettingKey, value: Any) -> int | str | bool | None:
+def normalize_art_setting(
+    key: ArtSettingKey, value: Any
+) -> int | str | bool | None:
     if key is ArtSettingKey.BRIGHTNESS:
         return _bounded_int(value, 0, 10)
     if key is ArtSettingKey.COLOR_TEMPERATURE:
@@ -310,7 +315,7 @@ def parse_art_settings(payload: dict[str, Any]) -> ArtSettingsSnapshot | None:
             normalized[key] = None
             continue
         if key not in duplicates:
-            normalized[key] = _normalize_setting(key, item.get("value"))
+            normalized[key] = normalize_art_setting(key, item.get("value"))
 
     return ArtSettingsSnapshot(
         supported=frozenset(supported),
@@ -346,6 +351,15 @@ def parse_slideshow(payload: dict[str, Any]) -> SlideshowState | None:
 
 Run the Task 1 command again. Expected: all focused tests pass.
 
+Then run the complete suite:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /home/nicola/Projects/ha-samsungtv-frame/.venv/bin/pytest \
+  -p no:cacheprovider -q
+```
+
+Expected: all existing and new tests pass before commit.
+
 ```bash
 git add custom_components/samsungtv_frame/models.py \
   custom_components/samsungtv_frame/art_settings.py \
@@ -355,7 +369,7 @@ git commit -m "feat: model local art settings state"
 
 ---
 
-### Task 2: Protocol Adapter, Setter Evidence, and Device Capability Cache
+### Task 2: Protocol Adapter and Device Capability Cache
 
 **Files:**
 - Modify: `custom_components/samsungtv_frame/frame_art.py`
@@ -368,39 +382,19 @@ git commit -m "feat: model local art settings state"
 - Produces: `FrameArt.get_art_settings_payload()`, `get_legacy_brightness()`,
   `get_legacy_color_temperature()`, `get_auto_rotation_status()`, and
   `get_legacy_slideshow_status()`.
-- Produces only after evidence: `set_motion_timer(value)`, `set_motion_sensitivity(value)`, `set_brightness_sensor_setting(enabled)`.
+- Produces: `FrameArt.set_motion_timer(value)`,
+  `set_motion_sensitivity(value)`, and
+  `set_brightness_sensor_setting(enabled)` with correlated live-verified
+  acknowledgements.
 - Produces: `FrameDevice.async_get_art_settings() -> ArtSettingsSnapshot | None` and `async_get_slideshow_state() -> SlideshowState | None`.
-- Produces only after evidence: matching async device setters.
+- Produces: matching USER-triggered async device setters.
 - Keeps optional dialect decisions private and tagged with `art_generation`.
+- Temporarily preserves `async_get_art_brightness()` and
+  `async_get_color_temperature()` as projections for the pre-Task-3 coordinator.
 
-- [ ] **Step 1: Capture the setter acknowledgement release evidence**
+- [ ] **Step 1: Write failing raw-adapter tests**
 
-Without copying or loading branch code into Home Assistant, use the existing
-installed v0.6.9 protocol stack in an isolated direct session. Temporarily unload
-the installed Samsung integration only if required to avoid two Art receivers.
-For each of motion timer, sensitivity, and brightness sensor:
-
-1. read and record the original value;
-2. send one different valid value with a unique request ID;
-3. capture only the response event name, correlation field name, and whether its
-   payload confirms the value—never IP, MAC, token, artwork, or HA data;
-4. read back the value;
-5. restore the original value and read it back;
-6. close the direct session and reload the unchanged installed integration.
-
-Store only sanitized response shapes as test fixtures. Replace the real request ID
-with the literal `request-1`; retain only the observed terminal event name,
-correlation-field name, and value-confirmation fields required by the test.
-
-If a deterministic response is not observed, record that result and plan the
-affected setter as a serialized send-and-authoritative-readback operation. If that
-also cannot be proven without branch deployment, omit the device setter and make
-that entity read-only for this increment.
-
-- [ ] **Step 2: Write failing raw-adapter tests**
-
-Add tests proving exact getter commands, domain validation, and the observed
-acknowledgement behavior. Getter expectations are:
+Add tests proving exact getter commands. Expectations are:
 
 ```python
 await art.get_art_settings_payload()
@@ -419,45 +413,61 @@ await art.get_legacy_color_temperature()
 art.request.assert_awaited_once_with("get_color_temperature")
 ```
 
-For each proven setter, assert the exact request name/value and parameterize every
-invalid domain value to raise `ValueError` before `request()` is awaited. Replace
-the existing malformed-JSON fallback expectation with a test that malformed
-aggregate data does not call `get_brightness`/`get_color_temperature`.
+Replace the existing nested-setting and malformed-JSON fallback expectations with
+raw-payload tests. Add setter tests using the exact sanitized LS03B terminal
+payloads:
 
-- [ ] **Step 3: Write failing device-boundary tests**
+```python
+{"event": "set_motion_timer", "request_id": "request-1", "value": "5"}
+{"event": "set_motion_sensitivity", "request_id": "request-1", "value": "1"}
+{"event": "set_brightness_sensor_setting", "request_id": "request-1", "value": "off"}
+```
+
+For each setter, assert the exact request name/value, response correlation, and
+returned payload. Parameterize every invalid domain value to raise `ValueError`
+before `request()` is awaited.
+
+- [ ] **Step 2: Write failing device-boundary tests**
 
 Add tests that establish:
 
 ```python
-async def test_art_settings_aggregate_success_is_cached_for_generation(device):
+async def test_art_settings_aggregate_dialect_reuses_one_command_for_generation(device):
     device._art.get_art_settings_payload = AsyncMock(return_value=VALID_PAYLOAD)
     first = await device.async_get_art_settings()
     second = await device.async_get_art_settings()
     assert first == second == EXPECTED_SETTINGS
     assert device._art.get_art_settings_payload.await_count == 2
-    device._art.get_brightness.assert_not_awaited()
+    device._art.get_legacy_brightness = AsyncMock()
+    device._art.get_legacy_color_temperature = AsyncMock()
+    device._art.get_legacy_brightness.assert_not_awaited()
+    device._art.get_legacy_color_temperature.assert_not_awaited()
 
 
 async def test_correlated_aggregate_response_error_uses_legacy_for_generation(device):
     device._art.get_art_settings_payload = AsyncMock(side_effect=ResponseError("unsupported"))
-    device._art.get_brightness = AsyncMock(return_value="7")
-    device._art.get_color_temperature = AsyncMock(return_value="-2")
+    device._art.get_legacy_brightness = AsyncMock(return_value="7")
+    device._art.get_legacy_color_temperature = AsyncMock(return_value="-2")
     first = await device.async_get_art_settings()
     second = await device.async_get_art_settings()
     assert first == second
     device._art.get_art_settings_payload.assert_awaited_once()
-    assert device._art.get_brightness.await_count == 2
-    assert device._art.get_color_temperature.await_count == 2
+    assert device._art.get_legacy_brightness.await_count == 2
+    assert device._art.get_legacy_color_temperature.await_count == 2
 ```
 
 Also test that malformed aggregate data leaves dialect unknown and retries aggregate
 next time; transport failure calls `async_connection_failed` and performs no legacy
 fallback; a generation change resets aggregate/slideshow dialect selection; modern
 slideshow `ResponseError` probes legacy once; two correlated errors cache unsupported;
-background reads never call `async_ensure_ready`; and mutations call USER readiness
-once without automatic retry.
+background reads never call `async_ensure_ready`; correlated legacy success with an
+invalid value advertises support with value `None`; transport failure or generation
+loss during either legacy getter returns overall `None` rather than an empty
+unsupported snapshot; no dialect cache changes after generation loss; each setting
+mutation ensures USER readiness exactly once; `ResponseError` leaves the session
+healthy; and timeout/transport error calls `async_connection_failed` without retry.
 
-- [ ] **Step 4: Run transport/device tests and verify RED**
+- [ ] **Step 3: Run transport/device tests and verify RED**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 /home/nicola/Projects/ha-samsungtv-frame/.venv/bin/pytest \
@@ -467,7 +477,7 @@ PYTHONDONTWRITEBYTECODE=1 /home/nicola/Projects/ha-samsungtv-frame/.venv/bin/pyt
 Expected: failures for missing getter/setter/device methods and legacy fallback
 semantics.
 
-- [ ] **Step 5: Implement the raw adapter**
+- [ ] **Step 4: Implement the raw adapter**
 
 Keep parsing outside the transport. Add:
 
@@ -490,11 +500,34 @@ async def get_legacy_color_temperature(self) -> Any:
 
 Replace the current `get_artmode_settings(setting)`, `get_brightness()`, and
 `get_color_temperature()` combination rather than retaining its implicit
-aggregate/malformed-JSON fallback. Implement only evidence-backed setter
-correlation. Validate values before calling `request()`. A timeout uses existing
-request cleanup/close behavior and is never retried or converted to success.
+aggregate/malformed-JSON fallback. Add the live-verified setters:
 
-- [ ] **Step 6: Implement generation-scoped device reads**
+```python
+async def set_motion_timer(self, value: str) -> dict[str, Any]:
+    if value not in MOTION_TIMERS:
+        raise ValueError("Invalid motion timer")
+    return await self.request("set_motion_timer", value=value)
+
+async def set_motion_sensitivity(self, value: str) -> dict[str, Any]:
+    if value not in MOTION_SENSITIVITIES:
+        raise ValueError("Invalid motion sensitivity")
+    return await self.request("set_motion_sensitivity", value=value)
+
+async def set_brightness_sensor_setting(
+    self, enabled: bool
+) -> dict[str, Any]:
+    if not isinstance(enabled, bool):
+        raise ValueError("Brightness sensor state must be boolean")
+    return await self.request(
+        "set_brightness_sensor_setting", value="on" if enabled else "off"
+    )
+```
+
+Import the exact domain constants from `art_settings.py`. The default request
+correlator is sufficient because the observed response carries the matching
+`request_id`; do not register or guess a UUID-less sub-event.
+
+- [ ] **Step 5: Implement generation-scoped device reads**
 
 Add private enums `_ArtSettingsDialect(UNKNOWN, AGGREGATE, LEGACY)` and
 `_SlideshowDialect(UNKNOWN, AUTO_ROTATION, LEGACY, UNSUPPORTED)`, with a cached
@@ -514,61 +547,142 @@ class _SlideshowDialect(StrEnum):
     UNSUPPORTED = "unsupported"
 ```
 
-The strict read helper is:
+Use a sentinel so a correlated response containing an invalid/`None` value remains
+distinguishable from session unavailability, timeout, disconnect, or generation
+loss:
 
 ```python
+_ART_READ_FAILED = object()
+
+
 async def _async_art_read_response(
     self, operation: Callable[[], Awaitable[Any]]
 ) -> Any:
     if self._stopped or not self._art_session.ready:
-        return None
+        return _ART_READ_FAILED
     try:
         return await operation()
     except ResponseError:
         raise
     except Exception as err:  # noqa: BLE001
         await self._art_session.async_connection_failed(err)
-        return None
+        return _ART_READ_FAILED
 ```
 
-Use a strict optional read helper that re-raises `ResponseError`, returns `None` for
-malformed parser results, and calls `async_connection_failed` only for transport
-exceptions. The aggregate method follows:
+Capture the generation before every sequence. Reset dialects only when that captured
+generation changes. Every cache write requires both `art_ready` and equality with
+the captured generation. The aggregate method follows:
 
 ```python
 async def async_get_art_settings(self) -> ArtSettingsSnapshot | None:
-    self._reset_optional_dialects_for_generation()
+    generation = self.art_generation
+    self._reset_optional_dialects_for_generation(generation)
     if self._art_settings_dialect is _ArtSettingsDialect.LEGACY:
-        return await self._async_get_legacy_art_settings()
+        return await self._async_get_legacy_art_settings(generation)
     try:
         payload = await self._async_art_read_response(self._art.get_art_settings_payload)
     except ResponseError:
+        if not self._optional_generation_is_current(generation):
+            return None
         self._art_settings_dialect = _ArtSettingsDialect.LEGACY
-        return await self._async_get_legacy_art_settings()
-    snapshot = parse_art_settings(payload) if payload is not None else None
-    if snapshot is not None:
+        return await self._async_get_legacy_art_settings(generation)
+    if payload is _ART_READ_FAILED or not self._optional_generation_is_current(generation):
+        return None
+    snapshot = parse_art_settings(payload) if isinstance(payload, dict) else None
+    if snapshot is not None and self._optional_generation_is_current(generation):
         self._art_settings_dialect = _ArtSettingsDialect.AGGREGATE
     return snapshot
 ```
 
-The legacy snapshot advertises only brightness/color keys whose direct
-`get_legacy_brightness()`/`get_legacy_color_temperature()` calls return valid
-values. Catch each legacy `ResponseError` independently without marking the session
-failed. Implement slideshow dialect selection using the same rules and
-`parse_slideshow`.
+`_async_get_legacy_art_settings(generation)` calls both direct legacy getters in
+sequence. A correlated `ResponseError` means that key is absent. Any
+`_ART_READ_FAILED` result or generation loss returns overall `None`. Any other
+correlated response advertises the key in `supported`, even when
+`normalize_art_setting()` returns `None`. Build one `ArtSettingsSnapshot` from those
+supported keys/normalized values.
 
-Delete independent public brightness/color read paths or make them projections of
-`async_get_art_settings`; never issue another aggregate settings request for each
-field.
+For this task only, preserve `async_get_art_brightness()` and
+`async_get_color_temperature()` as projections of `async_get_art_settings()` so the
+old coordinator remains green. Task 4 deletes them after the coordinator and number
+entities have migrated.
+
+- [ ] **Step 6: Implement exact slideshow dialect transitions**
+
+Use this transition table, fencing every assignment with
+`_optional_generation_is_current(generation)`:
+
+```python
+async def async_get_slideshow_state(self) -> SlideshowState | None:
+    generation = self.art_generation
+    self._reset_optional_dialects_for_generation(generation)
+    dialect = self._slideshow_dialect
+    if dialect is _SlideshowDialect.UNSUPPORTED:
+        return None
+    if dialect is _SlideshowDialect.LEGACY:
+        getter = self._art.get_legacy_slideshow_status
+    else:
+        getter = self._art.get_auto_rotation_status
+    try:
+        payload = await self._async_art_read_response(getter)
+    except ResponseError:
+        if not self._optional_generation_is_current(generation):
+            return None
+        if dialect is _SlideshowDialect.LEGACY:
+            self._slideshow_dialect = _SlideshowDialect.UNSUPPORTED
+            return None
+        try:
+            payload = await self._async_art_read_response(
+                self._art.get_legacy_slideshow_status
+            )
+        except ResponseError:
+            if self._optional_generation_is_current(generation):
+                self._slideshow_dialect = _SlideshowDialect.UNSUPPORTED
+            return None
+        dialect = _SlideshowDialect.LEGACY
+    else:
+        dialect = (
+            _SlideshowDialect.LEGACY
+            if dialect is _SlideshowDialect.LEGACY
+            else _SlideshowDialect.AUTO_ROTATION
+        )
+    if payload is _ART_READ_FAILED or not self._optional_generation_is_current(generation):
+        return None
+    self._slideshow_dialect = dialect
+    return parse_slideshow(payload) if isinstance(payload, dict) else None
+```
+
+Tests cover UNKNOWN→AUTO_ROTATION, UNKNOWN→LEGACY, UNKNOWN→UNSUPPORTED,
+LEGACY reuse, a correlated malformed modern/legacy payload retaining the newly
+proven dialect while returning unknown state, transport failure retaining capability
+unknown, and generation loss preventing every cache write.
+
+Add device setters that perform exactly one existing USER mutation:
+
+```python
+async def async_set_motion_timer(self, value: str) -> None:
+    await self._async_art_mutation(lambda: self._art.set_motion_timer(value))
+
+async def async_set_motion_sensitivity(self, value: str) -> None:
+    await self._async_art_mutation(
+        lambda: self._art.set_motion_sensitivity(value)
+    )
+
+async def async_set_brightness_sensor(self, enabled: bool) -> None:
+    await self._async_art_mutation(
+        lambda: self._art.set_brightness_sensor_setting(enabled)
+    )
+```
 
 - [ ] **Step 7: Extend explicit test mocks, verify GREEN, and commit**
 
-Add explicit `AsyncMock` methods for both optional getters and every evidence-backed
-setter to `tests/conftest.py`; add plain non-truthy values for any new readiness or
-capability attribute.
+Add explicit `AsyncMock` methods for both optional getters and all three setters to
+`tests/conftest.py`; add plain non-truthy values for any new readiness or capability
+attribute.
 
 Run the Task 2 command. Expected: all transport/device tests pass with no leaked
 task/socket warnings.
+
+Run the complete suite command from Task 1. Expected: all tests pass before commit.
 
 ```bash
 git add custom_components/samsungtv_frame/frame_art.py \
@@ -584,11 +698,11 @@ git commit -m "feat: read frame art settings and slideshow state"
 **Files:**
 - Modify: `custom_components/samsungtv_frame/coordinator.py`
 - Modify: `tests/test_coordinator.py`
+- Modify: `tests/test_number.py`
 
 **Interfaces:**
 - Consumes: Task 2 device getters and Task 1 snapshots.
 - Produces: `FrameCoordinator.async_request_art_reconcile() -> None`.
-- Produces: `FrameCoordinator.diagnostics_snapshot() -> dict[str, Any]`.
 - Publishes `FrameData.art_settings` and `FrameData.slideshow` only for a current READY generation.
 
 - [ ] **Step 1: Write failing aggregate-reconciliation tests**
@@ -609,10 +723,18 @@ async def test_reconcile_reads_one_settings_snapshot_and_one_slideshow(hass, moc
     mock_device.async_get_slideshow_state.assert_awaited_once()
 ```
 
-Cover generation loss after each optional await, READY generation change invalidating
-published optional values, five-minute cadence without heartbeat reads, malformed/
-unsupported optional values leaving `tv_mode` unchanged, and OFF publishing both
-snapshots as `None`.
+Cover generation loss after each optional await, five-minute cadence without
+heartbeat reads, malformed/unsupported optional values leaving `tv_mode` unchanged,
+and OFF publishing both snapshots plus `optional_art_generation` as `None`.
+
+Add a READY-transition test where `coord.data` contains generation-1 snapshots,
+`mock_device.art_generation` becomes `2`, and the scheduled READY refresh is blocked.
+Assert `coord.data.optional_art_generation != mock_device.art_generation` during that
+interval, so entities and diagnostics cannot expose generation-1 values.
+
+Update `tests/test_number.py` setup to feed one `ArtSettingsSnapshot` through
+`mock_device.async_get_art_settings`; existing brightness/color state assertions must
+remain green through the temporary FrameData projections.
 
 - [ ] **Step 2: Write failing push-preservation and forced-refresh tests**
 
@@ -620,25 +742,35 @@ Add a `FrameData` containing both snapshots, send `art_mode_changed`,
 `image_selected`, and `slideshow_image_changed`, and assert the snapshots remain
 object-identical afterward.
 
-For direct refresh:
+Use real coordinator refreshes rather than mocking `async_refresh()`:
 
 ```python
 async def test_two_back_to_back_art_reconciles_bypass_request_debounce(hass, mock_device):
+    mock_device.art_ready = True
+    mock_device.art_generation = 1
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    mock_device.async_get_art_settings.side_effect = [SETTINGS_ONE, SETTINGS_TWO]
+    mock_device.async_get_slideshow_state.side_effect = [SLIDESHOW_ONE, SLIDESHOW_TWO]
     coord = _make(hass, mock_device)
-    with patch.object(coord, "async_refresh", AsyncMock()) as refresh:
-        await coord.async_request_art_reconcile()
-        await coord.async_request_art_reconcile()
-    assert refresh.await_count == 2
-    assert coord._next_art_reconcile == 0
+    coord._clock = lambda: 0.0
+    await coord.async_request_art_reconcile()
+    await coord.async_request_art_reconcile()
+    assert mock_device.async_get_art_settings.await_count == 2
+    assert mock_device.async_get_slideshow_state.await_count == 2
+    assert coord.data.art_settings is SETTINGS_TWO
+    assert coord.data.slideshow is SLIDESHOW_TWO
+    assert coord._next_art_reconcile == ART_RECONCILE_SECONDS
 ```
 
-Also assert `async_request_refresh` was never called by this method.
+This proves both back-to-back calls actually reread optional Art state within one
+300-second window; a mocked `async_refresh()` call count is insufficient.
 
 - [ ] **Step 3: Run coordinator tests and verify RED**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 /home/nicola/Projects/ha-samsungtv-frame/.venv/bin/pytest \
-  -p no:cacheprovider -q tests/test_coordinator.py
+  -p no:cacheprovider -q tests/test_coordinator.py tests/test_number.py
 ```
 
 Expected: failures for missing snapshots/device calls/direct refresh and push field
@@ -646,21 +778,22 @@ loss.
 
 - [ ] **Step 4: Implement one atomic optional snapshot path**
 
-Replace `_art_brightness` and `_art_color_temp` with `_art_settings` and
-`_slideshow`, plus the generation that made them fresh. During reconciliation:
+Replace `_art_brightness` and `_art_color_temp` with `_art_settings`, `_slideshow`,
+and `_optional_art_generation`. Commit the optional snapshot only after both reads
+complete on the same READY generation:
 
 ```python
 art_settings = await self.device.async_get_art_settings()
-settings_valid = self._art_session_is_ready(generation)
-slideshow = None
-slideshow_valid = False
-if settings_valid:
-    slideshow = await self.device.async_get_slideshow_state()
-    slideshow_valid = self._art_session_is_ready(generation)
-if settings_valid:
+if not self._art_session_is_ready(generation):
+    return (
+        art_mode is not None
+        or self._art_live_push_revision != live_push_revision
+    )
+slideshow = await self.device.async_get_slideshow_state()
+if self._art_session_is_ready(generation):
     self._art_settings = art_settings
-if slideshow_valid:
     self._slideshow = slideshow
+    self._optional_art_generation = generation
 ```
 
 Always finish optional reads after a live Art-mode sample, but never use their
@@ -678,7 +811,17 @@ art_color_temperature=(
 ),
 art_settings=published_settings,
 slideshow=published_slideshow,
+optional_art_generation=(
+    self._optional_art_generation if optional_fresh and not is_off else None
+),
 ```
+
+`optional_fresh` requires device READY and
+`_optional_art_generation == device.art_generation`.
+`published_settings`/`published_slideshow` use the caches only when
+`optional_fresh and not is_off`. A valid current generation with unknown settings
+may still publish `art_settings=None`; retain the generation separately so
+diagnostics can distinguish current-unknown from stale.
 
 - [ ] **Step 5: Preserve all fields on push and add direct reconcile**
 
@@ -705,19 +848,15 @@ async def async_request_art_reconcile(self) -> None:
     await self.async_refresh()
 ```
 
-- [ ] **Step 6: Add an explicit diagnostics snapshot**
-
-Return a new dictionary containing only safe scalar/enum fields named in the
-design. Convert enums to `.value`, setting names to a sorted list, and expose only
-boolean knowledge for Art/slideshow—not current values or content IDs. Do not call
-the device or inspect arbitrary attributes.
-
-- [ ] **Step 7: Verify GREEN and commit**
+- [ ] **Step 6: Verify GREEN and commit**
 
 Run the Task 3 command. Expected: all coordinator tests pass.
 
+Run the complete suite command from Task 1. Expected: all tests pass before commit.
+
 ```bash
-git add custom_components/samsungtv_frame/coordinator.py tests/test_coordinator.py
+git add custom_components/samsungtv_frame/coordinator.py \
+  tests/test_coordinator.py tests/test_number.py
 git commit -m "feat: reconcile optional art state atomically"
 ```
 
@@ -730,6 +869,7 @@ git commit -m "feat: reconcile optional art state atomically"
 - Modify: `custom_components/samsungtv_frame/entity.py`
 - Modify: `custom_components/samsungtv_frame/models.py`
 - Modify: `custom_components/samsungtv_frame/coordinator.py`
+- Modify: `custom_components/samsungtv_frame/device.py`
 - Create: `custom_components/samsungtv_frame/select.py`
 - Modify: `custom_components/samsungtv_frame/number.py`
 - Modify: `custom_components/samsungtv_frame/switch.py`
@@ -738,7 +878,9 @@ git commit -m "feat: reconcile optional art state atomically"
 - Modify: `custom_components/samsungtv_frame/strings.json`
 - Modify: `custom_components/samsungtv_frame/translations/en.json`
 - Create: `tests/test_select.py`
-- Modify: `tests/test_number.py`, `tests/test_switch.py`, `tests/test_sensor.py`, `tests/test_media_player.py`, `tests/test_init.py`
+- Modify: `tests/test_models.py`, `tests/test_device.py`,
+  `tests/test_coordinator.py`, `tests/test_number.py`, `tests/test_switch.py`,
+  `tests/test_sensor.py`, `tests/test_media_player.py`, `tests/test_init.py`
 
 **Interfaces:**
 - Consumes: `FrameData.art_settings`, `FrameData.slideshow`, Task 2 device setters, and `async_request_art_reconcile()`.
@@ -760,8 +902,9 @@ Assert select options are the exact stable wire keys, entity registry category i
 `duration_minutes`/`category_id`.
 
 For every optional setting, test supported, unsupported, malformed, TV OFF, and
-Art-unready availability. Change existing brightness/color OFF tests from
-`unknown` to `unavailable`.
+Art-unready availability. Add a generation-staleness case where
+`data.optional_art_generation != device.art_generation`. Change existing
+brightness/color OFF tests from `unknown` to `unavailable`.
 
 - [ ] **Step 2: Write failing mutation/readback tests**
 
@@ -771,15 +914,16 @@ invoke two sequential mutations to prove both calls bypass the ordinary request
 debouncer. Assert generic `HomeAssistantError` text contains no requested value.
 
 Update brightness, color-temperature, and slideshow service tests to assert the same
-direct Art reconcile method. A setter deferred by Task 2 must expose no callable
-write method/service; its state remains read-only.
+direct Art reconcile method.
 
 - [ ] **Step 3: Run entity tests and verify RED**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 /home/nicola/Projects/ha-samsungtv-frame/.venv/bin/pytest \
   -p no:cacheprovider -q tests/test_select.py tests/test_number.py \
-  tests/test_switch.py tests/test_sensor.py tests/test_media_player.py tests/test_init.py
+  tests/test_switch.py tests/test_sensor.py tests/test_media_player.py \
+  tests/test_init.py tests/test_models.py tests/test_device.py \
+  tests/test_coordinator.py
 ```
 
 Expected: collection/setup/state failures for the new platform/entities and stale
@@ -787,9 +931,18 @@ refresh behavior.
 
 - [ ] **Step 4: Add shared optional availability logic**
 
-Add this helper to `entity.py`:
+Add shared freshness plus setting-specific helpers to `entity.py`:
 
 ```python
+def optional_art_state_fresh(coordinator: FrameCoordinator) -> bool:
+    return (
+        coordinator.device.art_ready
+        and coordinator.data.optional_art_generation
+        == coordinator.device.art_generation
+        and coordinator.data.tv_mode in (TvMode.WATCHING, TvMode.ART_MODE)
+    )
+
+
 def art_setting_available(
     coordinator: FrameCoordinator,
     key: ArtSettingKey,
@@ -797,8 +950,7 @@ def art_setting_available(
 ) -> bool:
     settings = coordinator.data.art_settings
     return (
-        coordinator.device.art_ready
-        and coordinator.data.tv_mode in (TvMode.WATCHING, TvMode.ART_MODE)
+        optional_art_state_fresh(coordinator)
         and settings is not None
         and key in settings.supported
         and value is not None
@@ -820,11 +972,29 @@ Use the corresponding enum/field pairs for color temperature, motion timer, moti
 sensitivity, and brightness sensor. Existing brightness/color values project from
 `data.art_settings` and their setters await `async_request_art_reconcile()`.
 
+The slideshow sensor uses the same freshness guard:
+
+```python
+@property
+def available(self) -> bool:
+    return (
+        super().available
+        and optional_art_state_fresh(self.coordinator)
+        and self.coordinator.data.slideshow is not None
+    )
+```
+
+Its tests cover TV OFF, session unready, unknown slideshow state, and a stale
+`optional_art_generation` before the new READY refresh completes.
+
 During Tasks 1–3, retain the old defaulted `FrameData.art_brightness` and
 `art_color_temperature` fields as projections so existing platform tests remain
 green. In this task, after migrating both number entities, delete those two fields
 from `FrameData`, delete their coordinator projections, and update all test fixtures
 to use `ArtSettingsSnapshot`. The finished tree has one canonical settings state.
+Delete the transitional `FrameDevice.async_get_art_brightness()` and
+`async_get_color_temperature()` projections and their direct tests in the same
+change; the coordinator no longer consumes them after Task 3.
 
 - [ ] **Step 5: Implement selects, switch, and sensor**
 
@@ -864,11 +1034,14 @@ After a successful slideshow service mutation, await
 
 Run the Task 4 command. Expected: all entity/setup tests pass.
 
+Run the complete suite command from Task 1. Expected: all tests pass before commit.
+
 ```bash
 git add custom_components/samsungtv_frame/const.py \
   custom_components/samsungtv_frame/entity.py \
   custom_components/samsungtv_frame/models.py \
   custom_components/samsungtv_frame/coordinator.py \
+  custom_components/samsungtv_frame/device.py \
   custom_components/samsungtv_frame/select.py \
   custom_components/samsungtv_frame/number.py \
   custom_components/samsungtv_frame/switch.py \
@@ -877,7 +1050,8 @@ git add custom_components/samsungtv_frame/const.py \
   custom_components/samsungtv_frame/strings.json \
   custom_components/samsungtv_frame/translations/en.json \
   tests/test_select.py tests/test_number.py tests/test_switch.py \
-  tests/test_sensor.py tests/test_media_player.py tests/test_init.py
+  tests/test_sensor.py tests/test_media_player.py tests/test_init.py \
+  tests/test_models.py tests/test_device.py tests/test_coordinator.py
 git commit -m "feat: expose local frame art settings"
 ```
 
@@ -886,14 +1060,24 @@ git commit -m "feat: expose local frame art settings"
 ### Task 5: Strictly Allowlisted Diagnostics
 
 **Files:**
+- Modify: `custom_components/samsungtv_frame/coordinator.py`
 - Create: `custom_components/samsungtv_frame/diagnostics.py`
+- Modify: `tests/test_coordinator.py`
 - Create: `tests/test_diagnostics.py`
 
 **Interfaces:**
-- Consumes: `FrameCoordinator.diagnostics_snapshot()` from Task 3.
+- Produces: `FrameCoordinator.diagnostics_snapshot() -> dict[str, Any]`.
 - Produces: `async_get_config_entry_diagnostics(hass, entry) -> dict[str, Any]`.
 
-- [ ] **Step 1: Write failing privacy and zero-I/O tests**
+- [ ] **Step 1: Write failing coordinator allowlist tests**
+
+Construct current and stale-generation `FrameData` snapshots and assert the exact
+safe keys/values returned by `diagnostics_snapshot()`. The stale case sets
+`optional_art_generation != device.art_generation` and must report no supported
+settings and `slideshow_known is False`. Assert the method performs no device call
+and contains no current-art, running-app, volume, mute, host, MAC, or token field.
+
+- [ ] **Step 2: Write failing adapter privacy and zero-I/O tests**
 
 Create a loaded config entry whose host, MAC, token, title, current art, running app,
 options, and arbitrary private attributes contain unique canary strings. Patch every
@@ -916,16 +1100,23 @@ Add an unloaded-entry test asserting the complete result equals:
 
 The test must also reject an arbitrary unallowlisted option canary.
 
-- [ ] **Step 2: Run diagnostics tests and verify RED**
+- [ ] **Step 3: Run diagnostics tests and verify RED**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 /home/nicola/Projects/ha-samsungtv-frame/.venv/bin/pytest \
-  -p no:cacheprovider -q tests/test_diagnostics.py
+  -p no:cacheprovider -q tests/test_diagnostics.py tests/test_coordinator.py
 ```
 
-Expected: collection fails because `diagnostics.py` does not exist.
+Expected: collection fails because `diagnostics.py` and
+`FrameCoordinator.diagnostics_snapshot()` do not exist.
 
-- [ ] **Step 3: Implement the allowlist adapter**
+- [ ] **Step 4: Implement the coordinator snapshot and allowlist adapter**
+
+Add a coordinator method returning only safe scalar/enum fields named in the
+design. Convert enums to `.value`, setting names to a sorted list, and expose only
+boolean knowledge for Art/slideshow—not current values or content IDs. Optional
+capability/state is known only when `data.optional_art_generation` equals the live
+device generation. Do not call the device or inspect arbitrary attributes.
 
 Use only `CONF_MODEL`, `OPT_HEARTBEAT`, `DEFAULT_HEARTBEAT_SECONDS`, and the explicit
 coordinator snapshot:
@@ -935,8 +1126,9 @@ async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: FrameConfigEntry
 ) -> dict[str, Any]:
     del hass
+    coordinator = getattr(entry, "runtime_data", None)
     result = {
-        "loaded": hasattr(entry, "runtime_data"),
+        "loaded": coordinator is not None,
         "model": entry.data.get(CONF_MODEL, "The Frame"),
         "heartbeat_seconds": entry.options.get(
             OPT_HEARTBEAT, DEFAULT_HEARTBEAT_SECONDS
@@ -944,19 +1136,23 @@ async def async_get_config_entry_diagnostics(
     }
     if not result["loaded"]:
         return result
-    return {**result, **entry.runtime_data.diagnostics_snapshot()}
+    return {**result, **coordinator.diagnostics_snapshot()}
 ```
 
 Do not call HA's broad redaction helper because unrecognized entry fields must never
 enter the result in the first place.
 
-- [ ] **Step 4: Verify GREEN and commit**
+- [ ] **Step 5: Verify GREEN and commit**
 
 Run the Task 5 command. Expected: all diagnostics tests pass and no device mock was
 awaited.
 
+Run the complete suite command from Task 1. Expected: all tests pass before commit.
+
 ```bash
-git add custom_components/samsungtv_frame/diagnostics.py tests/test_diagnostics.py
+git add custom_components/samsungtv_frame/coordinator.py \
+  custom_components/samsungtv_frame/diagnostics.py \
+  tests/test_coordinator.py tests/test_diagnostics.py
 git commit -m "feat: add private frame diagnostics"
 ```
 
@@ -982,7 +1178,7 @@ change. In README Entities, list exact new entity domains/names and explain that
 unavailable means the TV/session/feature is not currently authoritative. Document
 that the existing slideshow service remains the atomic write surface.
 
-Do not claim any setter that Task 2 deferred and do not bump the manifest version.
+Document all three live-verified local controls and do not bump the manifest version.
 
 - [ ] **Step 2: Run focused suites for every touched boundary**
 
@@ -1006,11 +1202,12 @@ PYTHONDONTWRITEBYTECODE=1 /home/nicola/Projects/ha-samsungtv-frame/.venv/bin/pyt
 git diff --check origin/main...HEAD
 /home/nicola/Projects/ha-samsungtv-frame/.venv/bin/python -m compileall -q \
   custom_components/samsungtv_frame
+uvx ruff check custom_components tests
 ```
 
 Expected: full pytest passes, `git diff --check` prints nothing, and compileall exits
-zero. Remove only generated `__pycache__` directories under the writable `/tmp`
-worktree before the final status check.
+zero, and Ruff reports no violations. Remove only generated `__pycache__`
+directories under the writable `/tmp` worktree before the final status check.
 
 - [ ] **Step 4: Run privacy and secret scans**
 
@@ -1046,6 +1243,6 @@ If review fixes changed code, commit each independently verified fix with a spec
 
 - [ ] **Step 7: Final no-production handoff**
 
-Confirm `git status --short --branch` is clean, report exact commands/results and any
-deferred setters, and provide the branch/commit list. Do not push, deploy, reload, or
-modify the production N150.
+Confirm `git status --short --branch` is clean, report exact commands/results, and
+provide the branch/commit list. Do not push, deploy, reload, or modify the production
+N150.
