@@ -1,5 +1,6 @@
 # tests/test_device.py
 import asyncio
+import json
 import logging
 from inspect import signature
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,6 +21,49 @@ from custom_components.samsungtv_frame.device import FrameDevice
 from custom_components.samsungtv_frame.frame_remote import (
     FrameRemote,
     RemotePairingRequired,
+)
+from custom_components.samsungtv_frame.models import (
+    ArtSettingKey,
+    ArtSettingsSnapshot,
+    SlideshowMode,
+    SlideshowState,
+)
+
+
+VALID_ART_SETTINGS_PAYLOAD = {
+    "data": json.dumps(
+        [
+            {"item": "brightness", "value": "7"},
+            {"item": "color_temperature", "value": "-2"},
+            {"item": "motion_timer", "value": "15"},
+            {"item": "motion_sensitivity", "value": "2"},
+            {"item": "brightness_sensor_setting", "value": "on"},
+        ]
+    )
+}
+EXPECTED_ART_SETTINGS = ArtSettingsSnapshot(
+    supported=frozenset(ArtSettingKey),
+    brightness=7,
+    color_temperature=-2,
+    motion_timer="15",
+    motion_sensitivity="2",
+    brightness_sensor_enabled=True,
+)
+MODERN_SLIDESHOW_PAYLOAD = {
+    "value": "15",
+    "type": "slideshow",
+    "category_id": "MY-C0002",
+}
+LEGACY_SLIDESHOW_PAYLOAD = {
+    "value": "30",
+    "type": "shuffleslideshow",
+    "category_id": "MY-C0004",
+}
+EXPECTED_MODERN_SLIDESHOW = SlideshowState(
+    SlideshowMode.SEQUENTIAL, 15, "MY-C0002"
+)
+EXPECTED_LEGACY_SLIDESHOW = SlideshowState(
+    SlideshowMode.SHUFFLE, 30, "MY-C0004"
 )
 
 
@@ -323,9 +367,19 @@ async def test_background_art_getter_returns_none_without_session_open(device):
     [
         ("async_get_artmode", (), "get_artmode"),
         ("async_get_current_art", (), "get_current"),
-        ("async_get_art_brightness", (), "get_brightness"),
+        (
+            "async_get_art_brightness",
+            (),
+            "get_art_settings_payload",
+        ),
         ("async_get_art_thumbnail", ("MY_F0001",), "get_thumbnail"),
-        ("async_get_color_temperature", (), "get_color_temperature"),
+        (
+            "async_get_color_temperature",
+            (),
+            "get_art_settings_payload",
+        ),
+        ("async_get_art_settings", (), "get_art_settings_payload"),
+        ("async_get_slideshow_state", (), "get_auto_rotation_status"),
     ],
 )
 async def test_background_art_getters_never_ensure_or_open(
@@ -345,8 +399,10 @@ async def test_background_art_getters_never_ensure_or_open(
     [
         ("async_get_artmode", "get_artmode"),
         ("async_get_current_art", "get_current"),
-        ("async_get_art_brightness", "get_brightness"),
-        ("async_get_color_temperature", "get_color_temperature"),
+        ("async_get_art_brightness", "get_art_settings_payload"),
+        ("async_get_color_temperature", "get_art_settings_payload"),
+        ("async_get_art_settings", "get_art_settings_payload"),
+        ("async_get_slideshow_state", "get_auto_rotation_status"),
     ],
 )
 async def test_ready_art_getter_failure_is_reported_once(
@@ -380,14 +436,506 @@ async def test_ready_art_read_response_error_keeps_session_ready(device):
     device._art_session.async_connection_failed.assert_not_awaited()
 
 
+async def test_art_settings_aggregate_dialect_reuses_one_command_for_generation(
+    device,
+):
+    device._art.get_art_settings_payload = AsyncMock(
+        return_value=VALID_ART_SETTINGS_PAYLOAD
+    )
+    device._art.get_legacy_brightness = AsyncMock()
+    device._art.get_legacy_color_temperature = AsyncMock()
+
+    first = await device.async_get_art_settings()
+    second = await device.async_get_art_settings()
+
+    assert first == second == EXPECTED_ART_SETTINGS
+    assert device._art.get_art_settings_payload.await_count == 2
+    device._art.get_legacy_brightness.assert_not_awaited()
+    device._art.get_legacy_color_temperature.assert_not_awaited()
+
+
+async def test_correlated_aggregate_response_error_uses_legacy_for_generation(
+    device,
+):
+    device._art.get_art_settings_payload = AsyncMock(
+        side_effect=ResponseError("unsupported")
+    )
+    device._art.get_legacy_brightness = AsyncMock(return_value="7")
+    device._art.get_legacy_color_temperature = AsyncMock(return_value="-2")
+    expected = ArtSettingsSnapshot(
+        supported=frozenset(
+            {
+                ArtSettingKey.BRIGHTNESS,
+                ArtSettingKey.COLOR_TEMPERATURE,
+            }
+        ),
+        brightness=7,
+        color_temperature=-2,
+    )
+
+    first = await device.async_get_art_settings()
+    second = await device.async_get_art_settings()
+
+    assert first == second == expected
+    device._art.get_art_settings_payload.assert_awaited_once_with()
+    assert device._art.get_legacy_brightness.await_count == 2
+    assert device._art.get_legacy_color_temperature.await_count == 2
+    device._art_session.async_connection_failed.assert_not_awaited()
+
+
+async def test_malformed_aggregate_keeps_dialect_unknown_and_retries(device):
+    device._art.get_art_settings_payload = AsyncMock(
+        side_effect=[{"data": "not-json"}, VALID_ART_SETTINGS_PAYLOAD]
+    )
+    device._art.get_legacy_brightness = AsyncMock()
+    device._art.get_legacy_color_temperature = AsyncMock()
+
+    assert await device.async_get_art_settings() is None
+    assert device._art_settings_dialect.value == "unknown"
+    assert await device.async_get_art_settings() == EXPECTED_ART_SETTINGS
+
+    assert device._art.get_art_settings_payload.await_count == 2
+    device._art.get_legacy_brightness.assert_not_awaited()
+    device._art.get_legacy_color_temperature.assert_not_awaited()
+
+
+async def test_aggregate_transport_failure_has_no_legacy_fallback(device):
+    error = OSError("lost")
+    device._art.get_art_settings_payload = AsyncMock(side_effect=error)
+    device._art.get_legacy_brightness = AsyncMock()
+    device._art.get_legacy_color_temperature = AsyncMock()
+
+    assert await device.async_get_art_settings() is None
+
+    device._art.get_art_settings_payload.assert_awaited_once_with()
+    device._art.get_legacy_brightness.assert_not_awaited()
+    device._art.get_legacy_color_temperature.assert_not_awaited()
+    device._art_session.async_connection_failed.assert_awaited_once_with(error)
+    assert device._art_settings_dialect.value == "unknown"
+
+
+async def test_generation_change_resets_aggregate_and_slideshow_dialects(device):
+    device._art.get_art_settings_payload = AsyncMock(
+        side_effect=[
+            ResponseError("aggregate unsupported"),
+            VALID_ART_SETTINGS_PAYLOAD,
+        ]
+    )
+    device._art.get_legacy_brightness = AsyncMock(return_value="7")
+    device._art.get_legacy_color_temperature = AsyncMock(return_value="-2")
+    device._art.get_auto_rotation_status = AsyncMock(
+        side_effect=[
+            ResponseError("modern unsupported"),
+            MODERN_SLIDESHOW_PAYLOAD,
+        ]
+    )
+    device._art.get_legacy_slideshow_status = AsyncMock(
+        return_value=LEGACY_SLIDESHOW_PAYLOAD
+    )
+
+    assert await device.async_get_art_settings() is not None
+    assert await device.async_get_slideshow_state() == EXPECTED_LEGACY_SLIDESHOW
+
+    device._art_session.generation = 4
+
+    assert await device.async_get_art_settings() == EXPECTED_ART_SETTINGS
+    assert await device.async_get_slideshow_state() == EXPECTED_MODERN_SLIDESHOW
+    assert device._art.get_art_settings_payload.await_count == 2
+    device._art.get_legacy_brightness.assert_awaited_once_with()
+    device._art.get_legacy_color_temperature.assert_awaited_once_with()
+    assert device._art.get_auto_rotation_status.await_count == 2
+    device._art.get_legacy_slideshow_status.assert_awaited_once_with()
+
+
+async def test_modern_slideshow_response_error_probes_legacy_once(device):
+    device._art.get_auto_rotation_status = AsyncMock(
+        side_effect=ResponseError("unsupported")
+    )
+    device._art.get_legacy_slideshow_status = AsyncMock(
+        return_value=LEGACY_SLIDESHOW_PAYLOAD
+    )
+
+    first = await device.async_get_slideshow_state()
+    second = await device.async_get_slideshow_state()
+
+    assert first == second == EXPECTED_LEGACY_SLIDESHOW
+    device._art.get_auto_rotation_status.assert_awaited_once_with()
+    assert device._art.get_legacy_slideshow_status.await_count == 2
+    device._art_session.async_connection_failed.assert_not_awaited()
+
+
+async def test_two_correlated_slideshow_errors_cache_unsupported(device):
+    device._art.get_auto_rotation_status = AsyncMock(
+        side_effect=ResponseError("modern unsupported")
+    )
+    device._art.get_legacy_slideshow_status = AsyncMock(
+        side_effect=ResponseError("legacy unsupported")
+    )
+
+    assert await device.async_get_slideshow_state() is None
+    assert await device.async_get_slideshow_state() is None
+
+    device._art.get_auto_rotation_status.assert_awaited_once_with()
+    device._art.get_legacy_slideshow_status.assert_awaited_once_with()
+    assert device._slideshow_dialect.value == "unsupported"
+    device._art_session.async_connection_failed.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("method", "delegate"),
+    [
+        ("async_get_art_settings", "get_art_settings_payload"),
+        ("async_get_slideshow_state", "get_auto_rotation_status"),
+    ],
+)
+async def test_optional_background_reads_never_ensure_ready(
+    device, method, delegate
+):
+    device._art_session.ready = False
+    operation = AsyncMock()
+    setattr(device._art, delegate, operation)
+
+    assert await getattr(device, method)() is None
+
+    device._art_session.async_ensure_ready.assert_not_awaited()
+    operation.assert_not_awaited()
+
+
+async def test_correlated_invalid_legacy_value_advertises_support(device):
+    device._art.get_art_settings_payload = AsyncMock(
+        side_effect=ResponseError("unsupported")
+    )
+    device._art.get_legacy_brightness = AsyncMock(return_value="invalid")
+    device._art.get_legacy_color_temperature = AsyncMock(
+        side_effect=ResponseError("unsupported")
+    )
+
+    assert await device.async_get_art_settings() == ArtSettingsSnapshot(
+        supported=frozenset({ArtSettingKey.BRIGHTNESS}),
+        brightness=None,
+    )
+    device._art_session.async_connection_failed.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("failed_getter", "failure_kind"),
+    [
+        ("get_legacy_brightness", "transport"),
+        ("get_legacy_color_temperature", "transport"),
+        ("get_legacy_brightness", "generation"),
+        ("get_legacy_color_temperature", "generation"),
+    ],
+)
+async def test_legacy_read_failure_returns_none_not_unsupported_snapshot(
+    device, failed_getter, failure_kind
+):
+    device._art.get_art_settings_payload = AsyncMock(
+        side_effect=ResponseError("aggregate unsupported")
+    )
+    error = OSError("lost")
+
+    async def failure():
+        if failure_kind == "transport":
+            raise error
+        device._art_session.generation += 1
+        return "7"
+
+    device._art.get_legacy_brightness = AsyncMock(return_value="7")
+    device._art.get_legacy_color_temperature = AsyncMock(return_value="-2")
+    setattr(device._art, failed_getter, AsyncMock(side_effect=failure))
+
+    assert await device.async_get_art_settings() is None
+
+    if failure_kind == "transport":
+        device._art_session.async_connection_failed.assert_awaited_once_with(
+            error
+        )
+    else:
+        device._art_session.async_connection_failed.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("method", "delegate", "payload", "expected", "dialect_attr"),
+    [
+        (
+            "async_get_art_settings",
+            "get_art_settings_payload",
+            VALID_ART_SETTINGS_PAYLOAD,
+            EXPECTED_ART_SETTINGS,
+            "_art_settings_dialect",
+        ),
+        (
+            "async_get_slideshow_state",
+            "get_auto_rotation_status",
+            MODERN_SLIDESHOW_PAYLOAD,
+            EXPECTED_MODERN_SLIDESHOW,
+            "_slideshow_dialect",
+        ),
+    ],
+)
+async def test_generation_loss_discards_optional_result_without_cache_write(
+    device, method, delegate, payload, expected, dialect_attr
+):
+    calls = 0
+
+    async def lose_generation_once():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            device._art_session.generation += 1
+        return payload
+
+    operation = AsyncMock(side_effect=lose_generation_once)
+    setattr(device._art, delegate, operation)
+    device._art.get_legacy_brightness = AsyncMock()
+    device._art.get_legacy_color_temperature = AsyncMock()
+    device._art.get_legacy_slideshow_status = AsyncMock()
+
+    assert await getattr(device, method)() is None
+    assert getattr(device, dialect_attr).value == "unknown"
+    assert await getattr(device, method)() == expected
+    assert operation.await_count == 2
+
+
+@pytest.mark.parametrize(
+    ("method", "delegate", "payload", "expected", "legacy_delegate"),
+    [
+        (
+            "async_get_art_settings",
+            "get_art_settings_payload",
+            VALID_ART_SETTINGS_PAYLOAD,
+            EXPECTED_ART_SETTINGS,
+            "get_legacy_brightness",
+        ),
+        (
+            "async_get_slideshow_state",
+            "get_auto_rotation_status",
+            MODERN_SLIDESHOW_PAYLOAD,
+            EXPECTED_MODERN_SLIDESHOW,
+            "get_legacy_slideshow_status",
+        ),
+    ],
+)
+async def test_correlated_error_after_generation_loss_does_not_select_fallback(
+    device, method, delegate, payload, expected, legacy_delegate
+):
+    calls = 0
+
+    async def lose_generation_with_response_error():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            device._art_session.generation += 1
+            raise ResponseError("unsupported on stale generation")
+        return payload
+
+    operation = AsyncMock(side_effect=lose_generation_with_response_error)
+    legacy = AsyncMock()
+    setattr(device._art, delegate, operation)
+    setattr(device._art, legacy_delegate, legacy)
+    device._art.get_legacy_brightness = (
+        legacy
+        if legacy_delegate == "get_legacy_brightness"
+        else AsyncMock()
+    )
+    device._art.get_legacy_color_temperature = AsyncMock()
+    device._art.get_legacy_slideshow_status = (
+        legacy
+        if legacy_delegate == "get_legacy_slideshow_status"
+        else AsyncMock()
+    )
+
+    assert await getattr(device, method)() is None
+    assert await getattr(device, method)() == expected
+    assert operation.await_count == 2
+    legacy.assert_not_awaited()
+
+
+async def test_malformed_modern_slideshow_retains_proven_dialect(device):
+    device._art.get_auto_rotation_status = AsyncMock(
+        side_effect=[{"value": "invalid"}, MODERN_SLIDESHOW_PAYLOAD]
+    )
+    device._art.get_legacy_slideshow_status = AsyncMock()
+
+    assert await device.async_get_slideshow_state() is None
+    assert device._slideshow_dialect.value == "auto_rotation"
+    assert await device.async_get_slideshow_state() == EXPECTED_MODERN_SLIDESHOW
+    assert device._art.get_auto_rotation_status.await_count == 2
+    device._art.get_legacy_slideshow_status.assert_not_awaited()
+
+
+async def test_malformed_legacy_slideshow_retains_proven_dialect(device):
+    device._art.get_auto_rotation_status = AsyncMock(
+        side_effect=ResponseError("unsupported")
+    )
+    device._art.get_legacy_slideshow_status = AsyncMock(
+        side_effect=[{"value": "invalid"}, LEGACY_SLIDESHOW_PAYLOAD]
+    )
+
+    assert await device.async_get_slideshow_state() is None
+    assert device._slideshow_dialect.value == "legacy"
+    assert await device.async_get_slideshow_state() == EXPECTED_LEGACY_SLIDESHOW
+    device._art.get_auto_rotation_status.assert_awaited_once_with()
+    assert device._art.get_legacy_slideshow_status.await_count == 2
+
+
+async def test_slideshow_transport_failure_keeps_capability_unknown(device):
+    error = TimeoutError()
+    device._art.get_auto_rotation_status = AsyncMock(
+        side_effect=[error, MODERN_SLIDESHOW_PAYLOAD]
+    )
+    device._art.get_legacy_slideshow_status = AsyncMock()
+
+    assert await device.async_get_slideshow_state() is None
+    assert device._slideshow_dialect.value == "unknown"
+    assert await device.async_get_slideshow_state() == EXPECTED_MODERN_SLIDESHOW
+    assert device._art.get_auto_rotation_status.await_count == 2
+    device._art.get_legacy_slideshow_status.assert_not_awaited()
+    device._art_session.async_connection_failed.assert_awaited_once_with(error)
+
+
+@pytest.mark.parametrize(
+    ("method", "argument", "delegate", "delegate_argument"),
+    [
+        (
+            "async_set_motion_timer",
+            "15",
+            "set_motion_timer",
+            "15",
+        ),
+        (
+            "async_set_motion_sensitivity",
+            "2",
+            "set_motion_sensitivity",
+            "2",
+        ),
+        (
+            "async_set_brightness_sensor",
+            True,
+            "set_brightness_sensor_setting",
+            True,
+        ),
+    ],
+)
+async def test_optional_setting_mutations_ensure_user_once(
+    device, method, argument, delegate, delegate_argument
+):
+    operation = AsyncMock()
+    setattr(device._art, delegate, operation)
+
+    await getattr(device, method)(argument)
+
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.USER
+    )
+    operation.assert_awaited_once_with(delegate_argument)
+
+
+@pytest.mark.parametrize(
+    ("method", "argument", "delegate"),
+    [
+        ("async_set_motion_timer", "15", "set_motion_timer"),
+        (
+            "async_set_motion_sensitivity",
+            "2",
+            "set_motion_sensitivity",
+        ),
+        (
+            "async_set_brightness_sensor",
+            True,
+            "set_brightness_sensor_setting",
+        ),
+    ],
+)
+async def test_optional_setting_response_error_keeps_session_healthy(
+    device, method, argument, delegate
+):
+    error = ResponseError("command rejected")
+    operation = AsyncMock(side_effect=error)
+    setattr(device._art, delegate, operation)
+
+    with pytest.raises(ResponseError) as raised:
+        await getattr(device, method)(argument)
+
+    assert raised.value is error
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.USER
+    )
+    operation.assert_awaited_once_with(argument)
+    device._art_session.async_connection_failed.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("method", "argument", "delegate"),
+    [
+        ("async_set_motion_timer", "15", "set_motion_timer"),
+        (
+            "async_set_motion_sensitivity",
+            "2",
+            "set_motion_sensitivity",
+        ),
+        (
+            "async_set_brightness_sensor",
+            True,
+            "set_brightness_sensor_setting",
+        ),
+    ],
+)
+@pytest.mark.parametrize("error", [TimeoutError(), OSError("lost")])
+async def test_optional_setting_transport_failure_reports_without_retry(
+    device, method, argument, delegate, error
+):
+    operation = AsyncMock(side_effect=error)
+    setattr(device._art, delegate, operation)
+
+    with pytest.raises(type(error)) as raised:
+        await getattr(device, method)(argument)
+
+    assert raised.value is error
+    device._art_session.async_ensure_ready.assert_awaited_once_with(
+        ArtSessionTrigger.USER
+    )
+    operation.assert_awaited_once_with(argument)
+    device._art_session.async_connection_failed.assert_awaited_once_with(error)
+
+
+@pytest.mark.parametrize(
+    ("method", "attribute", "expected"),
+    [
+        ("async_get_art_brightness", "brightness", 7),
+        ("async_get_color_temperature", "color_temperature", -2),
+    ],
+)
+async def test_numeric_compatibility_getters_project_aggregate_snapshot(
+    device, method, attribute, expected
+):
+    device.async_get_art_settings = AsyncMock(
+        return_value=EXPECTED_ART_SETTINGS
+    )
+
+    assert await getattr(device, method)() == expected
+    device.async_get_art_settings.assert_awaited_once_with()
+    assert getattr(EXPECTED_ART_SETTINGS, attribute) == expected
+
+
 @pytest.mark.parametrize(
     ("method", "args", "delegate"),
     [
         ("async_get_artmode", (), "get_artmode"),
         ("async_get_current_art", (), "get_current"),
-        ("async_get_art_brightness", (), "get_brightness"),
+        (
+            "async_get_art_brightness",
+            (),
+            "get_art_settings_payload",
+        ),
         ("async_get_art_thumbnail", ("MY_F0001",), "get_thumbnail"),
-        ("async_get_color_temperature", (), "get_color_temperature"),
+        (
+            "async_get_color_temperature",
+            (),
+            "get_art_settings_payload",
+        ),
+        ("async_get_art_settings", (), "get_art_settings_payload"),
+        ("async_get_slideshow_state", (), "get_auto_rotation_status"),
     ],
 )
 async def test_art_getters_return_none_without_opening_after_stop(
@@ -414,6 +962,17 @@ async def test_art_getters_return_none_without_opening_after_stop(
         ("async_set_favourite", ("MY_F0001", True), "set_favourite"),
         ("async_set_color_temperature", (4,), "set_color_temperature"),
         ("async_set_slideshow", (60, False, "MY-C0002"), "set_slideshow"),
+        ("async_set_motion_timer", ("15",), "set_motion_timer"),
+        (
+            "async_set_motion_sensitivity",
+            ("2",),
+            "set_motion_sensitivity",
+        ),
+        (
+            "async_set_brightness_sensor",
+            (True,),
+            "set_brightness_sensor_setting",
+        ),
     ],
 )
 async def test_art_mutations_fail_without_opening_after_stop(
@@ -525,6 +1084,24 @@ async def test_user_mutation_response_error_keeps_session_ready(device):
             "set_slideshow",
             (60, False, "MY-C0002"),
         ),
+        (
+            "async_set_motion_timer",
+            ("15",),
+            "set_motion_timer",
+            ("15",),
+        ),
+        (
+            "async_set_motion_sensitivity",
+            ("2",),
+            "set_motion_sensitivity",
+            ("2",),
+        ),
+        (
+            "async_set_brightness_sensor",
+            (True,),
+            "set_brightness_sensor_setting",
+            (True,),
+        ),
     ],
 )
 async def test_all_art_mutations_ensure_user_and_execute_once(
@@ -561,6 +1138,17 @@ async def test_all_art_mutations_ensure_user_and_execute_once(
             "async_set_slideshow",
             (60, False, "MY-C0002"),
             "set_slideshow",
+        ),
+        ("async_set_motion_timer", ("15",), "set_motion_timer"),
+        (
+            "async_set_motion_sensitivity",
+            ("2",),
+            "set_motion_sensitivity",
+        ),
+        (
+            "async_set_brightness_sensor",
+            (True,),
+            "set_brightness_sensor_setting",
         ),
     ],
 )
@@ -1616,29 +2204,6 @@ async def test_get_current_art_returns_content_id(hass, device):
     assert await device.async_get_current_art() == "MY_F0034"
 
 
-@pytest.mark.parametrize(
-    ("getter", "legacy_request", "value"),
-    [
-        ("async_get_art_brightness", "get_brightness", 5),
-        ("async_get_color_temperature", "get_color_temperature", 2),
-    ],
-)
-async def test_numeric_art_getter_malformed_settings_falls_back_without_reset(
-    device, getter, legacy_request, value
-):
-    device._art.request = AsyncMock(
-        side_effect=[{"data": "not-json"}, {"value": value}]
-    )
-    device._art.close = AsyncMock()
-
-    assert await getattr(device, getter)() == value
-    assert device._art.request.await_args_list == [
-        (("get_artmode_settings",), {}),
-        ((legacy_request,), {}),
-    ]
-    device._art.close.assert_not_awaited()
-
-
 async def test_thumbnail_d2d_failure_does_not_reset_or_retry(device, caplog):
     caplog.set_level(logging.DEBUG, logger="custom_components.samsungtv_frame")
     private_value = "private-thumbnail-error"
@@ -1670,7 +2235,15 @@ async def test_all_art_operations_stay_off_executor(hass, device):
     device._art.get_artmode = AsyncMock(return_value="off")
     device._art.set_artmode = AsyncMock()
     device._art.get_current = AsyncMock(return_value={"content_id": "MY_F0001"})
-    device._art.get_brightness = AsyncMock(return_value=5)
+    device._art.get_art_settings_payload = AsyncMock(
+        return_value=VALID_ART_SETTINGS_PAYLOAD
+    )
+    device._art.get_legacy_brightness = AsyncMock()
+    device._art.get_legacy_color_temperature = AsyncMock()
+    device._art.get_auto_rotation_status = AsyncMock(
+        return_value=MODERN_SLIDESHOW_PAYLOAD
+    )
+    device._art.get_legacy_slideshow_status = AsyncMock()
     device._art.set_brightness = AsyncMock()
     device._art.select_image = AsyncMock()
     device._art.upload = AsyncMock(return_value="MY_F0002")
@@ -1679,14 +2252,18 @@ async def test_all_art_operations_stay_off_executor(hass, device):
     device._art.change_matte = AsyncMock()
     device._art.set_photo_filter = AsyncMock()
     device._art.set_favourite = AsyncMock()
-    device._art.get_color_temperature = AsyncMock(return_value=3)
     device._art.set_color_temperature = AsyncMock()
     device._art.set_slideshow = AsyncMock()
+    device._art.set_motion_timer = AsyncMock()
+    device._art.set_motion_sensitivity = AsyncMock()
+    device._art.set_brightness_sensor_setting = AsyncMock()
 
     with patch.object(hass, "async_add_executor_job") as executor:
         await device.async_get_artmode()
         await device.async_set_artmode(True)
         await device.async_get_current_art()
+        await device.async_get_art_settings()
+        await device.async_get_slideshow_state()
         await device.async_get_art_brightness()
         await device.async_set_art_brightness(6)
         await device.async_select_art("MY_F0001", True)
@@ -1699,6 +2276,9 @@ async def test_all_art_operations_stay_off_executor(hass, device):
         await device.async_get_color_temperature()
         await device.async_set_color_temperature(4)
         await device.async_set_slideshow(60, False, "MY-C0002")
+        await device.async_set_motion_timer("15")
+        await device.async_set_motion_sensitivity("2")
+        await device.async_set_brightness_sensor(True)
 
     executor.assert_not_called()
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from enum import StrEnum
 from typing import Any
 
 from async_upnp_client.aiohttp import AiohttpSessionRequester
@@ -19,6 +20,13 @@ from samsungtvws.exceptions import (
 from samsungtvws.remote import ChannelEmitCommand, SendRemoteKey
 from wakeonlan import send_magic_packet
 
+from .art_session import (
+    ArtSession,
+    ArtSessionState,
+    ArtSessionTrigger,
+    StateCallback,
+)
+from .art_settings import normalize_art_setting, parse_art_settings, parse_slideshow
 from .const import (
     DOMAIN,
     LOGGER,
@@ -27,18 +35,31 @@ from .const import (
     REMOTE_CLOSE_DEADLINE,
     REMOTE_DRAIN_DEADLINE,
 )
-from .art_session import (
-    ArtSession,
-    ArtSessionState,
-    ArtSessionTrigger,
-    StateCallback,
-)
 from .frame_art import ArtEventCallback, FrameArt, TaskFactory
 from .frame_remote import FrameRemote, RemotePairingRequired
+from .models import ArtSettingKey, ArtSettingsSnapshot, SlideshowState
 from .rest import PrivacySafeSamsungTVAsyncRest
 
 _RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
 _DMR_URL = "http://{host}:9197/dmr"
+_ART_READ_FAILED = object()
+
+
+class _ArtSettingsDialect(StrEnum):
+    """Generation-scoped Art settings command dialect."""
+
+    UNKNOWN = "unknown"
+    AGGREGATE = "aggregate"
+    LEGACY = "legacy"
+
+
+class _SlideshowDialect(StrEnum):
+    """Generation-scoped slideshow command dialect."""
+
+    UNKNOWN = "unknown"
+    AUTO_ROTATION = "auto_rotation"
+    LEGACY = "legacy"
+    UNSUPPORTED = "unsupported"
 
 
 class FrameDevice:
@@ -94,6 +115,9 @@ class FrameDevice:
         # True after any successful foreground remote-channel operation this
         # run; power and unload boundaries invalidate the observation.
         self.remote_confirmed = False
+        self._optional_dialect_generation: int | None = None
+        self._art_settings_dialect = _ArtSettingsDialect.UNKNOWN
+        self._slideshow_dialect = _SlideshowDialect.UNKNOWN
 
     @property
     def host(self) -> str:
@@ -264,6 +288,72 @@ class FrameDevice:
             await self._art_session.async_connection_failed(err)
             return None
 
+    async def _async_art_read_response(
+        self, operation: Callable[[], Awaitable[Any]]
+    ) -> Any:
+        """Run an optional read while preserving correlated response errors."""
+        if self._stopped or not self._art_session.ready:
+            return _ART_READ_FAILED
+        try:
+            return await operation()
+        except ResponseError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            await self._art_session.async_connection_failed(err)
+            return _ART_READ_FAILED
+
+    def _reset_optional_dialects_for_generation(self, generation: int) -> None:
+        """Reset optional command choices at each ready generation boundary."""
+        if self._optional_dialect_generation == generation:
+            return
+        self._optional_dialect_generation = generation
+        self._art_settings_dialect = _ArtSettingsDialect.UNKNOWN
+        self._slideshow_dialect = _SlideshowDialect.UNKNOWN
+
+    def _optional_generation_is_current(self, generation: int) -> bool:
+        """Return whether an optional response is fresh for this generation."""
+        return (
+            not self._stopped
+            and self.art_ready
+            and self.art_generation == generation
+        )
+
+    async def _async_get_legacy_art_settings(
+        self, generation: int
+    ) -> ArtSettingsSnapshot | None:
+        """Read supported legacy settings without confusing absence and loss."""
+        supported: set[ArtSettingKey] = set()
+        normalized: dict[ArtSettingKey, int | str | bool | None] = {}
+        getters = (
+            (ArtSettingKey.BRIGHTNESS, self._art.get_legacy_brightness),
+            (
+                ArtSettingKey.COLOR_TEMPERATURE,
+                self._art.get_legacy_color_temperature,
+            ),
+        )
+        for key, getter in getters:
+            try:
+                value = await self._async_art_read_response(getter)
+            except ResponseError:
+                if not self._optional_generation_is_current(generation):
+                    return None
+                continue
+            if (
+                value is _ART_READ_FAILED
+                or not self._optional_generation_is_current(generation)
+            ):
+                return None
+            supported.add(key)
+            normalized[key] = normalize_art_setting(key, value)
+
+        return ArtSettingsSnapshot(
+            supported=frozenset(supported),
+            brightness=normalized.get(ArtSettingKey.BRIGHTNESS),
+            color_temperature=normalized.get(
+                ArtSettingKey.COLOR_TEMPERATURE
+            ),
+        )
+
     async def _async_art_mutation(
         self, operation: Callable[[], Awaitable[Any]]
     ) -> Any:
@@ -299,12 +389,81 @@ class FrameDevice:
             return current.get("content_id")
         return None
 
-    async def async_get_art_brightness(self) -> int | None:
-        value = await self._async_art_read(self._art.get_brightness)
+    async def async_get_art_settings(self) -> ArtSettingsSnapshot | None:
+        """Return normalized Art settings without opening the Art session."""
+        generation = self.art_generation
+        self._reset_optional_dialects_for_generation(generation)
+        if self._art_settings_dialect is _ArtSettingsDialect.LEGACY:
+            return await self._async_get_legacy_art_settings(generation)
         try:
-            return int(value)
-        except (TypeError, ValueError):
+            payload = await self._async_art_read_response(
+                self._art.get_art_settings_payload
+            )
+        except ResponseError:
+            if not self._optional_generation_is_current(generation):
+                return None
+            self._art_settings_dialect = _ArtSettingsDialect.LEGACY
+            return await self._async_get_legacy_art_settings(generation)
+        if (
+            payload is _ART_READ_FAILED
+            or not self._optional_generation_is_current(generation)
+        ):
             return None
+        snapshot = (
+            parse_art_settings(payload) if isinstance(payload, dict) else None
+        )
+        if (
+            snapshot is not None
+            and self._optional_generation_is_current(generation)
+        ):
+            self._art_settings_dialect = _ArtSettingsDialect.AGGREGATE
+        return snapshot
+
+    async def async_get_slideshow_state(self) -> SlideshowState | None:
+        """Return normalized slideshow state using one cached dialect."""
+        generation = self.art_generation
+        self._reset_optional_dialects_for_generation(generation)
+        dialect = self._slideshow_dialect
+        if dialect is _SlideshowDialect.UNSUPPORTED:
+            return None
+        if dialect is _SlideshowDialect.LEGACY:
+            getter = self._art.get_legacy_slideshow_status
+        else:
+            getter = self._art.get_auto_rotation_status
+        try:
+            payload = await self._async_art_read_response(getter)
+        except ResponseError:
+            if not self._optional_generation_is_current(generation):
+                return None
+            if dialect is _SlideshowDialect.LEGACY:
+                self._slideshow_dialect = _SlideshowDialect.UNSUPPORTED
+                return None
+            try:
+                payload = await self._async_art_read_response(
+                    self._art.get_legacy_slideshow_status
+                )
+            except ResponseError:
+                if self._optional_generation_is_current(generation):
+                    self._slideshow_dialect = _SlideshowDialect.UNSUPPORTED
+                return None
+            dialect = _SlideshowDialect.LEGACY
+        else:
+            dialect = (
+                _SlideshowDialect.LEGACY
+                if dialect is _SlideshowDialect.LEGACY
+                else _SlideshowDialect.AUTO_ROTATION
+            )
+        if (
+            payload is _ART_READ_FAILED
+            or not self._optional_generation_is_current(generation)
+        ):
+            return None
+        self._slideshow_dialect = dialect
+        return parse_slideshow(payload) if isinstance(payload, dict) else None
+
+    async def async_get_art_brightness(self) -> int | None:
+        settings = await self.async_get_art_settings()
+        return settings.brightness if settings is not None else None
 
     async def async_set_art_brightness(self, value: int) -> None:
         await self._async_art_mutation(
@@ -358,13 +517,8 @@ class FrameDevice:
         )
 
     async def async_get_color_temperature(self) -> int | None:
-        value = await self._async_art_read(
-            self._art.get_color_temperature
-        )
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+        settings = await self.async_get_art_settings()
+        return settings.color_temperature if settings is not None else None
 
     async def async_set_color_temperature(self, value: int) -> None:
         await self._async_art_mutation(
@@ -377,6 +531,24 @@ class FrameDevice:
         """Configure the art slideshow."""
         await self._async_art_mutation(
             lambda: self._art.set_slideshow(duration, shuffle, category_id)
+        )
+
+    async def async_set_motion_timer(self, value: str) -> None:
+        """Set the Art Mode motion timer after one user readiness probe."""
+        await self._async_art_mutation(
+            lambda: self._art.set_motion_timer(value)
+        )
+
+    async def async_set_motion_sensitivity(self, value: str) -> None:
+        """Set motion sensitivity after one user readiness probe."""
+        await self._async_art_mutation(
+            lambda: self._art.set_motion_sensitivity(value)
+        )
+
+    async def async_set_brightness_sensor(self, enabled: bool) -> None:
+        """Set automatic brightness after one user readiness probe."""
+        await self._async_art_mutation(
+            lambda: self._art.set_brightness_sensor_setting(enabled)
         )
 
     async def async_turn_on(self) -> None:

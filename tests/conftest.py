@@ -49,6 +49,8 @@ def mock_device() -> MagicMock:
     device.async_set_mute = AsyncMock()
     device.async_hold_key = AsyncMock()
     device.async_get_current_art = AsyncMock(return_value=None)
+    device.async_get_art_settings = AsyncMock(return_value=None)
+    device.async_get_slideshow_state = AsyncMock(return_value=None)
     device.async_get_art_brightness = AsyncMock(return_value=None)
     device.async_set_art_brightness = AsyncMock()
     device.async_select_art = AsyncMock()
@@ -61,5 +63,8 @@ def mock_device() -> MagicMock:
     device.async_upload_art = AsyncMock(return_value="MY_F9999")
     device.async_delete_art = AsyncMock()
     device.async_set_slideshow = AsyncMock()
+    device.async_set_motion_timer = AsyncMock()
+    device.async_set_motion_sensitivity = AsyncMock()
+    device.async_set_brightness_sensor = AsyncMock()
     device.newest_token = None  # plain attr: MagicMock's default would be truthy
     return device

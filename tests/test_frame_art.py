@@ -14,7 +14,6 @@ from samsungtvws.command import SamsungTVSleepCommand
 from samsungtvws.exceptions import ConnectionFailure, ResponseError, UnauthorizedError
 from websockets.protocol import State
 
-from custom_components.samsungtv_frame.device import FrameDevice
 from custom_components.samsungtv_frame.frame_art import (
     ArtHostUnavailable,
     FrameArt,
@@ -282,128 +281,44 @@ async def test_get_current_returns_artwork_payload():
     art.request.assert_awaited_once_with("get_current_artwork")
 
 
-async def test_get_artmode_settings_extracts_nested_setting():
-    art = make_art()
-    payload = {
-        "data": json.dumps(
-            [
-                {"item": "brightness", "value": 7},
-                {"item": "color_temperature", "value": 3},
-            ]
-        )
-    }
-    art.request = AsyncMock(return_value=payload)
-
-    assert await art.get_artmode_settings("brightness") == {
-        "item": "brightness",
-        "value": 7,
-    }
-    art.request.assert_awaited_once_with("get_artmode_settings")
-
-
-async def test_get_artmode_settings_skips_malformed_members_before_match():
-    art = make_art()
-    payload = {
-        "data": json.dumps(
-            [
-                None,
-                4,
-                "invalid",
-                ["item", "brightness"],
-                {"item": "brightness", "value": 7},
-            ]
-        )
-    }
-    art.request = AsyncMock(return_value=payload)
-
-    assert await art.get_artmode_settings("brightness") == {
-        "item": "brightness",
-        "value": 7,
-    }
-
-
 @pytest.mark.parametrize(
-    "nested_data",
-    [None, 4, "invalid", {"item": "brightness", "value": 7}],
-)
-async def test_get_artmode_settings_non_list_returns_payload(nested_data):
-    art = make_art()
-    payload = {"data": json.dumps(nested_data)}
-    art.request = AsyncMock(return_value=payload)
-
-    assert await art.get_artmode_settings("brightness") is payload
-
-
-async def test_numeric_device_getter_ignores_malformed_nested_settings(hass):
-    device = FrameDevice(
-        hass,
-        host="1.2.3.4",
-        mac="A0:D0:5B:86:CE:B7",
-        token="tok",
-        ssl_context=MagicMock(),
-        task_factory=task_factory,
-    )
-    session = MagicMock(ready=True)
-    session.async_connection_failed = AsyncMock()
-    device._art_session = session
-    device._art.request = AsyncMock(
-        return_value={
-            "data": json.dumps(
-                [None, "invalid", {"item": "brightness", "value": 7}]
-            )
-        }
-    )
-
-    assert await device.async_get_art_brightness() == 7
-    session.async_connection_failed.assert_not_awaited()
-
-
-async def test_get_artmode_settings_propagates_nested_json_error():
-    art = make_art()
-    payload = {"data": "not-json"}
-    art.request = AsyncMock(return_value=payload)
-
-    with pytest.raises(json.JSONDecodeError):
-        await art.get_artmode_settings("brightness")
-
-
-@pytest.mark.parametrize(
-    ("getter", "setting", "value"),
+    ("getter", "request_name", "payload", "expected"),
     [
-        ("get_brightness", "brightness", 8),
-        ("get_color_temperature", "color_temperature", 4),
+        (
+            "get_art_settings_payload",
+            "get_artmode_settings",
+            {"data": "[]"},
+            {"data": "[]"},
+        ),
+        (
+            "get_auto_rotation_status",
+            "get_auto_rotation_status",
+            {"value": "15", "type": "slideshow"},
+            {"value": "15", "type": "slideshow"},
+        ),
+        (
+            "get_legacy_slideshow_status",
+            "get_slideshow_status",
+            {"value": "off", "type": "slideshow"},
+            {"value": "off", "type": "slideshow"},
+        ),
+        ("get_legacy_brightness", "get_brightness", {"value": "7"}, "7"),
+        (
+            "get_legacy_color_temperature",
+            "get_color_temperature",
+            {"value": "-2"},
+            "-2",
+        ),
     ],
 )
-async def test_numeric_getters_use_artmode_settings(getter, setting, value):
-    art = make_art()
-    art.request = AsyncMock(
-        return_value={"data": json.dumps([{"item": setting, "value": value}])}
-    )
-
-    assert await getattr(art, getter)() == value
-    art.request.assert_awaited_once_with("get_artmode_settings")
-
-
-@pytest.mark.parametrize(
-    ("getter", "request_name", "value"),
-    [
-        ("get_brightness", "get_brightness", 5),
-        ("get_color_temperature", "get_color_temperature", 2),
-    ],
-)
-async def test_numeric_getters_fall_back_after_response_error(
-    getter, request_name, value
+async def test_optional_getters_send_exact_raw_requests(
+    getter, request_name, payload, expected
 ):
     art = make_art()
-    art.request = AsyncMock(
-        side_effect=[ResponseError("unsupported"), {"value": value}]
-    )
+    art.request = AsyncMock(return_value=payload)
 
-    assert await getattr(art, getter)() == value
-    assert art.request.await_args_list == [
-        (("get_artmode_settings",), {}),
-        ((request_name,), {}),
-    ]
+    assert await getattr(art, getter)() == expected
+    art.request.assert_awaited_once_with(request_name)
 
 
 @pytest.mark.parametrize(
@@ -419,6 +334,108 @@ async def test_numeric_setters_send_value(setter, request_name):
 
     assert await getattr(art, setter)(6) == {"event": "changed"}
     art.request.assert_awaited_once_with(request_name, value=6)
+
+
+@pytest.mark.parametrize(
+    ("setter", "argument", "request_name", "wire_value"),
+    [
+        ("set_motion_timer", "5", "set_motion_timer", "5"),
+        (
+            "set_motion_sensitivity",
+            "1",
+            "set_motion_sensitivity",
+            "1",
+        ),
+        (
+            "set_brightness_sensor_setting",
+            False,
+            "set_brightness_sensor_setting",
+            "off",
+        ),
+    ],
+)
+async def test_optional_setters_correlate_exact_ls03b_payload(
+    setter, argument, request_name, wire_value
+):
+    art = make_art()
+    websocket = FakeWebSocket(handshake_frames())
+    response = {
+        "event": request_name,
+        "request_id": "request-1",
+        "value": wire_value,
+    }
+
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            AsyncMock(return_value=websocket),
+        ),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.uuid.uuid4",
+            return_value="request-1",
+        ),
+    ):
+        await art.start_listening()
+        operation = asyncio.create_task(getattr(art, setter)(argument))
+        try:
+            await wait_for_sent(websocket, 1)
+            assert sent_art_request(websocket, 0) == {
+                "request": request_name,
+                "value": wire_value,
+                "id": "request-1",
+                "request_id": "request-1",
+            }
+
+            await websocket.frames.put(
+                art_response(
+                    event=request_name,
+                    request_id="another-request",
+                    value=wire_value,
+                )
+            )
+            await asyncio.sleep(0)
+            assert not operation.done()
+
+            await websocket.frames.put(art_response(**response))
+            assert await operation == response
+        finally:
+            if not operation.done():
+                operation.cancel()
+                await asyncio.gather(operation, return_exceptions=True)
+            await art.close()
+
+
+@pytest.mark.parametrize(
+    ("setter", "value", "message"),
+    [
+        *[
+            ("set_motion_timer", value, "Invalid motion timer")
+            for value in (None, False, 5, "", "0", "1", "10", "241")
+        ],
+        *[
+            ("set_motion_sensitivity", value, "Invalid motion sensitivity")
+            for value in (None, False, 1, "", "0", "4")
+        ],
+        *[
+            (
+                "set_brightness_sensor_setting",
+                value,
+                "Brightness sensor state must be boolean",
+            )
+            for value in (None, 0, 1, "on", "off")
+        ],
+    ],
+)
+async def test_optional_setters_reject_invalid_domain_before_request(
+    setter, value, message
+):
+    art = make_art()
+    art.request = AsyncMock()
+
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        await getattr(art, setter)(value)
+
+    art.request.assert_not_awaited()
 
 
 async def test_select_image_sends_exact_payload():

@@ -31,6 +31,7 @@ from samsungtvws.exceptions import (
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.protocol import State
 
+from .art_settings import MOTION_SENSITIVITIES, MOTION_TIMERS
 from .const import (
     ART_CLOSE_DEADLINE,
     ART_CONNECT_DEADLINE,
@@ -377,46 +378,56 @@ class FrameArt(SamsungTVWSAsyncConnection):
         """Return the current artwork payload."""
         return await self.request("get_current_artwork")
 
-    async def get_artmode_settings(
-        self, setting: str = ""
-    ) -> dict[str, Any]:
-        """Return all Art Mode settings or one nested setting entry."""
-        payload = await self.request("get_artmode_settings")
-        nested = payload.get("data")
-        if isinstance(nested, str):
-            nested_data = json.loads(nested)
-            if isinstance(nested_data, list):
-                for item in nested_data:
-                    if (
-                        isinstance(item, dict)
-                        and item.get("item") == setting
-                    ):
-                        return item
-        return payload
+    async def get_art_settings_payload(self) -> dict[str, Any]:
+        """Return the raw aggregate Art Mode settings payload."""
+        return await self.request("get_artmode_settings")
 
-    async def get_brightness(self) -> Any:
-        """Return the Art Mode brightness level."""
-        try:
-            payload = await self.get_artmode_settings("brightness")
-            return payload.get("value")
-        except (ResponseError, json.JSONDecodeError):
-            return await self._get_value("get_brightness")
+    async def get_auto_rotation_status(self) -> dict[str, Any]:
+        """Return the raw modern slideshow status payload."""
+        return await self.request("get_auto_rotation_status")
+
+    async def get_legacy_slideshow_status(self) -> dict[str, Any]:
+        """Return the raw legacy slideshow status payload."""
+        return await self.request("get_slideshow_status")
+
+    async def get_legacy_brightness(self) -> Any:
+        """Return the correlated legacy Art Mode brightness value."""
+        return (await self.request("get_brightness")).get("value")
+
+    async def get_legacy_color_temperature(self) -> Any:
+        """Return the correlated legacy color-temperature value."""
+        return (await self.request("get_color_temperature")).get("value")
 
     async def set_brightness(self, value: Any) -> dict[str, Any]:
         """Set the Art Mode brightness level."""
         return await self.request("set_brightness", value=value)
 
-    async def get_color_temperature(self) -> Any:
-        """Return the Art Mode color temperature."""
-        try:
-            payload = await self.get_artmode_settings("color_temperature")
-            return payload.get("value")
-        except (ResponseError, json.JSONDecodeError):
-            return await self._get_value("get_color_temperature")
-
     async def set_color_temperature(self, value: Any) -> dict[str, Any]:
         """Set the Art Mode color temperature."""
         return await self.request("set_color_temperature", value=value)
+
+    async def set_motion_timer(self, value: str) -> dict[str, Any]:
+        """Set the motion timer to one supported wire value."""
+        if value not in MOTION_TIMERS:
+            raise ValueError("Invalid motion timer")
+        return await self.request("set_motion_timer", value=value)
+
+    async def set_motion_sensitivity(self, value: str) -> dict[str, Any]:
+        """Set motion sensitivity to one supported wire value."""
+        if value not in MOTION_SENSITIVITIES:
+            raise ValueError("Invalid motion sensitivity")
+        return await self.request("set_motion_sensitivity", value=value)
+
+    async def set_brightness_sensor_setting(
+        self, enabled: bool
+    ) -> dict[str, Any]:
+        """Enable or disable automatic Art Mode brightness."""
+        if not isinstance(enabled, bool):
+            raise ValueError("Brightness sensor state must be boolean")
+        return await self.request(
+            "set_brightness_sensor_setting",
+            value="on" if enabled else "off",
+        )
 
     async def select_image(
         self,
