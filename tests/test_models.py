@@ -1,6 +1,16 @@
+from dataclasses import FrozenInstanceError
+
 import pytest
 
-from custom_components.samsungtv_frame.models import TvMode, derive_tv_mode
+from custom_components.samsungtv_frame.models import (
+    ArtSettingKey,
+    ArtSettingsSnapshot,
+    FrameData,
+    SlideshowMode,
+    SlideshowState,
+    TvMode,
+    derive_tv_mode,
+)
 
 
 @pytest.mark.parametrize(
@@ -39,3 +49,23 @@ def test_derive_tv_mode_standby_wins(reachable, art_mode, power_state, expected)
         derive_tv_mode(reachable, art_mode, power_state, standby_wins=True)
         == expected
     )
+
+
+def test_frame_data_optional_art_details_default_unknown():
+    data = FrameData(True, "on", True, TvMode.ART_MODE)
+
+    assert data.art_settings is None
+    assert data.slideshow is None
+    assert data.optional_art_generation is None
+
+
+def test_art_detail_snapshots_are_immutable():
+    settings = ArtSettingsSnapshot(
+        supported=frozenset({ArtSettingKey.BRIGHTNESS}), brightness=7
+    )
+    slideshow = SlideshowState(SlideshowMode.SEQUENTIAL, 30, "MY-C0004")
+
+    with pytest.raises(FrozenInstanceError):
+        settings.brightness = 8
+    with pytest.raises(FrozenInstanceError):
+        slideshow.duration_minutes = 60

@@ -14,6 +14,24 @@ class TvMode(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ArtSettingKey(StrEnum):
+    """Known optional Art Mode setting keys."""
+
+    BRIGHTNESS = "brightness"
+    COLOR_TEMPERATURE = "color_temperature"
+    MOTION_TIMER = "motion_timer"
+    MOTION_SENSITIVITY = "motion_sensitivity"
+    BRIGHTNESS_SENSOR = "brightness_sensor_setting"
+
+
+class SlideshowMode(StrEnum):
+    """Known slideshow playback modes."""
+
+    OFF = "off"
+    SEQUENTIAL = "sequential"
+    SHUFFLE = "shuffle"
+
+
 def derive_tv_mode(
     reachable: bool,
     art_mode: bool | None,
@@ -51,6 +69,27 @@ def derive_tv_mode(
 
 
 @dataclass(frozen=True)
+class ArtSettingsSnapshot:
+    """Normalized optional Art Mode settings and their advertised support."""
+
+    supported: frozenset[ArtSettingKey] = frozenset()
+    brightness: int | None = None
+    color_temperature: int | None = None
+    motion_timer: str | None = None
+    motion_sensitivity: str | None = None
+    brightness_sensor_enabled: bool | None = None
+
+
+@dataclass(frozen=True)
+class SlideshowState:
+    """Normalized slideshow state."""
+
+    mode: SlideshowMode
+    duration_minutes: int
+    category_id: str | None = None
+
+
+@dataclass(frozen=True)
 class FrameData:
     """Single fan-in snapshot of TV state shared by all entities."""
 
@@ -64,3 +103,6 @@ class FrameData:
     running_app: str | None = None
     volume_level: float | None = None
     is_muted: bool | None = None
+    art_settings: ArtSettingsSnapshot | None = None
+    slideshow: SlideshowState | None = None
+    optional_art_generation: int | None = None
