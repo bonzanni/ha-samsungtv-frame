@@ -14,8 +14,10 @@ from samsungtvws.command import SamsungTVSleepCommand
 from samsungtvws.exceptions import ConnectionFailure, ResponseError, UnauthorizedError
 from websockets.protocol import State
 
+from custom_components.samsungtv_frame.const import ART_PROBE_DEADLINE
 from custom_components.samsungtv_frame.frame_art import (
     ArtHostUnavailable,
+    ArtProbeTimeout,
     FrameArt,
 )
 from custom_components.samsungtv_frame.websocket_privacy import (
@@ -318,7 +320,7 @@ async def test_optional_getters_send_exact_raw_requests(
     art.request = AsyncMock(return_value=payload)
 
     assert await getattr(art, getter)() == expected
-    art.request.assert_awaited_once_with(request_name)
+    art.request.assert_awaited_once_with(request_name, probe=True)
 
 
 @pytest.mark.parametrize(
@@ -2500,6 +2502,88 @@ async def test_request_timeout_closes_transport():
         await art.request("get_artmode_status")
     assert ws.closed
     assert art.connection is None
+    assert not art._pending
+
+
+def test_art_probe_timeout_is_not_a_normal_timeout():
+    assert ART_PROBE_DEADLINE == 5
+    assert issubclass(ArtProbeTimeout, Exception)
+    assert not issubclass(ArtProbeTimeout, TimeoutError)
+    assert not issubclass(ArtProbeTimeout, ResponseError)
+
+
+async def test_probe_timeout_preserves_transport_and_owns_only_its_waiter():
+    ws = FakeWebSocket(handshake_frames())
+    art = make_art()
+    with (
+        patch(
+            "custom_components.samsungtv_frame.frame_art.connect",
+            AsyncMock(return_value=ws),
+        ),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.ART_PROBE_DEADLINE",
+            0.01,
+        ),
+    ):
+        await art.start_listening()
+        with pytest.raises(ArtProbeTimeout):
+            await art.request("get_auto_rotation_status", probe=True)
+
+        first_id = sent_art_request(ws, 0)["request_id"]
+        assert not ws.closed
+        assert art.connection is ws
+        assert not art._pending
+        assert art._uuidless_pending is None
+
+        second = asyncio.create_task(
+            art.request("get_slideshow_status", probe=True)
+        )
+        await wait_for_sent(ws, 2)
+        second_id = sent_art_request(ws, 1)["request_id"]
+        assert second_id != first_id
+
+        await ws.frames.put(
+            art_response(
+                event="get_auto_rotation_status",
+                request_id=first_id,
+                value="off",
+            )
+        )
+        await asyncio.sleep(0)
+        assert not second.done()
+
+        expected = {
+            "event": "get_slideshow_status",
+            "request_id": second_id,
+            "value": "off",
+        }
+        await ws.frames.put(art_response(**expected))
+        assert await second == expected
+        await art.close()
+
+
+async def test_probe_deadline_includes_blocked_websocket_send():
+    art = make_art()
+    ws = FakeWebSocket([])
+    art.connection = ws
+    art.is_alive = MagicMock(return_value=True)
+    never_release = asyncio.Event()
+
+    async def blocked_send(*_args):
+        await never_release.wait()
+
+    with (
+        patch.object(art, "_send_command", side_effect=blocked_send),
+        patch(
+            "custom_components.samsungtv_frame.frame_art.ART_PROBE_DEADLINE",
+            0.01,
+        ),
+        pytest.raises(ArtProbeTimeout),
+    ):
+        await art.request("get_artmode_settings", probe=True)
+
+    assert not ws.closed
+    assert art.connection is ws
     assert not art._pending
 
 

@@ -36,6 +36,7 @@ from .const import (
     ART_CLOSE_DEADLINE,
     ART_CONNECT_DEADLINE,
     ART_D2D_DEADLINE,
+    ART_PROBE_DEADLINE,
     ART_REQUEST_DEADLINE,
     CLIENT_NAME,
     DOMAIN,
@@ -59,6 +60,10 @@ class ArtHostUnavailable(ConnectionFailure):
 
 class ArtCleanupPending(ConnectionFailure):
     """A prior Art generation still owns live cleanup work."""
+
+
+class ArtProbeTimeout(Exception):
+    """An optional read-only capability probe received no response."""
 
 
 class InvalidArtSettingError(ValueError):
@@ -336,9 +341,10 @@ class FrameArt(SamsungTVWSAsyncConnection):
         self,
         request: str,
         *,
-        expected_sub_event=None,
-        request_id=None,
-        **params,
+        expected_sub_event: str | None = None,
+        request_id: str | None = None,
+        probe: bool = False,
+        **params: Any,
     ) -> dict[str, Any]:
         """Send one serialized Art request and await its correlated response."""
         async with self._operation_lock:
@@ -349,6 +355,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
                 request,
                 expected_sub_event=expected_sub_event,
                 request_id=request_id,
+                probe=probe,
                 **params,
             )
 
@@ -384,23 +391,25 @@ class FrameArt(SamsungTVWSAsyncConnection):
 
     async def get_art_settings_payload(self) -> dict[str, Any]:
         """Return the raw aggregate Art Mode settings payload."""
-        return await self.request("get_artmode_settings")
+        return await self.request("get_artmode_settings", probe=True)
 
     async def get_auto_rotation_status(self) -> dict[str, Any]:
         """Return the raw modern slideshow status payload."""
-        return await self.request("get_auto_rotation_status")
+        return await self.request("get_auto_rotation_status", probe=True)
 
     async def get_legacy_slideshow_status(self) -> dict[str, Any]:
         """Return the raw legacy slideshow status payload."""
-        return await self.request("get_slideshow_status")
+        return await self.request("get_slideshow_status", probe=True)
 
     async def get_legacy_brightness(self) -> Any:
         """Return the correlated legacy Art Mode brightness value."""
-        return (await self.request("get_brightness")).get("value")
+        return (await self.request("get_brightness", probe=True)).get("value")
 
     async def get_legacy_color_temperature(self) -> Any:
         """Return the correlated legacy color-temperature value."""
-        return (await self.request("get_color_temperature")).get("value")
+        return (
+            await self.request("get_color_temperature", probe=True)
+        ).get("value")
 
     async def set_brightness(self, value: Any) -> dict[str, Any]:
         """Set the Art Mode brightness level."""
@@ -760,6 +769,7 @@ class FrameArt(SamsungTVWSAsyncConnection):
         *,
         expected_sub_event: str | None,
         request_id: str | None,
+        probe: bool = False,
         **params: Any,
     ) -> dict[str, Any]:
         """Send a request while the operation lock is held."""
@@ -781,11 +791,14 @@ class FrameArt(SamsungTVWSAsyncConnection):
             if connection is None:
                 raise ConnectionFailure("Art connection closed")
             command = ArtChannelEmitCommand.art_app_request(payload)
+            deadline = ART_PROBE_DEADLINE if probe else ART_REQUEST_DEADLINE
             try:
-                async with asyncio.timeout(ART_REQUEST_DEADLINE):
+                async with asyncio.timeout(deadline):
                     await self._send_command(connection, command, 0)
                     response = await future
             except TimeoutError:
+                if probe:
+                    raise ArtProbeTimeout from None
                 await self.close()
                 raise
 
