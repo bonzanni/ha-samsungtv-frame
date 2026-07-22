@@ -20,6 +20,12 @@ from custom_components.samsungtv_frame.models import (
     ArtSettingsSnapshot,
     TvMode,
 )
+from custom_components.samsungtv_frame.select import (
+    FrameArtMotionSensitivitySelect,
+    FrameArtSleepAfterSelect,
+)
+from custom_components.samsungtv_frame.sensor import FrameSlideshowSensor
+from custom_components.samsungtv_frame.switch import FrameBrightnessSensorSwitch
 
 SLEEP_AFTER = "select.samsung_frame_tv_art_sleep_after"
 MOTION_SENSITIVITY = "select.samsung_frame_tv_art_motion_sensitivity"
@@ -281,9 +287,17 @@ async def test_select_mutation_error_hides_requested_value(
         f"private protocol value {value}"
     )
     getattr(mock_device, device_method).side_effect = error
-    await _setup(hass, mock_device)
+    entry = await _setup(hass, mock_device)
+    coordinator = entry.runtime_data
 
-    with pytest.raises(HomeAssistantError) as raised:
+    with (
+        patch.object(
+            coordinator,
+            "async_request_art_reconcile",
+            new_callable=AsyncMock,
+        ) as reconcile,
+        pytest.raises(HomeAssistantError) as raised,
+    ):
         await hass.services.async_call(
             "select",
             "select_option",
@@ -299,6 +313,20 @@ async def test_select_mutation_error_hides_requested_value(
     }
     assert str(raised.value) == expected[entity_id]
     assert raised.value.__cause__ is error
+    reconcile.assert_not_awaited()
+
+
+def test_task_4_entity_classes_use_translation_keys_without_names():
+    expected = {
+        FrameArtSleepAfterSelect: "art_sleep_after",
+        FrameArtMotionSensitivitySelect: "art_motion_sensitivity",
+        FrameBrightnessSensorSwitch: "art_brightness_sensor",
+        FrameSlideshowSensor: "art_slideshow",
+    }
+
+    for entity_class, translation_key in expected.items():
+        assert entity_class.__dict__["__attr_translation_key"] == translation_key
+        assert "__attr_name" not in entity_class.__dict__
 
 
 def test_optional_entity_translations_are_exact_and_neutral():

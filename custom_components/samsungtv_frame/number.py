@@ -51,12 +51,9 @@ class FrameArtBrightnessNumber(FrameEntity, NumberEntity):
 
     @property
     def available(self) -> bool:
-        settings = self.coordinator.data.art_settings
-        value = settings.brightness if settings is not None else None
         return super().available and art_setting_available(
             self.coordinator,
             ArtSettingKey.BRIGHTNESS,
-            value,
         )
 
     async def async_set_native_value(self, value: float) -> None:
@@ -91,14 +88,9 @@ class FrameArtColorTempNumber(FrameEntity, NumberEntity):
 
     @property
     def available(self) -> bool:
-        settings = self.coordinator.data.art_settings
-        value = (
-            settings.color_temperature if settings is not None else None
-        )
         return super().available and art_setting_available(
             self.coordinator,
             ArtSettingKey.COLOR_TEMPERATURE,
-            value,
         )
 
     async def async_set_native_value(self, value: float) -> None:

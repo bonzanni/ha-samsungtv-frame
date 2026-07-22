@@ -330,6 +330,49 @@ async def test_set_slideshow_service(hass, mock_device):
     ordinary_refresh.assert_not_awaited()
 
 
+async def test_set_slideshow_mutation_error_hides_submitted_data(
+    hass, mock_device
+):
+    duration_minutes = 123
+    category_id = "MY-PRIVATE-CATEGORY"
+    error = RuntimeError(
+        f"private protocol data {duration_minutes} {category_id}"
+    )
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = False
+    mock_device.async_set_slideshow.side_effect = error
+    entry = await _setup(hass, mock_device)
+    coordinator = entry.runtime_data
+
+    with (
+        patch.object(
+            coordinator,
+            "async_request_art_reconcile",
+            new_callable=AsyncMock,
+        ) as reconcile,
+        pytest.raises(HomeAssistantError) as raised,
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "set_slideshow",
+            {
+                "entity_id": ENTITY,
+                "duration_minutes": duration_minutes,
+                "shuffle": True,
+                "category_id": category_id,
+            },
+            blocking=True,
+        )
+
+    message = str(raised.value)
+    assert message == "Failed to configure the slideshow"
+    assert "private protocol" not in message
+    assert str(duration_minutes) not in message
+    assert category_id not in message
+    assert raised.value.__cause__ is error
+    reconcile.assert_not_awaited()
+
+
 async def test_change_matte_defaults_to_current_art(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = True

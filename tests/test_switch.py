@@ -229,9 +229,17 @@ async def test_brightness_sensor_mutation_error_hides_requested_value(
         "private protocol value False"
     )
     mock_device.async_set_brightness_sensor.side_effect = error
-    await _setup(hass, mock_device)
+    entry = await _setup(hass, mock_device)
+    coordinator = entry.runtime_data
 
-    with pytest.raises(HomeAssistantError) as raised:
+    with (
+        patch.object(
+            coordinator,
+            "async_request_art_reconcile",
+            new_callable=AsyncMock,
+        ) as reconcile,
+        pytest.raises(HomeAssistantError) as raised,
+    ):
         await hass.services.async_call(
             "switch",
             "turn_off",
@@ -243,3 +251,4 @@ async def test_brightness_sensor_mutation_error_hides_requested_value(
     assert "private protocol" not in str(raised.value)
     assert str(raised.value) == "Failed to set art brightness sensor"
     assert raised.value.__cause__ is error
+    reconcile.assert_not_awaited()

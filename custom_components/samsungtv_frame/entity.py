@@ -1,6 +1,8 @@
 """Shared base entity for Samsung Frame TV."""
 from __future__ import annotations
 
+from typing import assert_never
+
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -22,13 +24,26 @@ def optional_art_state_fresh(coordinator: FrameCoordinator) -> bool:
 def art_setting_available(
     coordinator: FrameCoordinator,
     key: ArtSettingKey,
-    value: object | None,
 ) -> bool:
     """Return whether one advertised setting has a current valid value."""
     settings = coordinator.data.art_settings
+    if settings is None:
+        return False
+    match key:
+        case ArtSettingKey.BRIGHTNESS:
+            value = settings.brightness
+        case ArtSettingKey.COLOR_TEMPERATURE:
+            value = settings.color_temperature
+        case ArtSettingKey.MOTION_TIMER:
+            value = settings.motion_timer
+        case ArtSettingKey.MOTION_SENSITIVITY:
+            value = settings.motion_sensitivity
+        case ArtSettingKey.BRIGHTNESS_SENSOR:
+            value = settings.brightness_sensor_enabled
+        case _ as unreachable:
+            assert_never(unreachable)
     return (
         optional_art_state_fresh(coordinator)
-        and settings is not None
         and key in settings.supported
         and value is not None
     )

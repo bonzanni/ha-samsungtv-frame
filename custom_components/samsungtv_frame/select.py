@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from homeassistant.components.select import SelectEntity
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import CONF_MAC
@@ -33,7 +33,6 @@ class FrameArtSleepAfterSelect(FrameEntity, SelectEntity):
     """Select how long Art Mode waits before sleeping."""
 
     _attr_translation_key = "art_sleep_after"
-    _attr_name = "Art sleep after"
     _attr_icon = "mdi:sleep"
     _attr_entity_category = EntityCategory.CONFIG
     _attr_options = ["off", "5", "15", "30", "60", "120", "240"]
@@ -56,7 +55,6 @@ class FrameArtSleepAfterSelect(FrameEntity, SelectEntity):
         return super().available and art_setting_available(
             self.coordinator,
             ArtSettingKey.MOTION_TIMER,
-            self.current_option,
         )
 
     async def async_select_option(self, option: str) -> None:
@@ -72,7 +70,6 @@ class FrameArtMotionSensitivitySelect(FrameEntity, SelectEntity):
     """Select one neutral motion-sensitivity protocol state."""
 
     _attr_translation_key = "art_motion_sensitivity"
-    _attr_name = "Art motion sensitivity"
     _attr_icon = "mdi:motion-sensor"
     _attr_entity_category = EntityCategory.CONFIG
     _attr_options = ["1", "2", "3"]
@@ -95,7 +92,6 @@ class FrameArtMotionSensitivitySelect(FrameEntity, SelectEntity):
         return super().available and art_setting_available(
             self.coordinator,
             ArtSettingKey.MOTION_SENSITIVITY,
-            self.current_option,
         )
 
     async def async_select_option(self, option: str) -> None:

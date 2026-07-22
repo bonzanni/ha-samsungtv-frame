@@ -65,7 +65,6 @@ class FrameSlideshowSensor(FrameEntity, SensorEntity):
     """Expose the current Art Mode slideshow state."""
 
     _attr_translation_key = "art_slideshow"
-    _attr_name = "Art slideshow"
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = list(SlideshowMode)
 

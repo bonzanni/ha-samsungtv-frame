@@ -4,9 +4,9 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import CONF_MAC
@@ -73,7 +73,6 @@ class FrameBrightnessSensorSwitch(FrameEntity, SwitchEntity):
     """Configure the Art Mode automatic brightness sensor."""
 
     _attr_translation_key = "art_brightness_sensor"
-    _attr_name = "Art brightness sensor"
     _attr_icon = "mdi:brightness-auto"
     _attr_entity_category = EntityCategory.CONFIG
 
@@ -85,14 +84,9 @@ class FrameBrightnessSensorSwitch(FrameEntity, SwitchEntity):
 
     @property
     def available(self) -> bool:
-        settings = self.coordinator.data.art_settings
-        value = (
-            settings.brightness_sensor_enabled if settings is not None else None
-        )
         return super().available and art_setting_available(
             self.coordinator,
             ArtSettingKey.BRIGHTNESS_SENSOR,
-            value,
         )
 
     @property

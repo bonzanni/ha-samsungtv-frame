@@ -241,9 +241,17 @@ async def test_optional_number_mutation_error_hides_requested_value(
         f"private protocol value {value}"
     )
     getattr(mock_device, device_method).side_effect = error
-    await _setup(hass, mock_device)
+    entry = await _setup(hass, mock_device)
+    coordinator = entry.runtime_data
 
-    with pytest.raises(HomeAssistantError) as raised:
+    with (
+        patch.object(
+            coordinator,
+            "async_request_art_reconcile",
+            new_callable=AsyncMock,
+        ) as reconcile,
+        pytest.raises(HomeAssistantError) as raised,
+    ):
         await hass.services.async_call(
             "number",
             "set_value",
@@ -259,3 +267,4 @@ async def test_optional_number_mutation_error_hides_requested_value(
     }
     assert str(raised.value) == expected[entity_id]
     assert raised.value.__cause__ is error
+    reconcile.assert_not_awaited()
