@@ -122,6 +122,13 @@ brightness and color-temperature entities are migrated to the canonical
 implementation, they must be derived from that snapshot rather than cached
 independently.
 
+Adopting the snapshot freshness rule is an intentional behaviour change for
+the shipped Art brightness and color-temperature entities. Today those
+entities remain available with an unknown state when the TV is OFF or the Art
+session is unready; after this increment they are unavailable in those
+conditions. Tests must assert the new availability behaviour for both
+entities, and the change must be called out in release notes.
+
 Art push handling must update `FrameData` with `dataclasses.replace` or a
 single snapshot-builder helper. It must not manually reconstruct every field;
 otherwise any new field is silently erased by `art_mode_changed` or
@@ -150,6 +157,11 @@ If the aggregate getter receives a correlated `ResponseError`, the device may
 fall back to the legacy direct brightness and color-temperature getters. It
 must not use legacy fallbacks for timeouts, disconnects, or malformed
 responses, because those are not evidence of an older protocol.
+
+This intentionally tightens existing behaviour: the current getters also
+fall back to legacy reads when nested JSON is malformed (`json.JSONDecodeError`).
+Those code paths and their existing tests must be changed to the
+`ResponseError`-only rule.
 
 ### Slideshow readback
 
@@ -220,9 +232,13 @@ healthy socket merely because a feature is absent.
 ## Coordinator Mutation Refresh
 
 Add `async_request_art_reconcile()` to the coordinator. It marks Art details
-due immediately and then awaits the coordinator refresh. All successful Art
-setting mutations use this method, including the existing brightness and
-color-temperature entities and the slideshow service.
+due immediately and then awaits a direct, undebounced `async_refresh()`.
+It must not use the debounced `async_request_refresh()`, whose request-refresh
+cooldown may return without re-reading Art state after back-to-back mutations.
+All successful Art setting mutations use this method, including the existing
+brightness and color-temperature entities and the slideshow service. Tests
+must cover two mutations within the debounce window and prove both receive an
+authoritative Art readback.
 
 The authoritative readback wins over optimistic state. If the command was
 acknowledged but the follow-up read fails, the command remains successful and
@@ -385,4 +401,3 @@ The increment is complete only when:
 4. setter acknowledgement fixtures reflect sanitized observed LS03B protocol
    evidence, or the affected writable feature is deferred;
 5. no production N150 deployment or reload has occurred.
-
