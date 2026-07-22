@@ -6,13 +6,16 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.samsungtv_frame.const import (
     CONF_HOST, CONF_MAC, CONF_TOKEN, DOMAIN,
 )
+from custom_components.samsungtv_frame.models import ArtSettingsSnapshot
 
 ENTITY = "number.samsung_frame_tv_art_brightness"
+SETTINGS = ArtSettingsSnapshot(brightness=7, color_temperature=-2)
 
 
 async def _setup(hass, mock_device):
     mock_device.art_ready = True
     mock_device.art_generation = 1
+    mock_device.async_get_art_settings.return_value = SETTINGS
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_HOST: "1.2.3.4", CONF_MAC: "A0:D0:5B:86:CE:B7", CONF_TOKEN: "t"},
@@ -30,7 +33,6 @@ async def _setup(hass, mock_device):
 async def test_art_brightness_reflects_data(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = True
-    mock_device.async_get_art_brightness.return_value = 7
     await _setup(hass, mock_device)
     state = hass.states.get(ENTITY)
     assert state is not None
@@ -47,7 +49,6 @@ async def test_art_brightness_unknown_when_off(hass, mock_device):
 async def test_set_art_brightness(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = True
-    mock_device.async_get_art_brightness.return_value = 5
     await _setup(hass, mock_device)
     await hass.services.async_call(
         "number", "set_value",
@@ -59,7 +60,6 @@ async def test_set_art_brightness(hass, mock_device):
 async def test_color_temperature_entity(hass, mock_device):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     mock_device.async_get_artmode.return_value = True
-    mock_device.async_get_color_temperature.return_value = -2
     await _setup(hass, mock_device)
     entity = "number.samsung_frame_tv_art_color_temperature"
     assert hass.states.get(entity).state == "-2"

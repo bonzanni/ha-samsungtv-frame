@@ -10,6 +10,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.samsungtv_frame.art_session import ArtSessionState
 from custom_components.samsungtv_frame.const import (
     ART_FAIL_UNKNOWN_COUNT,
+    ART_RECONCILE_SECONDS,
     CONF_HOST,
     CONF_MAC,
     CONF_TOKEN,
@@ -18,7 +19,45 @@ from custom_components.samsungtv_frame.const import (
 )
 from custom_components.samsungtv_frame.coordinator import FrameCoordinator
 from custom_components.samsungtv_frame.device import FrameDevice
-from custom_components.samsungtv_frame.models import FrameData, TvMode
+from custom_components.samsungtv_frame.models import (
+    ArtSettingKey,
+    ArtSettingsSnapshot,
+    FrameData,
+    SlideshowMode,
+    SlideshowState,
+    TvMode,
+)
+
+
+SETTINGS = ArtSettingsSnapshot(
+    supported=frozenset(
+        {ArtSettingKey.BRIGHTNESS, ArtSettingKey.COLOR_TEMPERATURE}
+    ),
+    brightness=5,
+    color_temperature=3,
+)
+SLIDESHOW = SlideshowState(
+    mode=SlideshowMode.SEQUENTIAL,
+    duration_minutes=15,
+    category_id="MY-CATEGORY",
+)
+SETTINGS_ONE = ArtSettingsSnapshot(
+    supported=frozenset({ArtSettingKey.BRIGHTNESS}),
+    brightness=4,
+)
+SETTINGS_TWO = ArtSettingsSnapshot(
+    supported=frozenset({ArtSettingKey.BRIGHTNESS}),
+    brightness=8,
+)
+SLIDESHOW_ONE = SlideshowState(
+    mode=SlideshowMode.SEQUENTIAL,
+    duration_minutes=10,
+)
+SLIDESHOW_TWO = SlideshowState(
+    mode=SlideshowMode.SHUFFLE,
+    duration_minutes=30,
+    category_id="MY-SECOND-CATEGORY",
+)
 
 
 class FakeClock:
@@ -68,23 +107,35 @@ def _seed_ready_art(
     mock_device.art_generation = generation
     mock_device.async_get_artmode.return_value = art_mode
     mock_device.async_get_current_art.return_value = current_art
-    mock_device.async_get_art_brightness.return_value = brightness
-    mock_device.async_get_color_temperature.return_value = color_temperature
+    supported = frozenset(
+        key
+        for key, value in (
+            (ArtSettingKey.BRIGHTNESS, brightness),
+            (ArtSettingKey.COLOR_TEMPERATURE, color_temperature),
+        )
+        if value is not None
+    )
+    mock_device.async_get_art_settings.return_value = ArtSettingsSnapshot(
+        supported=supported,
+        brightness=brightness,
+        color_temperature=color_temperature,
+    )
+    mock_device.async_get_slideshow_state.return_value = SLIDESHOW
     return clock
 
 
 def _reset_art_getters(mock_device) -> None:
     mock_device.async_get_artmode.reset_mock()
     mock_device.async_get_current_art.reset_mock()
-    mock_device.async_get_art_brightness.reset_mock()
-    mock_device.async_get_color_temperature.reset_mock()
+    mock_device.async_get_art_settings.reset_mock()
+    mock_device.async_get_slideshow_state.reset_mock()
 
 
 def _assert_art_getter_count(mock_device, expected: int) -> None:
     assert mock_device.async_get_artmode.await_count == expected
     assert mock_device.async_get_current_art.await_count == expected
-    assert mock_device.async_get_art_brightness.await_count == expected
-    assert mock_device.async_get_color_temperature.await_count == expected
+    assert mock_device.async_get_art_settings.await_count == expected
+    assert mock_device.async_get_slideshow_state.await_count == expected
 
 
 async def test_update_watching(hass, mock_device):
@@ -238,8 +289,8 @@ async def test_healthy_heartbeats_use_cached_art_without_art_io(
 
     assert mock_device.async_get_artmode.await_count == 1
     assert mock_device.async_get_current_art.await_count == 1
-    assert mock_device.async_get_art_brightness.await_count == 1
-    assert mock_device.async_get_color_temperature.await_count == 1
+    assert mock_device.async_get_art_settings.await_count == 1
+    assert mock_device.async_get_slideshow_state.await_count == 1
 
 
 async def test_new_ready_generation_reconciles_once(hass, mock_device):
@@ -288,6 +339,34 @@ async def test_reconcile_is_spaced_300_seconds(hass, mock_device):
     clock.now = 300.0
     await coord._async_update_data()
     _assert_art_getter_count(mock_device, 2)
+
+
+async def test_two_back_to_back_art_reconciles_bypass_request_debounce(
+    hass, mock_device
+):
+    mock_device.art_ready = True
+    mock_device.art_generation = 1
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.async_get_artmode.return_value = True
+    mock_device.async_get_art_settings.side_effect = [
+        SETTINGS_ONE,
+        SETTINGS_TWO,
+    ]
+    mock_device.async_get_slideshow_state.side_effect = [
+        SLIDESHOW_ONE,
+        SLIDESHOW_TWO,
+    ]
+    coord = _make(hass, mock_device)
+    coord._clock = lambda: 0.0
+
+    await coord.async_request_art_reconcile()
+    await coord.async_request_art_reconcile()
+
+    assert mock_device.async_get_art_settings.await_count == 2
+    assert mock_device.async_get_slideshow_state.await_count == 2
+    assert coord.data.art_settings is SETTINGS_TWO
+    assert coord.data.slideshow is SLIDESHOW_TWO
+    assert coord._next_art_reconcile == ART_RECONCILE_SECONDS
 
 
 async def test_reconcile_never_runs_when_session_not_ready(
@@ -410,23 +489,30 @@ async def test_standby_holds_art_when_trait_not_learned(hass, mock_device):
     assert data.tv_mode is TvMode.ART_MODE
 
 
-async def test_art_poll_fetches_current_art_and_brightness(hass, mock_device):
+async def test_reconcile_reads_one_settings_snapshot_and_one_slideshow(
+    hass, mock_device
+):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.art_ready = True
+    mock_device.art_generation = 4
+    mock_device.async_get_artmode.return_value = True
+    mock_device.async_get_current_art.return_value = "MY_F0034"
+    mock_device.async_get_art_settings.return_value = SETTINGS
+    mock_device.async_get_slideshow_state.return_value = SLIDESHOW
     coord = _make(hass, mock_device)
-    _seed_ready_art(
-        mock_device,
-        coord,
-        generation=1,
-        now=0.0,
-        art_mode=True,
-        current_art="MY_F0034",
-        brightness=7,
-        color_temperature=2,
-    )
-    data = await coord._async_update_data()
+    data = await coord._async_poll()
+
     assert data.current_art == "MY_F0034"
-    assert data.art_brightness == 7
-    assert data.art_color_temperature == 2
+    assert data.art_settings is SETTINGS
+    assert data.slideshow is SLIDESHOW
+    assert data.optional_art_generation == 4
+    assert data.art_brightness == SETTINGS.brightness
+    assert data.art_color_temperature == SETTINGS.color_temperature
+    mock_device.async_get_current_art.assert_awaited_once()
+    mock_device.async_get_art_settings.assert_awaited_once()
+    mock_device.async_get_slideshow_state.assert_awaited_once()
+    mock_device.async_get_art_brightness.assert_not_awaited()
+    mock_device.async_get_color_temperature.assert_not_awaited()
 
 
 async def test_art_extras_skipped_when_watching_but_cache_held(hass, mock_device):
@@ -457,7 +543,9 @@ async def test_art_extras_skipped_when_watching_but_cache_held(hass, mock_device
     assert data.current_art == "MY_F0034"
 
 
-async def test_art_extras_cleared_when_off(hass, mock_device):
+async def test_off_hides_all_art_snapshots_and_optional_generation(
+    hass, mock_device
+):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
     coord = _make(hass, mock_device)
     _seed_ready_art(
@@ -470,7 +558,10 @@ async def test_art_extras_cleared_when_off(hass, mock_device):
         brightness=7,
         color_temperature=2,
     )
-    await coord._async_update_data()
+    first = await coord._async_update_data()
+    assert first.art_settings is not None
+    assert first.slideshow is SLIDESHOW
+    assert first.optional_art_generation == 1
 
     mock_device.async_device_info.return_value = None
     await coord._async_update_data()
@@ -478,6 +569,10 @@ async def test_art_extras_cleared_when_off(hass, mock_device):
     assert data.tv_mode is TvMode.OFF
     assert data.current_art is None
     assert data.art_brightness is None
+    assert data.art_color_temperature is None
+    assert data.art_settings is None
+    assert data.slideshow is None
+    assert data.optional_art_generation is None
 
 
 async def test_image_selected_push_updates_current_art(hass, mock_device):
@@ -494,6 +589,47 @@ async def test_image_selected_push_updates_current_art(hass, mock_device):
     assert coord.data.current_art == "MY_F0042"
     assert coord.data.tv_mode is TvMode.ART_MODE  # mode untouched
     assert coord.data.art_brightness == 5
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"event": "art_mode_changed", "value": "on"},
+        {"event": "image_selected", "content_id": "MY_F0042"},
+        {
+            "event": "slideshow_image_changed",
+            "content_id": "MY_F0042",
+        },
+    ],
+    ids=[
+        "art_mode_changed",
+        "image_selected",
+        "slideshow_image_changed",
+    ],
+)
+async def test_named_push_events_preserve_optional_snapshots_by_identity(
+    hass, mock_device, payload
+):
+    coord = _make(hass, mock_device)
+    coord.data = FrameData(
+        reachable=True,
+        power_state="on",
+        art_mode=False,
+        tv_mode=TvMode.WATCHING,
+        current_art="MY_F0001",
+        art_brightness=SETTINGS.brightness,
+        art_color_temperature=SETTINGS.color_temperature,
+        art_settings=SETTINGS,
+        slideshow=SLIDESHOW,
+        optional_art_generation=4,
+    )
+    coord._art_mode = False
+
+    coord.handle_art_event("d2d_service_message", payload)
+
+    assert coord.data.art_settings is SETTINGS
+    assert coord.data.slideshow is SLIDESHOW
+    assert coord.data.optional_art_generation == 4
 
 
 async def test_session_ready_callback_schedules_one_refresh(
@@ -525,6 +661,50 @@ async def test_session_ready_callback_schedules_one_refresh(
             assert (
                 coord.config_entry.async_create_background_task.call_args.args[2]
                 == "samsungtv_frame-art-ready-refresh"
+            )
+        finally:
+            release_refresh.set()
+            await hass.async_block_till_done(wait_background_tasks=True)
+
+
+async def test_ready_transition_exposes_generation_mismatch_while_refresh_blocked(
+    hass, mock_device
+):
+    coord = _make(hass, mock_device)
+    coord.data = FrameData(
+        reachable=True,
+        power_state="on",
+        art_mode=True,
+        tv_mode=TvMode.ART_MODE,
+        current_art="MY_F0001",
+        art_brightness=SETTINGS_ONE.brightness,
+        art_settings=SETTINGS_ONE,
+        slideshow=SLIDESHOW_ONE,
+        optional_art_generation=1,
+    )
+    mock_device.art_ready = True
+    mock_device.art_generation = 2
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+
+    async def _blocked_refresh():
+        refresh_started.set()
+        await release_refresh.wait()
+
+    with patch.object(
+        coord,
+        "async_request_refresh",
+        AsyncMock(side_effect=_blocked_refresh),
+    ):
+        try:
+            coord.handle_art_session_state(ArtSessionState.READY)
+            await asyncio.wait_for(refresh_started.wait(), timeout=0.1)
+
+            assert coord.data.art_settings is SETTINGS_ONE
+            assert coord.data.slideshow is SLIDESHOW_ONE
+            assert (
+                coord.data.optional_art_generation
+                != mock_device.art_generation
             )
         finally:
             release_refresh.set()
@@ -566,7 +746,7 @@ async def test_push_updates_cache_between_reconciliations(
     _assert_art_getter_count(mock_device, 0)
 
 
-async def test_reconcile_reads_all_art_fields_sequentially(
+async def test_reconcile_reads_current_art_settings_and_slideshow_sequentially(
     hass, mock_device
 ):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
@@ -584,12 +764,12 @@ async def test_reconcile_reads_all_art_fields_sequentially(
     order: list[str] = []
     mode_started = asyncio.Event()
     current_started = asyncio.Event()
-    brightness_started = asyncio.Event()
-    color_temperature_started = asyncio.Event()
+    settings_started = asyncio.Event()
+    slideshow_started = asyncio.Event()
     release_mode = asyncio.Event()
     release_current = asyncio.Event()
-    release_brightness = asyncio.Event()
-    release_color_temperature = asyncio.Event()
+    release_settings = asyncio.Event()
+    release_slideshow = asyncio.Event()
 
     async def _blocked(
         name: str,
@@ -611,51 +791,49 @@ async def test_reconcile_reads_all_art_fields_sequentially(
             "current", current_started, release_current, "MY_F0001"
         )
 
-    async def _brightness():
+    async def _settings():
         return await _blocked(
-            "brightness", brightness_started, release_brightness, 5
+            "settings", settings_started, release_settings, SETTINGS
         )
 
-    async def _color_temperature():
+    async def _slideshow():
         return await _blocked(
-            "color_temperature",
-            color_temperature_started,
-            release_color_temperature,
-            3,
+            "slideshow",
+            slideshow_started,
+            release_slideshow,
+            SLIDESHOW,
         )
 
     mock_device.async_get_artmode.side_effect = _mode
     mock_device.async_get_current_art.side_effect = _current_art
-    mock_device.async_get_art_brightness.side_effect = _brightness
-    mock_device.async_get_color_temperature.side_effect = _color_temperature
+    mock_device.async_get_art_settings.side_effect = _settings
+    mock_device.async_get_slideshow_state.side_effect = _slideshow
     data = None
     poll_task = asyncio.create_task(coord._async_update_data())
     releases = (
         release_mode,
         release_current,
-        release_brightness,
-        release_color_temperature,
+        release_settings,
+        release_slideshow,
     )
     try:
         await asyncio.wait_for(mode_started.wait(), timeout=0.1)
         assert not current_started.is_set()
-        assert not brightness_started.is_set()
-        assert not color_temperature_started.is_set()
+        assert not settings_started.is_set()
+        assert not slideshow_started.is_set()
 
         release_mode.set()
         await asyncio.wait_for(current_started.wait(), timeout=0.1)
-        assert not brightness_started.is_set()
-        assert not color_temperature_started.is_set()
+        assert not settings_started.is_set()
+        assert not slideshow_started.is_set()
 
         release_current.set()
-        await asyncio.wait_for(brightness_started.wait(), timeout=0.1)
-        assert not color_temperature_started.is_set()
+        await asyncio.wait_for(settings_started.wait(), timeout=0.1)
+        assert not slideshow_started.is_set()
 
-        release_brightness.set()
-        await asyncio.wait_for(
-            color_temperature_started.wait(), timeout=0.1
-        )
-        release_color_temperature.set()
+        release_settings.set()
+        await asyncio.wait_for(slideshow_started.wait(), timeout=0.1)
+        release_slideshow.set()
         data = await asyncio.wait_for(poll_task, timeout=0.1)
     finally:
         for release in releases:
@@ -670,12 +848,14 @@ async def test_reconcile_reads_all_art_fields_sequentially(
         "mode:end",
         "current:start",
         "current:end",
-        "brightness:start",
-        "brightness:end",
-        "color_temperature:start",
-        "color_temperature:end",
+        "settings:start",
+        "settings:end",
+        "slideshow:start",
+        "slideshow:end",
     ]
     _assert_art_getter_count(mock_device, 1)
+    assert data.art_settings is SETTINGS
+    assert data.slideshow is SLIDESHOW
 
 
 async def test_reconcile_does_not_overwrite_newer_push(
@@ -708,8 +888,8 @@ async def test_reconcile_does_not_overwrite_newer_push(
     try:
         await asyncio.wait_for(mode_started.wait(), timeout=0.1)
         mock_device.async_get_current_art.assert_not_awaited()
-        mock_device.async_get_art_brightness.assert_not_awaited()
-        mock_device.async_get_color_temperature.assert_not_awaited()
+        mock_device.async_get_art_settings.assert_not_awaited()
+        mock_device.async_get_slideshow_state.assert_not_awaited()
         coord.handle_art_event(
             "d2d_service_message",
             {"event": "art_mode_changed", "value": "on"},
@@ -733,7 +913,7 @@ async def test_reconcile_does_not_overwrite_newer_push(
     _assert_art_getter_count(mock_device, 1)
 
 
-async def test_reconcile_preserves_cache_on_ready_loss_but_accepts_live_none(
+async def test_current_art_ready_loss_hides_optional_cache_but_live_none_is_current(
     hass, mock_device
 ):
     mock_device.async_device_info.return_value = {"PowerState": "on"}
@@ -749,6 +929,10 @@ async def test_reconcile_preserves_cache_on_ready_loss_but_accepts_live_none(
         color_temperature=3,
     )
     coord.data = await coord._async_update_data()
+    initial_settings = coord.data.art_settings
+    initial_slideshow = coord.data.slideshow
+    assert initial_settings is not None
+    assert initial_slideshow is SLIDESHOW
 
     async def _lose_ready_during_current_art():
         mock_device.art_ready = False
@@ -758,33 +942,133 @@ async def test_reconcile_preserves_cache_on_ready_loss_but_accepts_live_none(
     mock_device.async_get_current_art.side_effect = (
         _lose_ready_during_current_art
     )
-    mock_device.async_get_art_brightness.return_value = None
-    mock_device.async_get_color_temperature.return_value = None
     after_loss = await coord._async_update_data()
     calls_after_loss = (
         mock_device.async_get_artmode.await_count,
         mock_device.async_get_current_art.await_count,
-        mock_device.async_get_art_brightness.await_count,
-        mock_device.async_get_color_temperature.await_count,
+        mock_device.async_get_art_settings.await_count,
+        mock_device.async_get_slideshow_state.await_count,
     )
 
     mock_device.art_ready = True
     mock_device.art_generation = 3
     mock_device.async_get_current_art.side_effect = None
     mock_device.async_get_current_art.return_value = None
+    mock_device.async_get_art_settings.return_value = None
+    mock_device.async_get_slideshow_state.return_value = None
     after_live_none = await coord._async_update_data()
 
-    assert (
-        after_loss.current_art,
-        after_loss.art_brightness,
-        after_loss.art_color_temperature,
-    ) == ("MY_F0001", 5, 3)
+    assert after_loss.current_art == "MY_F0001"
+    assert after_loss.art_brightness is None
+    assert after_loss.art_color_temperature is None
+    assert after_loss.art_settings is None
+    assert after_loss.slideshow is None
+    assert after_loss.optional_art_generation is None
     assert calls_after_loss == (2, 2, 1, 1)
     assert (
         after_live_none.current_art,
         after_live_none.art_brightness,
         after_live_none.art_color_temperature,
     ) == (None, None, None)
+    assert after_live_none.art_settings is None
+    assert after_live_none.slideshow is None
+    assert after_live_none.optional_art_generation == 3
+
+
+@pytest.mark.parametrize(
+    "loss_point",
+    ["settings", "slideshow"],
+    ids=["after-settings-await", "after-slideshow-await"],
+)
+async def test_generation_loss_discards_both_optional_snapshots(
+    hass, mock_device, loss_point
+):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    coord = _make(hass, mock_device)
+    _seed_ready_art(
+        mock_device,
+        coord,
+        generation=1,
+        now=0.0,
+        art_mode=True,
+        current_art="MY_F0001",
+        brightness=SETTINGS_ONE.brightness,
+        color_temperature=SETTINGS_ONE.color_temperature,
+    )
+    coord.data = await coord._async_update_data()
+    initial_settings = coord.data.art_settings
+    initial_slideshow = coord.data.slideshow
+    assert initial_settings is not None
+    assert initial_slideshow is SLIDESHOW
+    assert coord.data.optional_art_generation == 1
+    _reset_art_getters(mock_device)
+
+    mock_device.art_generation = 2
+    mock_device.async_get_current_art.return_value = "MY_F0002"
+
+    async def _settings():
+        if loss_point == "settings":
+            mock_device.art_generation = 3
+        return SETTINGS_TWO
+
+    async def _slideshow():
+        if loss_point == "slideshow":
+            mock_device.art_generation = 3
+        return SLIDESHOW_TWO
+
+    mock_device.async_get_art_settings.side_effect = _settings
+    mock_device.async_get_slideshow_state.side_effect = _slideshow
+
+    data = await coord._async_update_data()
+
+    assert data.tv_mode is TvMode.ART_MODE
+    assert data.art_brightness is None
+    assert data.art_color_temperature is None
+    assert data.art_settings is None
+    assert data.slideshow is None
+    assert data.optional_art_generation is None
+    assert coord._art_settings is initial_settings
+    assert coord._slideshow is initial_slideshow
+    assert coord._optional_art_generation == 1
+    assert mock_device.async_get_artmode.await_count == 1
+    assert mock_device.async_get_current_art.await_count == 1
+    assert mock_device.async_get_art_settings.await_count == 1
+    expected_slideshow_reads = 0 if loss_point == "settings" else 1
+    assert (
+        mock_device.async_get_slideshow_state.await_count
+        == expected_slideshow_reads
+    )
+
+
+@pytest.mark.parametrize(
+    ("settings", "slideshow"),
+    [
+        (ArtSettingsSnapshot(), SLIDESHOW),
+        (SETTINGS, None),
+    ],
+    ids=["unsupported-settings", "malformed-slideshow"],
+)
+async def test_unknown_optional_results_do_not_change_tv_mode(
+    hass, mock_device, settings, slideshow
+):
+    mock_device.async_device_info.return_value = {"PowerState": "on"}
+    mock_device.art_ready = True
+    mock_device.art_generation = 4
+    mock_device.async_get_artmode.return_value = True
+    mock_device.async_get_current_art.return_value = "MY_F0001"
+    mock_device.async_get_art_settings.return_value = settings
+    mock_device.async_get_slideshow_state.return_value = slideshow
+    coord = _make(hass, mock_device)
+
+    data = await coord._async_poll()
+
+    assert data.tv_mode is TvMode.ART_MODE
+    assert data.art_settings is settings
+    assert data.slideshow is slideshow
+    assert data.optional_art_generation == 4
+    assert coord._art_fail_streak == 0
+    mock_device.async_get_art_settings.assert_awaited_once()
+    mock_device.async_get_slideshow_state.assert_awaited_once()
 
 
 async def test_running_app_detected_while_watching(hass, mock_device):
@@ -985,14 +1269,20 @@ async def test_failed_due_reconcile_counts_once(hass, mock_device):
     assert coord._art_fail_streak == 1
     assert mock_device.async_get_artmode.await_count == 1
     assert mock_device.async_get_current_art.await_count == 0
-    assert mock_device.async_get_art_brightness.await_count == 0
-    assert mock_device.async_get_color_temperature.await_count == 0
+    assert mock_device.async_get_art_settings.await_count == 0
+    assert mock_device.async_get_slideshow_state.await_count == 0
 
     mock_device.async_get_artmode.side_effect = None
     mock_device.async_get_artmode.return_value = True
     mock_device.async_get_current_art.return_value = "MY_F0002"
-    mock_device.async_get_art_brightness.return_value = 6
-    mock_device.async_get_color_temperature.return_value = 4
+    mock_device.async_get_art_settings.return_value = ArtSettingsSnapshot(
+        supported=frozenset(
+            {ArtSettingKey.BRIGHTNESS, ArtSettingKey.COLOR_TEMPERATURE}
+        ),
+        brightness=6,
+        color_temperature=4,
+    )
+    mock_device.async_get_slideshow_state.return_value = SLIDESHOW_TWO
     mock_device.art_ready = True
     mock_device.art_generation = 2
     coord.data = await coord._async_update_data()
@@ -1001,8 +1291,8 @@ async def test_failed_due_reconcile_counts_once(hass, mock_device):
     assert coord.data.tv_mode is TvMode.ART_MODE
     assert mock_device.async_get_artmode.await_count == 2
     assert mock_device.async_get_current_art.await_count == 1
-    assert mock_device.async_get_art_brightness.await_count == 1
-    assert mock_device.async_get_color_temperature.await_count == 1
+    assert mock_device.async_get_art_settings.await_count == 1
+    assert mock_device.async_get_slideshow_state.await_count == 1
 
 
 async def test_reachable_edge_and_off_reset_failure_episode(
@@ -1157,8 +1447,8 @@ async def test_cancelled_reconcile_reserves_window(hass, mock_device):
 
     assert mock_device.async_get_artmode.await_count == 1
     assert mock_device.async_get_current_art.await_count == 0
-    assert mock_device.async_get_art_brightness.await_count == 0
-    assert mock_device.async_get_color_temperature.await_count == 0
+    assert mock_device.async_get_art_settings.await_count == 0
+    assert mock_device.async_get_slideshow_state.await_count == 0
 
 
 async def test_confirmed_online_polls_never_schedule_app_discovery(

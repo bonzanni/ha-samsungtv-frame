@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
@@ -29,7 +30,13 @@ from .const import (
     WAKE_PROBE_TIMEOUT,
 )
 from .device import FrameDevice
-from .models import FrameData, TvMode, derive_tv_mode
+from .models import (
+    ArtSettingsSnapshot,
+    FrameData,
+    SlideshowState,
+    TvMode,
+    derive_tv_mode,
+)
 
 type FrameConfigEntry = ConfigEntry[FrameCoordinator]
 
@@ -54,8 +61,9 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         self._unreachable_count = 0
         self._art_mode: bool | None = None
         self._current_art: str | None = None
-        self._art_brightness: int | None = None
-        self._art_color_temp: int | None = None
+        self._art_settings: ArtSettingsSnapshot | None = None
+        self._slideshow: SlideshowState | None = None
+        self._optional_art_generation: int | None = None
         self._art_generation = -1
         self._next_art_reconcile = 0.0
         self._clock = time.monotonic
@@ -209,17 +217,42 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
         # last cached value says otherwise.  Keep self._art_mode unchanged so
         # the cached state is still valid once the TV comes back.
         is_off = mode is TvMode.OFF
+        optional_fresh = (
+            self.device.art_ready
+            and self._optional_art_generation == self.device.art_generation
+        )
+        published_settings = (
+            self._art_settings if optional_fresh and not is_off else None
+        )
+        published_slideshow = (
+            self._slideshow if optional_fresh and not is_off else None
+        )
         return FrameData(
             reachable=reachable,
             power_state=power_state,
             art_mode=False if is_off else effective_art_mode,
             tv_mode=mode,
             current_art=None if is_off else self._current_art,
-            art_brightness=None if is_off else self._art_brightness,
-            art_color_temperature=None if is_off else self._art_color_temp,
+            art_brightness=(
+                published_settings.brightness
+                if published_settings is not None
+                else None
+            ),
+            art_color_temperature=(
+                published_settings.color_temperature
+                if published_settings is not None
+                else None
+            ),
             running_app=running_app,
             volume_level=volume_level,
             is_muted=is_muted,
+            art_settings=published_settings,
+            slideshow=published_slideshow,
+            optional_art_generation=(
+                self._optional_art_generation
+                if optional_fresh and not is_off
+                else None
+            ),
         )
 
     async def _async_reconcile_art(self, generation: int) -> bool:
@@ -232,21 +265,23 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
 
         art_mode = await self.device.async_get_artmode()
         current_art: str | None = None
-        art_brightness: int | None = None
-        art_color_temp: int | None = None
         current_art_valid = False
-        art_brightness_valid = False
-        art_color_temp_valid = False
 
         if self._art_session_is_ready(generation):
             current_art = await self.device.async_get_current_art()
             current_art_valid = self._art_session_is_ready(generation)
         if current_art_valid:
-            art_brightness = await self.device.async_get_art_brightness()
-            art_brightness_valid = self._art_session_is_ready(generation)
-        if art_brightness_valid:
-            art_color_temp = await self.device.async_get_color_temperature()
-            art_color_temp_valid = self._art_session_is_ready(generation)
+            art_settings = await self.device.async_get_art_settings()
+            if not self._art_session_is_ready(generation):
+                return (
+                    art_mode is not None
+                    or self._art_live_push_revision != live_push_revision
+                )
+            slideshow = await self.device.async_get_slideshow_state()
+            if self._art_session_is_ready(generation):
+                self._art_settings = art_settings
+                self._slideshow = slideshow
+                self._optional_art_generation = generation
 
         if (
             art_mode is not None
@@ -260,10 +295,6 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             and self._current_art_revision == current_art_revision
         ):
             self._current_art = current_art
-        if art_brightness_valid:
-            self._art_brightness = art_brightness
-        if art_color_temp_valid:
-            self._art_color_temp = art_color_temp
 
         return (
             art_mode is not None
@@ -276,6 +307,11 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             self.device.art_ready
             and self.device.art_generation == generation
         )
+
+    async def async_request_art_reconcile(self) -> None:
+        """Force an authoritative Art reconciliation without debounce."""
+        self._next_art_reconcile = 0.0
+        await self.async_refresh()
 
     def _reset_art_failure(self) -> None:
         self._art_fail_streak = 0
@@ -458,19 +494,14 @@ class FrameCoordinator(DataUpdateCoordinator[FrameData]):
             mode = self._last_stable()
         if mode is TvMode.OFF:
             self.device.remote_confirmed = False
+        base = current or FrameData(True, power_state, self._art_mode, mode)
         self.async_set_updated_data(
-            FrameData(
+            replace(
+                base,
                 reachable=True,
                 power_state=power_state,
                 art_mode=self._art_mode,
                 tv_mode=mode,
                 current_art=self._current_art,
-                art_brightness=current.art_brightness if current else None,
-                art_color_temperature=(
-                    current.art_color_temperature if current else None
-                ),
-                running_app=current.running_app if current else None,
-                volume_level=current.volume_level if current else None,
-                is_muted=current.is_muted if current else None,
             )
         )
