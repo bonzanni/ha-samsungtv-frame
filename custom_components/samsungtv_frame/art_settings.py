@@ -23,7 +23,7 @@ def _bounded_int(value: Any, minimum: int, maximum: int) -> int | None:
             normalized = int(value)
         except ValueError:
             return None
-        if value.strip() != str(normalized):
+        if value != str(normalized):
             return None
     else:
         return None

@@ -70,8 +70,12 @@ def test_parse_duplicate_setting_is_supported_but_value_unknown():
     [
         (ArtSettingKey.BRIGHTNESS, -1),
         (ArtSettingKey.BRIGHTNESS, 11),
+        (ArtSettingKey.BRIGHTNESS, " 7 "),
+        (ArtSettingKey.BRIGHTNESS, True),
+        (ArtSettingKey.BRIGHTNESS, 7.0),
         (ArtSettingKey.COLOR_TEMPERATURE, -6),
         (ArtSettingKey.COLOR_TEMPERATURE, 6),
+        (ArtSettingKey.COLOR_TEMPERATURE, "\t-2\n"),
         (ArtSettingKey.MOTION_TIMER, "10"),
         (ArtSettingKey.MOTION_TIMER, True),
         (ArtSettingKey.MOTION_SENSITIVITY, "0"),
@@ -130,6 +134,9 @@ def test_parse_slideshow(payload, expected):
     [
         {"value": 0, "type": "slideshow"},
         {"value": -1, "type": "slideshow"},
+        {"value": "\t30\n", "type": "slideshow"},
+        {"value": True, "type": "slideshow"},
+        {"value": 30.0, "type": "slideshow"},
         {"value": 30, "type": "unknown"},
         {"value": 30, "type": "slideshow", "category_id": 4},
     ],
