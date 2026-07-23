@@ -9,23 +9,23 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.samsungtv_frame.const import (
+from custom_components.samsung_tv_frame.const import (
     CONF_HOST,
     CONF_MAC,
     CONF_TOKEN,
     DOMAIN,
 )
-from custom_components.samsungtv_frame.models import (
+from custom_components.samsung_tv_frame.models import (
     ArtSettingKey,
     ArtSettingsSnapshot,
     TvMode,
 )
-from custom_components.samsungtv_frame.select import (
+from custom_components.samsung_tv_frame.select import (
     FrameArtMotionSensitivitySelect,
     FrameArtSleepAfterSelect,
 )
-from custom_components.samsungtv_frame.sensor import FrameSlideshowSensor
-from custom_components.samsungtv_frame.switch import FrameBrightnessSensorSwitch
+from custom_components.samsung_tv_frame.sensor import FrameSlideshowSensor
+from custom_components.samsung_tv_frame.switch import FrameBrightnessSensorSwitch
 
 SLEEP_AFTER = "select.samsung_frame_tv_art_sleep_after"
 MOTION_SENSITIVITY = "select.samsung_frame_tv_art_motion_sensitivity"
@@ -93,7 +93,7 @@ async def _setup(
     )
     entry.add_to_hass(hass)
     with patch(
-        "custom_components.samsungtv_frame.FrameDevice",
+        "custom_components.samsung_tv_frame.FrameDevice",
         return_value=mock_device,
     ):
         await hass.config_entries.async_setup(entry.entry_id)
@@ -347,8 +347,8 @@ def test_optional_entity_translations_are_exact_and_neutral():
     }
 
     for relative_path in (
-        "custom_components/samsungtv_frame/strings.json",
-        "custom_components/samsungtv_frame/translations/en.json",
+        "custom_components/samsung_tv_frame/strings.json",
+        "custom_components/samsung_tv_frame/translations/en.json",
     ):
         payload = json.loads((root / relative_path).read_text())
         entity = payload["entity"]

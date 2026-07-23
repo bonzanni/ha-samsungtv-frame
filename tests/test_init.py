@@ -8,15 +8,15 @@ from samsungtvws.exceptions import ConnectionFailure
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.samsungtv_frame import (
+from custom_components.samsung_tv_frame import (
     async_setup_entry,
     async_unload_entry,
 )
-from custom_components.samsungtv_frame.const import (
+from custom_components.samsung_tv_frame.const import (
     CONF_HOST, CONF_MAC, CONF_TOKEN, DOMAIN, PLATFORMS,
 )
-from custom_components.samsungtv_frame.coordinator import FrameCoordinator
-from custom_components.samsungtv_frame.device import FrameDevice
+from custom_components.samsung_tv_frame.coordinator import FrameCoordinator
+from custom_components.samsung_tv_frame.device import FrameDevice
 
 
 _MISSING_TOKEN = object()
@@ -58,7 +58,7 @@ async def test_setup_without_canonical_token_starts_reauth_before_work(
 
     with (
         patch(
-            "custom_components.samsungtv_frame.get_ssl_context"
+            "custom_components.samsung_tv_frame.get_ssl_context"
         ) as get_context,
         patch.object(
             hass,
@@ -66,11 +66,11 @@ async def test_setup_without_canonical_token_starts_reauth_before_work(
             AsyncMock(),
         ) as executor_job,
         patch(
-            "custom_components.samsungtv_frame.FrameDevice",
+            "custom_components.samsung_tv_frame.FrameDevice",
             return_value=mock_device,
         ) as device_cls,
         patch(
-            "custom_components.samsungtv_frame.FrameCoordinator",
+            "custom_components.samsung_tv_frame.FrameCoordinator",
             return_value=coordinator,
         ) as coordinator_cls,
         patch.object(
@@ -172,11 +172,11 @@ async def test_setup_and_unload(hass, mock_device):
     mock_device.async_device_info.side_effect = _device_info
     with (
         patch(
-            "custom_components.samsungtv_frame.FrameDevice",
+            "custom_components.samsung_tv_frame.FrameDevice",
             return_value=mock_device,
         ) as device_cls,
         patch(
-            "custom_components.samsungtv_frame.get_ssl_context",
+            "custom_components.samsung_tv_frame.get_ssl_context",
             return_value=ssl_context,
         ) as get_context,
         patch.object(
@@ -219,7 +219,7 @@ async def test_setup_and_unload(hass, mock_device):
             "first-refresh",
         ]
         assert all(
-            task_call.args[2] != "samsungtv_frame-listener-restart"
+            task_call.args[2] != "samsung_tv_frame-listener-restart"
             for task_call in create_background_task.call_args_list
         )
 
@@ -255,10 +255,10 @@ async def test_setup_tv_off_arms_session_without_art_io(hass, mock_device):
     entry.add_to_hass(hass)
     with (
         patch(
-            "custom_components.samsungtv_frame.FrameDevice", return_value=mock_device
+            "custom_components.samsung_tv_frame.FrameDevice", return_value=mock_device
         ),
         patch(
-            "custom_components.samsungtv_frame.get_ssl_context",
+            "custom_components.samsung_tv_frame.get_ssl_context",
             return_value=object(),
         ),
     ):
@@ -301,20 +301,20 @@ async def test_setup_start_failure_clears_callback_and_bounds_cleanup(
     mock_device.async_stop.side_effect = _wedged_stop
     with (
         patch(
-            "custom_components.samsungtv_frame.FrameDevice",
+            "custom_components.samsung_tv_frame.FrameDevice",
             return_value=mock_device,
         ),
         patch(
-            "custom_components.samsungtv_frame.get_ssl_context",
+            "custom_components.samsung_tv_frame.get_ssl_context",
             return_value=object(),
         ),
         patch(
-            "custom_components.samsungtv_frame.ART_CONNECT_DEADLINE",
+            "custom_components.samsung_tv_frame.ART_CONNECT_DEADLINE",
             0.01,
             create=True,
         ),
         patch(
-            "custom_components.samsungtv_frame.ART_CLOSE_DEADLINE",
+            "custom_components.samsung_tv_frame.ART_CLOSE_DEADLINE",
             0.01,
             create=True,
         ),
@@ -363,11 +363,11 @@ async def test_setup_failure_propagates_cancellation_during_cleanup(
     mock_device.async_stop.side_effect = _blocked_stop
     with (
         patch(
-            "custom_components.samsungtv_frame.FrameDevice",
+            "custom_components.samsung_tv_frame.FrameDevice",
             return_value=mock_device,
         ),
         patch(
-            "custom_components.samsungtv_frame.get_ssl_context",
+            "custom_components.samsung_tv_frame.get_ssl_context",
             return_value=object(),
         ),
     ):
@@ -399,11 +399,11 @@ async def test_setup_first_refresh_failure_clears_callback_and_bounds_cleanup(
     mock_device.async_stop.side_effect = _wedged_stop
     with (
         patch(
-            "custom_components.samsungtv_frame.FrameDevice",
+            "custom_components.samsung_tv_frame.FrameDevice",
             return_value=mock_device,
         ),
         patch(
-            "custom_components.samsungtv_frame.get_ssl_context",
+            "custom_components.samsung_tv_frame.get_ssl_context",
             return_value=object(),
         ),
         patch.object(
@@ -412,12 +412,12 @@ async def test_setup_first_refresh_failure_clears_callback_and_bounds_cleanup(
             AsyncMock(side_effect=refresh_error),
         ),
         patch(
-            "custom_components.samsungtv_frame.ART_CONNECT_DEADLINE",
+            "custom_components.samsung_tv_frame.ART_CONNECT_DEADLINE",
             0.01,
             create=True,
         ),
         patch(
-            "custom_components.samsungtv_frame.ART_CLOSE_DEADLINE",
+            "custom_components.samsung_tv_frame.ART_CLOSE_DEADLINE",
             0.01,
             create=True,
         ),
@@ -469,11 +469,11 @@ async def test_setup_platform_forward_failure_cleans_device_session(
     mock_device.async_stop.side_effect = _wedged_stop
     with (
         patch(
-            "custom_components.samsungtv_frame.FrameDevice",
+            "custom_components.samsung_tv_frame.FrameDevice",
             return_value=mock_device,
         ),
         patch(
-            "custom_components.samsungtv_frame.get_ssl_context",
+            "custom_components.samsung_tv_frame.get_ssl_context",
             return_value=object(),
         ),
         patch.object(
@@ -482,12 +482,12 @@ async def test_setup_platform_forward_failure_cleans_device_session(
             AsyncMock(),
         ) as first_refresh,
         patch(
-            "custom_components.samsungtv_frame.ART_CONNECT_DEADLINE",
+            "custom_components.samsung_tv_frame.ART_CONNECT_DEADLINE",
             0.01,
             create=True,
         ),
         patch(
-            "custom_components.samsungtv_frame.ART_CLOSE_DEADLINE",
+            "custom_components.samsung_tv_frame.ART_CLOSE_DEADLINE",
             0.01,
             create=True,
         ),
@@ -755,12 +755,12 @@ async def test_unload_cancels_long_remote_operation_and_completes(hass):
             unload_platforms,
         ),
         patch(
-            "custom_components.samsungtv_frame.device.REMOTE_DRAIN_DEADLINE",
+            "custom_components.samsung_tv_frame.device.REMOTE_DRAIN_DEADLINE",
             0.01,
             create=True,
         ),
         patch(
-            "custom_components.samsungtv_frame.device.REMOTE_CANCEL_DEADLINE",
+            "custom_components.samsung_tv_frame.device.REMOTE_CANCEL_DEADLINE",
             0.05,
             create=True,
         ),
@@ -826,12 +826,12 @@ async def test_unload_resistant_remote_operation_fails_bounded_and_restores(
             unload_platforms,
         ),
         patch(
-            "custom_components.samsungtv_frame.device.REMOTE_DRAIN_DEADLINE",
+            "custom_components.samsung_tv_frame.device.REMOTE_DRAIN_DEADLINE",
             0.01,
             create=True,
         ),
         patch(
-            "custom_components.samsungtv_frame.device.REMOTE_CANCEL_DEADLINE",
+            "custom_components.samsung_tv_frame.device.REMOTE_CANCEL_DEADLINE",
             0.01,
             create=True,
         ),

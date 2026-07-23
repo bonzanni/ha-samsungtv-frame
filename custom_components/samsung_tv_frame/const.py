@@ -5,7 +5,7 @@ import logging
 
 from homeassistant.const import Platform
 
-DOMAIN = "samsungtv_frame"
+DOMAIN = "samsung_tv_frame"
 LOGGER = logging.getLogger(__package__)
 
 PLATFORMS: list[Platform] = [

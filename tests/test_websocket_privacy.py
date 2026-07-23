@@ -6,7 +6,7 @@ import logging
 import pytest
 from samsungtvws.exceptions import ResponseError
 
-from custom_components.samsungtv_frame.websocket_privacy import (
+from custom_components.samsung_tv_frame.websocket_privacy import (
     QUIET_WEBSOCKET_LOGGER,
     process_api_response_silently,
 )

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.0
+
+- **BREAKING:** rename integration domain `samsungtv_frame` → `samsung_tv_frame`
+  and repository `ha-samsungtv-frame` → `ha-samsung-tv-frame`. There is no
+  migration: remove the old integration entry and `custom_components/samsungtv_frame`
+  directory, install this version, and re-add the TV via the config flow.
+  All services move to the new domain (e.g. `samsung_tv_frame.set_slideshow`);
+  automations, scripts, and dashboards referencing `samsungtv_frame.*` services
+  or device triggers must be updated. Entity IDs are re-created by the fresh
+  config entry. Older changelog entries below retain the historical names.
+
 ## 0.7.1
 
 - Treat silently unsupported optional Art capability reads as bounded probes,

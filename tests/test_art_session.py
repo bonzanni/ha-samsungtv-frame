@@ -13,14 +13,14 @@ import pytest
 from samsungtvws.exceptions import ConnectionFailure
 from websockets.protocol import State
 
-from custom_components.samsungtv_frame import art_session as art_session_module
-from custom_components.samsungtv_frame import frame_art as frame_art_module
-from custom_components.samsungtv_frame.art_session import (
+from custom_components.samsung_tv_frame import art_session as art_session_module
+from custom_components.samsung_tv_frame import frame_art as frame_art_module
+from custom_components.samsung_tv_frame.art_session import (
     ArtSession,
     ArtSessionState,
     ArtSessionTrigger,
 )
-from custom_components.samsungtv_frame.frame_art import (
+from custom_components.samsung_tv_frame.frame_art import (
     ArtHostUnavailable,
     FrameArt,
 )
@@ -245,7 +245,7 @@ async def test_initial_on_observation_schedules_due_session_probe():
     try:
         await wait_for_start_calls(art, 1)
         assert [name for _coroutine, name in factory.calls] == [
-            "samsungtv_frame-art-session-connect"
+            "samsung_tv_frame-art-session-connect"
         ]
     finally:
         if art._start_gate is not None:
@@ -269,7 +269,7 @@ async def test_cold_standby_observation_allows_initial_probe():
     try:
         await wait_for_start_calls(art, 1)
         assert [name for _coroutine, name in factory.calls] == [
-            "samsungtv_frame-art-session-connect"
+            "samsung_tv_frame-art-session-connect"
         ]
     finally:
         if art._start_gate is not None:
@@ -463,10 +463,10 @@ async def test_reachable_edge_dead_ready_receiver_probes_immediately():
         assert [
             name
             for _coroutine, name in factory.calls
-            if name == "samsungtv_frame-art-session-connect"
+            if name == "samsung_tv_frame-art-session-connect"
         ] == [
-            "samsungtv_frame-art-session-connect",
-            "samsungtv_frame-art-session-connect",
+            "samsung_tv_frame-art-session-connect",
+            "samsung_tv_frame-art-session-connect",
         ]
     finally:
         if art._start_gate is not None:
@@ -842,8 +842,8 @@ async def test_stop_joins_connect_cleanup_close_without_closing_twice():
     assert art.stop.call_count == 1
     assert art.close.await_count == 1
     task_names = [name for _coroutine, name in factory.calls]
-    assert "samsungtv_frame-art-session-close" in task_names
-    assert "samsungtv_frame-art-session-stop" in task_names
+    assert "samsung_tv_frame-art-session-close" in task_names
+    assert "samsung_tv_frame-art-session-stop" in task_names
 
 
 async def test_generic_failure_resets_consecutive_hostless_streak():
@@ -1123,7 +1123,7 @@ async def test_terminal_stop_aborts_real_cancellation_resistant_art_socket(
         art_session_module, "ART_CLOSE_DEADLINE", 0.05, raising=False
     )
     monkeypatch.setattr(
-        "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+        "custom_components.samsung_tv_frame.frame_art.ART_CLOSE_DEADLINE",
         0.01,
     )
     factory = RecordingTaskFactory()
@@ -1168,5 +1168,5 @@ async def test_terminal_stop_aborts_real_cancellation_resistant_art_socket(
     assert not [
         task
         for task in asyncio.all_tasks()
-        if task.get_name() == "samsungtv_frame-art-socket-close"
+        if task.get_name() == "samsung_tv_frame-art-socket-close"
     ]

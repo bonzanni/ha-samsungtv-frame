@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from custom_components.samsungtv_frame.art_session import ArtSessionState
+from custom_components.samsung_tv_frame.art_session import ArtSessionState
 
 pytest_plugins = ["pytest_homeassistant_custom_component"]
 

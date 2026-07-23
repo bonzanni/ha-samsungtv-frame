@@ -2,7 +2,7 @@ from dataclasses import FrozenInstanceError, fields
 
 import pytest
 
-from custom_components.samsungtv_frame.models import (
+from custom_components.samsung_tv_frame.models import (
     ArtSettingKey,
     ArtSettingsSnapshot,
     FrameData,

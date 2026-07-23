@@ -12,7 +12,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from websockets.protocol import State
 
-from custom_components.samsungtv_frame.const import (
+from custom_components.samsung_tv_frame.const import (
     CONF_HOST,
     CONF_MAC,
     CONF_MODEL,
@@ -21,7 +21,7 @@ from custom_components.samsungtv_frame.const import (
     OPT_HEARTBEAT,
     PAIRING_DEADLINE,
 )
-from custom_components.samsungtv_frame.config_flow import (
+from custom_components.samsung_tv_frame.config_flow import (
     CannotConnect,
     validate_and_pair,
 )
@@ -89,20 +89,20 @@ def pairing_patches(hass, *, remote, art, ssl_context):
     )
     with (
         patch(
-            "custom_components.samsungtv_frame.config_flow."
+            "custom_components.samsung_tv_frame.config_flow."
             "PrivacySafeSamsungTVAsyncRest",
             return_value=rest,
         ),
         patch(
-            "custom_components.samsungtv_frame.config_flow.FrameRemote",
+            "custom_components.samsung_tv_frame.config_flow.FrameRemote",
             return_value=remote,
         ),
         patch(
-            "custom_components.samsungtv_frame.config_flow.FrameArt",
+            "custom_components.samsung_tv_frame.config_flow.FrameArt",
             return_value=art,
         ) as art_constructor,
         patch(
-            "custom_components.samsungtv_frame.config_flow.get_ssl_context",
+            "custom_components.samsung_tv_frame.config_flow.get_ssl_context",
             return_value=ssl_context,
         ),
         patch.object(
@@ -158,15 +158,15 @@ async def test_pair_validation_rest_response_is_not_logged(
     art = _art_client()
     with (
         patch(
-            "custom_components.samsungtv_frame.config_flow.FrameRemote",
+            "custom_components.samsung_tv_frame.config_flow.FrameRemote",
             return_value=remote,
         ),
         patch(
-            "custom_components.samsungtv_frame.config_flow.FrameArt",
+            "custom_components.samsung_tv_frame.config_flow.FrameArt",
             return_value=art,
         ),
         patch(
-            "custom_components.samsungtv_frame.config_flow.get_ssl_context",
+            "custom_components.samsung_tv_frame.config_flow.get_ssl_context",
             return_value=object(),
         ),
         patch.object(
@@ -372,7 +372,7 @@ async def test_pair_art_close_timeout_force_aborts_captured_socket(hass):
     with (
         pairing_patches(hass, remote=remote, art=art, ssl_context=object()),
         patch(
-            "custom_components.samsungtv_frame.config_flow.ART_CLOSE_DEADLINE",
+            "custom_components.samsung_tv_frame.config_flow.ART_CLOSE_DEADLINE",
             0.01,
             create=True,
         ),
@@ -408,13 +408,13 @@ async def test_pair_remote_terminal_stop_failure_does_not_mask_success(hass):
 
 async def test_user_flow_success(hass):
     with patch(
-        "custom_components.samsungtv_frame.config_flow.validate_and_pair",
+        "custom_components.samsung_tv_frame.config_flow.validate_and_pair",
         new=AsyncMock(return_value={"mac": "A0:D0:5B:86:CE:B7",
                                     "token": "tok", "model": "QE65LS03BAUXXH"}),
     ), patch(
         # Prevent HA from running async_setup_entry after the flow creates
         # the config entry (avoids real socket connections and lingering tasks).
-        "custom_components.samsungtv_frame.async_setup_entry",
+        "custom_components.samsung_tv_frame.async_setup_entry",
         return_value=True,
     ):
         result = await hass.config_entries.flow.async_init(
@@ -430,9 +430,9 @@ async def test_user_flow_success(hass):
 
 
 async def test_user_flow_not_a_frame(hass):
-    from custom_components.samsungtv_frame.config_flow import NotAFrameError
+    from custom_components.samsung_tv_frame.config_flow import NotAFrameError
     with patch(
-        "custom_components.samsungtv_frame.config_flow.validate_and_pair",
+        "custom_components.samsung_tv_frame.config_flow.validate_and_pair",
         new=AsyncMock(side_effect=NotAFrameError),
     ):
         result = await hass.config_entries.flow.async_init(
@@ -446,9 +446,9 @@ async def test_user_flow_not_a_frame(hass):
 
 
 async def test_user_flow_cannot_connect(hass):
-    from custom_components.samsungtv_frame.config_flow import CannotConnect
+    from custom_components.samsung_tv_frame.config_flow import CannotConnect
     with patch(
-        "custom_components.samsungtv_frame.config_flow.validate_and_pair",
+        "custom_components.samsung_tv_frame.config_flow.validate_and_pair",
         new=AsyncMock(side_effect=CannotConnect),
     ):
         result = await hass.config_entries.flow.async_init(
@@ -465,13 +465,13 @@ async def test_reconfigure_updates_host_and_canonical_token(hass):
     entry = _existing_entry()
     entry.add_to_hass(hass)
     with patch(
-        "custom_components.samsungtv_frame.config_flow.validate_and_pair",
+        "custom_components.samsung_tv_frame.config_flow.validate_and_pair",
         new=AsyncMock(return_value={
             CONF_MAC: "A0:D0:5B:86:CE:B7", CONF_TOKEN: "remote-token",
             CONF_MODEL: "QE65LS03BAUXXH",
         }),
     ), patch(
-        "custom_components.samsungtv_frame.async_setup_entry", return_value=True
+        "custom_components.samsung_tv_frame.async_setup_entry", return_value=True
     ):
         result = await entry.start_reconfigure_flow(hass)
         assert result["type"] == FlowResultType.FORM
@@ -488,7 +488,7 @@ async def test_reauth_updates_canonical_token_and_schedules_reload(hass):
     entry = _existing_entry()
     entry.add_to_hass(hass)
     with patch(
-        "custom_components.samsungtv_frame.config_flow.validate_and_pair",
+        "custom_components.samsung_tv_frame.config_flow.validate_and_pair",
         new=AsyncMock(return_value={
             CONF_MAC: "A0:D0:5B:86:CE:B7",
             CONF_TOKEN: "remote-token",
@@ -516,7 +516,7 @@ async def test_reauth_cannot_connect_keeps_stored_token(hass):
     entry = _existing_entry()
     entry.add_to_hass(hass)
     with patch(
-        "custom_components.samsungtv_frame.config_flow.validate_and_pair",
+        "custom_components.samsung_tv_frame.config_flow.validate_and_pair",
         new=AsyncMock(side_effect=CannotConnect),
     ), patch.object(hass.config_entries, "async_schedule_reload") as schedule_reload:
         result = await hass.config_entries.flow.async_init(
@@ -539,7 +539,7 @@ async def test_reauth_rejects_different_tv_without_updating_entry(hass):
     entry = _existing_entry()
     entry.add_to_hass(hass)
     with patch(
-        "custom_components.samsungtv_frame.config_flow.validate_and_pair",
+        "custom_components.samsung_tv_frame.config_flow.validate_and_pair",
         new=AsyncMock(return_value={
             CONF_MAC: "00:11:22:33:44:55",
             CONF_TOKEN: "remote-token",
@@ -566,7 +566,7 @@ async def test_reconfigure_rejects_different_tv(hass):
     entry = _existing_entry()
     entry.add_to_hass(hass)
     with patch(
-        "custom_components.samsungtv_frame.config_flow.validate_and_pair",
+        "custom_components.samsung_tv_frame.config_flow.validate_and_pair",
         new=AsyncMock(return_value={
             CONF_MAC: "00:11:22:33:44:55",
             CONF_TOKEN: "remote-token",
@@ -585,8 +585,8 @@ async def test_reconfigure_rejects_different_tv(hass):
 @pytest.mark.parametrize(
     "resource_path",
     [
-        "custom_components/samsungtv_frame/strings.json",
-        "custom_components/samsungtv_frame/translations/en.json",
+        "custom_components/samsung_tv_frame/strings.json",
+        "custom_components/samsung_tv_frame/translations/en.json",
     ],
 )
 def test_reconfigure_pairing_copy_requires_normal_content_and_allow(resource_path):
@@ -602,9 +602,9 @@ async def test_options_flow_sets_heartbeat(hass):
     entry = _existing_entry()
     entry.add_to_hass(hass)
     with patch(
-        "custom_components.samsungtv_frame.async_setup_entry", return_value=True
+        "custom_components.samsung_tv_frame.async_setup_entry", return_value=True
     ), patch(
-        "custom_components.samsungtv_frame.async_unload_entry", return_value=True
+        "custom_components.samsung_tv_frame.async_unload_entry", return_value=True
     ):
         await hass.config_entries.async_setup(entry.entry_id)
         result = await hass.config_entries.options.async_init(entry.entry_id)

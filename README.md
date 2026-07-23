@@ -39,17 +39,17 @@ Art session, or feature does not currently have an authoritative value—for exa
 the TV is off, the session is not ready, or the setting is unsupported or invalid.
 
 ## Services
-- `samsungtv_frame.send_key` — send any Samsung remote key code (e.g. `KEY_HOME`, `KEY_MENU`)
-- `samsungtv_frame.set_art_mode` — switch art mode on/off directly (TV must be on)
-- `samsungtv_frame.select_art` — show an artwork by content id
-- `samsungtv_frame.upload_art` — upload a local image to the TV's collection (path must be
+- `samsung_tv_frame.send_key` — send any Samsung remote key code (e.g. `KEY_HOME`, `KEY_MENU`)
+- `samsung_tv_frame.set_art_mode` — switch art mode on/off directly (TV must be on)
+- `samsung_tv_frame.select_art` — show an artwork by content id
+- `samsung_tv_frame.upload_art` — upload a local image to the TV's collection (path must be
   inside `allowlist_external_dirs`); optionally shows it immediately
-- `samsungtv_frame.delete_art` — remove an artwork by content id (irreversible)
-- `samsungtv_frame.set_slideshow` — rotate art every N minutes (0 disables); categories:
+- `samsung_tv_frame.delete_art` — remove an artwork by content id (irreversible)
+- `samsung_tv_frame.set_slideshow` — rotate art every N minutes (0 disables); categories:
   `MY-C0002` my pictures, `MY-C0004` favourites, `MY-C0008` store. This remains the
   only writable slideshow surface and applies duration, shuffle order, and category
   together as one atomic change; `sensor.samsung_frame_tv_art_slideshow` is read-only.
-- `samsungtv_frame.change_matte` / `set_photo_filter` / `set_favourite` — style an artwork
+- `samsung_tv_frame.change_matte` / `set_photo_filter` / `set_favourite` — style an artwork
   (all default to the currently displayed one)
 - `media_player.play_media` with `media_content_type: app` — launch a catalog app name or a
   raw Tizen app id, optionally with deep-link content:

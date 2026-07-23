@@ -13,17 +13,17 @@ from samsungtvws.exceptions import (
 )
 from websockets.protocol import State
 
-from custom_components.samsungtv_frame.art_session import (
+from custom_components.samsung_tv_frame.art_session import (
     ArtSessionState,
     ArtSessionTrigger,
 )
-from custom_components.samsungtv_frame.device import FrameDevice
-from custom_components.samsungtv_frame.frame_art import ArtProbeTimeout
-from custom_components.samsungtv_frame.frame_remote import (
+from custom_components.samsung_tv_frame.device import FrameDevice
+from custom_components.samsung_tv_frame.frame_art import ArtProbeTimeout
+from custom_components.samsung_tv_frame.frame_remote import (
     FrameRemote,
     RemotePairingRequired,
 )
-from custom_components.samsungtv_frame.models import (
+from custom_components.samsung_tv_frame.models import (
     ArtSettingKey,
     ArtSettingsSnapshot,
     SlideshowMode,
@@ -130,7 +130,7 @@ def test_device_constructs_remote_with_entry_ssl_context(hass):
 
 @pytest.mark.parametrize("token", [None, ""])
 def test_device_defers_remote_construction_without_stored_token(hass, token):
-    with patch("custom_components.samsungtv_frame.device.FrameRemote") as remote_cls:
+    with patch("custom_components.samsung_tv_frame.device.FrameRemote") as remote_cls:
         device = FrameDevice(
             hass,
             host="1.2.3.4",
@@ -151,7 +151,7 @@ async def test_legacy_remote_command_requests_reauth_without_network(
 ):
     reauth = MagicMock()
     persist = MagicMock()
-    with patch("custom_components.samsungtv_frame.device.FrameRemote") as remote_cls:
+    with patch("custom_components.samsung_tv_frame.device.FrameRemote") as remote_cls:
         remote_cls.return_value.send_commands = AsyncMock()
         device = FrameDevice(
             hass,
@@ -175,7 +175,7 @@ async def test_legacy_remote_command_requests_reauth_without_network(
 @pytest.mark.parametrize("token", [None, ""])
 async def test_legacy_app_list_never_constructs_remote_or_reauths(hass, token):
     reauth = MagicMock()
-    with patch("custom_components.samsungtv_frame.device.FrameRemote") as remote_cls:
+    with patch("custom_components.samsung_tv_frame.device.FrameRemote") as remote_cls:
         remote_cls.return_value.app_list = AsyncMock(return_value=[])
         device = FrameDevice(
             hass,
@@ -197,7 +197,7 @@ def test_update_token_constructs_deferred_remote_with_nonempty_token(hass):
     ssl_context = MagicMock()
     remote = MagicMock(token="new-token")
     with patch(
-        "custom_components.samsungtv_frame.device.FrameRemote",
+        "custom_components.samsung_tv_frame.device.FrameRemote",
         return_value=remote,
     ) as remote_cls:
         device = FrameDevice(
@@ -224,7 +224,7 @@ def test_update_token_constructs_deferred_remote_with_nonempty_token(hass):
 
 
 def test_update_empty_token_keeps_remote_deferred(hass):
-    with patch("custom_components.samsungtv_frame.device.FrameRemote") as remote_cls:
+    with patch("custom_components.samsung_tv_frame.device.FrameRemote") as remote_cls:
         device = FrameDevice(
             hass,
             host="1.2.3.4",
@@ -242,7 +242,7 @@ def test_update_empty_token_keeps_remote_deferred(hass):
 
 
 async def test_legacy_stop_is_safe_without_constructing_remote(hass):
-    with patch("custom_components.samsungtv_frame.device.FrameRemote") as remote_cls:
+    with patch("custom_components.samsung_tv_frame.device.FrameRemote") as remote_cls:
         device = FrameDevice(
             hass,
             host="1.2.3.4",
@@ -268,7 +268,7 @@ async def test_device_info_returns_device_dict(hass, device):
 
 
 async def test_device_info_none_when_unreachable(hass, device, caplog):
-    caplog.set_level(logging.DEBUG, logger="custom_components.samsungtv_frame")
+    caplog.set_level(logging.DEBUG, logger="custom_components.samsung_tv_frame")
     private_value = "private-device-info"
     rest = MagicMock()
     rest.rest_device_info = AsyncMock(side_effect=OSError(private_value))
@@ -282,7 +282,7 @@ async def test_device_info_none_when_unreachable(hass, device, caplog):
 async def test_app_status_failure_does_not_log_identifier_or_error(
     hass, device, caplog
 ):
-    caplog.set_level(logging.DEBUG, logger="custom_components.samsungtv_frame")
+    caplog.set_level(logging.DEBUG, logger="custom_components.samsung_tv_frame")
     private_value = "private-app-status"
     private_app_id = "private-app-id"
     rest = MagicMock()
@@ -347,7 +347,7 @@ async def test_get_artmode_true(hass, device):
 
 
 async def test_turn_on_sends_magic_packet(hass, device):
-    with patch("custom_components.samsungtv_frame.device.send_magic_packet") as smp:
+    with patch("custom_components.samsung_tv_frame.device.send_magic_packet") as smp:
         await device.async_turn_on()
     smp.assert_called_once()
     assert smp.call_args.args[0] == "A0:D0:5B:86:CE:B7"
@@ -1642,7 +1642,7 @@ async def test_stop_bounds_wedged_remote_terminal_stop_once(device):
     device._remote.async_stop = AsyncMock(side_effect=never_finishes.wait)
 
     with patch(
-        "custom_components.samsungtv_frame.device.REMOTE_CLOSE_DEADLINE",
+        "custom_components.samsung_tv_frame.device.REMOTE_CLOSE_DEADLINE",
         0.01,
     ):
         await asyncio.wait_for(device.async_stop(), timeout=0.1)
@@ -2238,12 +2238,12 @@ async def test_remote_quiesce_cancels_long_running_operation(hass, device):
     with (
         patch.object(device, "_remote", remote),
         patch(
-            "custom_components.samsungtv_frame.device.REMOTE_DRAIN_DEADLINE",
+            "custom_components.samsung_tv_frame.device.REMOTE_DRAIN_DEADLINE",
             0.01,
             create=True,
         ),
         patch(
-            "custom_components.samsungtv_frame.device.REMOTE_CANCEL_DEADLINE",
+            "custom_components.samsung_tv_frame.device.REMOTE_CANCEL_DEADLINE",
             0.05,
             create=True,
         ),
@@ -2355,17 +2355,17 @@ async def test_device_stop_bounds_resistant_operation_and_aborts_remote_socket(
     with (
         patch.object(device, "_remote", remote),
         patch(
-            "custom_components.samsungtv_frame.device.REMOTE_DRAIN_DEADLINE",
+            "custom_components.samsung_tv_frame.device.REMOTE_DRAIN_DEADLINE",
             0.01,
             create=True,
         ),
         patch(
-            "custom_components.samsungtv_frame.device.REMOTE_CANCEL_DEADLINE",
+            "custom_components.samsung_tv_frame.device.REMOTE_CANCEL_DEADLINE",
             0.01,
             create=True,
         ),
         patch(
-            "custom_components.samsungtv_frame.frame_remote.REMOTE_CLOSE_DEADLINE",
+            "custom_components.samsung_tv_frame.frame_remote.REMOTE_CLOSE_DEADLINE",
             0.05,
         ),
     ):
@@ -2512,7 +2512,7 @@ async def test_get_current_art_returns_content_id(hass, device):
 
 
 async def test_thumbnail_d2d_failure_does_not_reset_or_retry(device, caplog):
-    caplog.set_level(logging.DEBUG, logger="custom_components.samsungtv_frame")
+    caplog.set_level(logging.DEBUG, logger="custom_components.samsung_tv_frame")
     private_value = "private-thumbnail-error"
     private_content_id = "private-content-id"
     device._art.request = AsyncMock(
@@ -2614,7 +2614,7 @@ async def test_get_volume_via_upnp(hass, device):
 
 
 async def test_get_volume_failure_resets_upnp_device(hass, device, caplog):
-    caplog.set_level(logging.DEBUG, logger="custom_components.samsungtv_frame")
+    caplog.set_level(logging.DEBUG, logger="custom_components.samsung_tv_frame")
     private_value = "private-upnp-error"
     device._upnp_device = MagicMock()
     with patch.object(

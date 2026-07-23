@@ -7,8 +7,8 @@ import pytest
 from homeassistant.config_entries import ConfigEntry, SOURCE_REAUTH
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.samsungtv_frame.art_session import ArtSessionState
-from custom_components.samsungtv_frame.const import (
+from custom_components.samsung_tv_frame.art_session import ArtSessionState
+from custom_components.samsung_tv_frame.const import (
     ART_FAIL_UNKNOWN_COUNT,
     ART_RECONCILE_SECONDS,
     CONF_HOST,
@@ -17,9 +17,9 @@ from custom_components.samsungtv_frame.const import (
     DEFAULT_APP_MAP,
     DOMAIN,
 )
-from custom_components.samsungtv_frame.coordinator import FrameCoordinator
-from custom_components.samsungtv_frame.device import FrameDevice
-from custom_components.samsungtv_frame.models import (
+from custom_components.samsung_tv_frame.coordinator import FrameCoordinator
+from custom_components.samsung_tv_frame.device import FrameDevice
+from custom_components.samsung_tv_frame.models import (
     ArtSettingKey,
     ArtSettingsSnapshot,
     FrameData,
@@ -400,7 +400,7 @@ async def test_art_event_reads_status_key(hass, mock_device):
 
 
 async def test_art_event_unknown_subevent_no_push(hass, mock_device, caplog):
-    caplog.set_level(logging.DEBUG, logger="custom_components.samsungtv_frame")
+    caplog.set_level(logging.DEBUG, logger="custom_components.samsung_tv_frame")
     private_value = "private-art-payload"
     coord = _make(hass, mock_device)
     coord.data = FrameData(
@@ -837,7 +837,7 @@ async def test_session_ready_callback_schedules_one_refresh(
             )
             assert (
                 coord.config_entry.async_create_background_task.call_args.args[2]
-                == "samsungtv_frame-art-ready-refresh"
+                == "samsung_tv_frame-art-ready-refresh"
             )
         finally:
             release_refresh.set()
@@ -1410,7 +1410,7 @@ async def test_unavailable_session_becomes_unknown_without_network_attempts(
         task_call.args[2]
         for task_call in coord.config_entry.async_create_background_task.call_args_list
     ]
-    assert "samsungtv_frame-listener-restart" not in task_names
+    assert "samsung_tv_frame-listener-restart" not in task_names
 
 
 async def test_failed_due_reconcile_counts_once(hass, mock_device):
@@ -1940,7 +1940,7 @@ async def test_wake_probe_refreshes_when_port_opens(hass, mock_device):
         patch.object(
             coord, "async_request_refresh", AsyncMock(side_effect=_resolve)
         ) as refresh,
-        patch("custom_components.samsungtv_frame.coordinator.WAKE_PROBE_DELAY", 0),
+        patch("custom_components.samsung_tv_frame.coordinator.WAKE_PROBE_DELAY", 0),
     ):
         await coord._wake_probe()
 
@@ -2007,7 +2007,7 @@ async def test_art_event_go_to_standby_holds_but_refreshes(hass, mock_device):
             )
             assert (
                 coord.config_entry.async_create_background_task.call_args.args[2]
-                == "samsungtv_frame-standby-refresh"
+                == "samsung_tv_frame-standby-refresh"
             )
             await asyncio.sleep(0)
             refresh.assert_awaited_once()

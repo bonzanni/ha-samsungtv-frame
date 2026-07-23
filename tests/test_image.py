@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.samsungtv_frame.const import (
+from custom_components.samsung_tv_frame.const import (
     CONF_HOST, CONF_MAC, CONF_TOKEN, DOMAIN,
 )
 
@@ -20,7 +20,7 @@ async def _setup(hass, mock_device):
     )
     entry.add_to_hass(hass)
     with patch(
-        "custom_components.samsungtv_frame.FrameDevice", return_value=mock_device
+        "custom_components.samsung_tv_frame.FrameDevice", return_value=mock_device
     ):
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()

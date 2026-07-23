@@ -2,12 +2,12 @@ import json
 
 import pytest
 
-from custom_components.samsungtv_frame.art_settings import (
+from custom_components.samsung_tv_frame.art_settings import (
     normalize_art_setting,
     parse_art_settings,
     parse_slideshow,
 )
-from custom_components.samsungtv_frame.models import (
+from custom_components.samsung_tv_frame.models import (
     ArtSettingKey,
     ArtSettingsSnapshot,
     SlideshowMode,

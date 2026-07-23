@@ -14,13 +14,13 @@ from samsungtvws.command import SamsungTVSleepCommand
 from samsungtvws.exceptions import ConnectionFailure, ResponseError, UnauthorizedError
 from websockets.protocol import State
 
-from custom_components.samsungtv_frame.const import ART_PROBE_DEADLINE
-from custom_components.samsungtv_frame.frame_art import (
+from custom_components.samsung_tv_frame.const import ART_PROBE_DEADLINE
+from custom_components.samsung_tv_frame.frame_art import (
     ArtHostUnavailable,
     ArtProbeTimeout,
     FrameArt,
 )
-from custom_components.samsungtv_frame.websocket_privacy import (
+from custom_components.samsung_tv_frame.websocket_privacy import (
     QUIET_WEBSOCKET_LOGGER,
 )
 
@@ -158,7 +158,7 @@ async def test_open_without_token_refuses_before_network(token):
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             connect_mock,
         ),
         pytest.raises(
@@ -369,11 +369,11 @@ async def test_optional_setters_correlate_exact_ls03b_payload(
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             AsyncMock(return_value=websocket),
         ),
         patch(
-            "custom_components.samsungtv_frame.frame_art.uuid.uuid4",
+            "custom_components.samsung_tv_frame.frame_art.uuid.uuid4",
             return_value="request-1",
         ),
     ):
@@ -589,7 +589,7 @@ async def test_thumbnail_downloads_d2d_file_with_secured_stream():
     open_connection = AsyncMock(return_value=(reader, writer))
 
     with patch(
-        "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+        "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
         open_connection,
     ):
         assert await art.get_thumbnail("MY_F0001") == b"jpeg-bytes"
@@ -614,7 +614,7 @@ async def test_thumbnail_drm_response_returns_none_without_opening_stream():
     open_connection = AsyncMock()
 
     with patch(
-        "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+        "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
         open_connection,
     ):
         assert await art.get_thumbnail("SAM-F0001") is None
@@ -639,7 +639,7 @@ async def test_thumbnail_truncated_stream_propagates_and_closes_writer(stream):
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
             AsyncMock(return_value=(stream_reader(stream), writer)),
         ),
         pytest.raises(asyncio.IncompleteReadError),
@@ -659,10 +659,10 @@ async def test_thumbnail_read_timeout_propagates_and_closes_writer():
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
             AsyncMock(return_value=(stream_reader(eof=False), writer)),
         ),
-        patch("custom_components.samsungtv_frame.frame_art.ART_D2D_DEADLINE", 0.01),
+        patch("custom_components.samsung_tv_frame.frame_art.ART_D2D_DEADLINE", 0.01),
         pytest.raises(TimeoutError),
     ):
         await art.get_thumbnail("MY_F0001")
@@ -679,7 +679,7 @@ async def test_thumbnail_cancellation_propagates_and_closes_writer():
     )
 
     with patch(
-        "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+        "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
         AsyncMock(return_value=(stream_reader(eof=False), writer)),
     ):
         thumbnail = asyncio.create_task(art.get_thumbnail("MY_F0001"))
@@ -705,11 +705,11 @@ async def test_close_cancels_blocked_thumbnail_and_cleans_writer():
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
             open_connection,
         ),
         patch(
-            "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+            "custom_components.samsung_tv_frame.frame_art.ART_CLOSE_DEADLINE",
             0.01,
         ),
     ):
@@ -746,13 +746,13 @@ async def test_thumbnail_writer_close_deadline_bounds_blocking_wait():
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
             AsyncMock(
                 return_value=(stream_reader(d2d_file(body=b"jpeg")), writer)
             ),
         ),
         patch(
-            "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+            "custom_components.samsung_tv_frame.frame_art.ART_CLOSE_DEADLINE",
             0.005,
         ),
     ):
@@ -774,7 +774,7 @@ async def test_thumbnail_writer_close_failure_preserves_read_error():
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
             AsyncMock(
                 return_value=(stream_reader(d2d_file(body=b"jpeg")[:-1]), writer)
             ),
@@ -810,11 +810,11 @@ async def test_upload_d2d_correlates_ready_and_pre_registers_completion():
     )
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             AsyncMock(return_value=ws),
         ),
         patch(
-            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
             open_connection,
         ),
     ):
@@ -904,15 +904,15 @@ async def test_upload_d2d_completion_accepts_echoed_upload_id(
     writer = FakeWriter(on_write=on_write)
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             AsyncMock(return_value=ws),
         ),
         patch(
-            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
             AsyncMock(return_value=(stream_reader(), writer)),
         ),
         patch(
-            "custom_components.samsungtv_frame.frame_art.ART_REQUEST_DEADLINE",
+            "custom_components.samsung_tv_frame.frame_art.ART_REQUEST_DEADLINE",
             0.01,
         ),
     ):
@@ -969,11 +969,11 @@ async def test_upload_d2d_completion_rejects_other_client_id(
     try:
         with (
             patch(
-                "custom_components.samsungtv_frame.frame_art.connect",
+                "custom_components.samsung_tv_frame.frame_art.connect",
                 AsyncMock(return_value=ws),
             ),
             patch(
-                "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+                "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
                 AsyncMock(return_value=(stream_reader(), writer)),
             ),
         ):
@@ -1070,7 +1070,7 @@ async def test_upload_d2d_does_not_retry_failed_drain_and_closes_writer():
         patch.object(art, "is_alive", return_value=True),
         patch.object(art, "_request_unlocked", request),
         patch(
-            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
             open_connection,
         ),
         pytest.raises(OSError, match="partial upload"),
@@ -1107,7 +1107,7 @@ async def test_upload_cancellation_cleans_completion_and_writer():
         patch.object(art, "is_alive", return_value=True),
         patch.object(art, "_request_unlocked", request),
         patch(
-            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
             AsyncMock(return_value=(stream_reader(), writer)),
         ),
     ):
@@ -1146,11 +1146,11 @@ async def test_close_cancels_blocked_upload_and_cleans_writer():
         patch.object(art, "is_alive", return_value=True),
         patch.object(art, "_request_unlocked", request),
         patch(
-            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
             AsyncMock(return_value=(stream_reader(), writer)),
         ),
         patch(
-            "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+            "custom_components.samsung_tv_frame.frame_art.ART_CLOSE_DEADLINE",
             0.01,
         ),
     ):
@@ -1203,7 +1203,7 @@ async def test_upload_writer_close_failure_preserves_drain_error():
         patch.object(art, "is_alive", return_value=True),
         patch.object(art, "_request_unlocked", request),
         patch(
-            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
             AsyncMock(return_value=(stream_reader(), writer)),
         ),
         pytest.raises(OSError, match="drain failed"),
@@ -1239,11 +1239,11 @@ async def test_upload_writer_close_deadline_preserves_cancellation():
         patch.object(art, "is_alive", return_value=True),
         patch.object(art, "_request_unlocked", request),
         patch(
-            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
             AsyncMock(return_value=(stream_reader(), writer)),
         ),
         patch(
-            "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+            "custom_components.samsung_tv_frame.frame_art.ART_CLOSE_DEADLINE",
             0.005,
         ),
     ):
@@ -1285,11 +1285,11 @@ async def test_upload_completion_timeout_closes_websocket_and_cleans_pending():
         patch.object(art, "is_alive", return_value=True),
         patch.object(art, "_request_unlocked", request),
         patch(
-            "custom_components.samsungtv_frame.frame_art.asyncio.open_connection",
+            "custom_components.samsung_tv_frame.frame_art.asyncio.open_connection",
             AsyncMock(return_value=(stream_reader(), writer)),
         ),
         patch(
-            "custom_components.samsungtv_frame.frame_art.ART_REQUEST_DEADLINE",
+            "custom_components.samsung_tv_frame.frame_art.ART_REQUEST_DEADLINE",
             0.01,
         ),
         pytest.raises(TimeoutError),
@@ -1332,7 +1332,7 @@ async def test_upload_api_097_sends_exact_binary_frame_and_correlates_result():
 
     ws = FakeWebSocket(handshake_frames(), on_send=on_send)
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         await art.start_listening()
@@ -1396,7 +1396,7 @@ async def test_open_ignores_broadcasts_preserves_token_and_waits_for_ready():
     )
     art = make_art(token="remote-token")
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         assert await art.open() is ws
@@ -1425,7 +1425,7 @@ async def test_open_ignores_art_token_across_reconnect_generations():
 
     try:
         with patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             connect_mock,
         ):
             assert await art.open() is first_ws
@@ -1485,7 +1485,7 @@ async def test_open_uses_quiet_logger_and_never_logs_private_handshake(
         return ws
 
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(side_effect=_connect),
     ) as connect_mock:
         assert await art.open() is ws
@@ -1530,7 +1530,7 @@ async def test_open_failure_is_sanitized_and_never_logs_raw_frame(
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             AsyncMock(return_value=ws),
         ),
         pytest.raises(expected_error) as raised,
@@ -1548,7 +1548,7 @@ async def test_generic_open_failure_is_sanitized():
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             AsyncMock(side_effect=OSError(secret)),
         ),
         pytest.raises(ConnectionFailure) as raised,
@@ -1566,7 +1566,7 @@ async def test_open_uses_instance_timeout_for_connect():
     connect_mock = AsyncMock(return_value=ws)
     try:
         with patch(
-            "custom_components.samsungtv_frame.frame_art.connect", connect_mock
+            "custom_components.samsung_tv_frame.frame_art.connect", connect_mock
         ):
             assert await art.open() is ws
 
@@ -1581,7 +1581,7 @@ async def test_open_uses_instance_timeout_for_handshake():
     try:
         with (
             patch(
-                "custom_components.samsungtv_frame.frame_art.connect",
+                "custom_components.samsung_tv_frame.frame_art.connect",
                 AsyncMock(return_value=ws),
             ),
             pytest.raises(TimeoutError),
@@ -1611,7 +1611,7 @@ async def test_open_fails_fast_when_connect_lists_no_art_host():
     art = make_art()
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             AsyncMock(return_value=ws),
         ),
         pytest.raises(ArtHostUnavailable),
@@ -1632,7 +1632,7 @@ async def test_open_allows_missing_client_metadata_when_ready_arrives():
     )
     art = make_art()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         assert await art.open() is ws
@@ -1661,7 +1661,7 @@ async def test_open_allows_unknown_client_role_metadata(clients):
     )
     art = make_art()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         assert await art.open() is ws
@@ -1681,7 +1681,7 @@ async def test_open_rejects_malformed_clients_with_explicit_false_role():
     art = make_art()
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             AsyncMock(return_value=ws),
         ),
         pytest.raises(ArtHostUnavailable),
@@ -1708,7 +1708,7 @@ async def test_open_times_out_when_host_is_present_but_ready_never_arrives():
     art = make_art(timeout=0.01)
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             AsyncMock(return_value=ws),
         ),
         pytest.raises(TimeoutError),
@@ -1723,7 +1723,7 @@ async def test_open_closes_local_socket_on_failed_handshake(event):
     ws = FakeWebSocket([{"event": event}])
     art = make_art()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         with pytest.raises((UnauthorizedError, ConnectionFailure)):
@@ -1747,7 +1747,7 @@ async def test_failed_handshake_close_error_force_aborts_without_token_adoption(
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             AsyncMock(return_value=ws),
         ),
         pytest.raises(ConnectionFailure, match="^Art handshake failed$"),
@@ -1775,11 +1775,11 @@ async def test_failed_handshake_close_deadline_force_aborts_and_drains():
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             AsyncMock(return_value=ws),
         ),
         patch(
-            "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+            "custom_components.samsung_tv_frame.frame_art.ART_CLOSE_DEADLINE",
             0.01,
         ),
         pytest.raises(ConnectionFailure, match="^Art handshake failed$"),
@@ -1792,7 +1792,7 @@ async def test_failed_handshake_close_deadline_force_aborts_and_drains():
     assert not [
         task
         for task in asyncio.all_tasks()
-        if task.get_name() == "samsungtv_frame-art-socket-close"
+        if task.get_name() == "samsung_tv_frame-art-socket-close"
     ]
 
 
@@ -1812,7 +1812,7 @@ async def test_cancellation_during_failed_handshake_cleanup_wins_and_aborts():
     ws.close = _close
     art = make_art()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         open_task = asyncio.create_task(art.open())
@@ -1846,7 +1846,7 @@ async def test_repeated_cancellation_during_failed_handshake_cleanup_wins():
     ws.close = _cancellation_resistant_close
     art = make_art()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         open_task = asyncio.create_task(art.open())
@@ -1863,7 +1863,7 @@ async def test_repeated_cancellation_during_failed_handshake_cleanup_wins():
     assert not [
         task
         for task in asyncio.all_tasks()
-        if task.get_name() == "samsungtv_frame-art-socket-close"
+        if task.get_name() == "samsung_tv_frame-art-socket-close"
     ]
 
 
@@ -1872,7 +1872,7 @@ async def test_open_deadline_bounds_endless_broadcast_stream():
     art = make_art(timeout=0.01)
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             AsyncMock(return_value=ws),
         ),
         pytest.raises(TimeoutError),
@@ -1886,7 +1886,7 @@ async def test_open_is_idempotent():
     ws = FakeWebSocket(handshake_frames())
     art = make_art()
     connect_mock = AsyncMock(return_value=ws)
-    with patch("custom_components.samsungtv_frame.frame_art.connect", connect_mock):
+    with patch("custom_components.samsung_tv_frame.frame_art.connect", connect_mock):
         assert await art.open() is ws
         assert await art.open() is ws
     connect_mock.assert_awaited_once()
@@ -1899,7 +1899,7 @@ async def test_open_rejects_permanent_stop_without_connecting():
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             connect_mock,
         ),
         pytest.raises(ConnectionFailure, match="stopped"),
@@ -1924,7 +1924,7 @@ async def test_open_queued_on_lifecycle_lock_rechecks_permanent_stop():
     try:
         with (
             patch(
-                "custom_components.samsungtv_frame.frame_art.connect",
+                "custom_components.samsung_tv_frame.frame_art.connect",
                 connect_mock,
             ),
             pytest.raises(ConnectionFailure, match="stopped"),
@@ -1945,7 +1945,7 @@ async def test_open_stop_during_handshake_closes_local_socket_before_publish():
     connect_frame["data"]["token"] = "new-token-after-stop"
 
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect", connect_mock
+        "custom_components.samsung_tv_frame.frame_art.connect", connect_mock
     ):
         open_task = asyncio.create_task(art.open())
         while not connect_mock.await_count:
@@ -1968,7 +1968,7 @@ async def test_start_listening_is_idempotent():
     ws = FakeWebSocket(handshake_frames())
     art = make_art()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         await art.start_listening()
@@ -1996,7 +1996,7 @@ async def test_start_listening_factory_failure_clears_binding_and_coroutine():
     try:
         with (
             patch(
-                "custom_components.samsungtv_frame.frame_art.connect",
+                "custom_components.samsung_tv_frame.frame_art.connect",
                 AsyncMock(return_value=ws),
             ),
             pytest.raises(RuntimeError, match="task factory failed"),
@@ -2022,7 +2022,7 @@ async def test_is_alive_becomes_false_when_receiver_exits():
     )
     art = make_art()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         await art.start_listening()
@@ -2067,7 +2067,7 @@ async def test_receiver_decodes_push_payload_for_callback():
     )
     art = make_art(callback=callback)
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         await art.start_listening()
@@ -2135,7 +2135,7 @@ async def test_request_correlates_response_by_uuid():
     ws = FakeWebSocket(handshake_frames())
     art = make_art()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         await art.start_listening()
@@ -2168,7 +2168,7 @@ async def test_request_wire_payload_is_unchanged_and_not_logged(caplog):
     caplog.set_level(logging.DEBUG, logger="samsungtvws")
 
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         await art.start_listening()
@@ -2200,7 +2200,7 @@ async def test_send_command_preserves_dict_and_sleep_semantics(caplog):
     assert ws.sent == [json.dumps(payload)]
 
     with patch(
-        "custom_components.samsungtv_frame.frame_art.asyncio.sleep",
+        "custom_components.samsung_tv_frame.frame_art.asyncio.sleep",
         AsyncMock(),
     ) as sleep:
         await FrameArt._send_command(ws, SamsungTVSleepCommand(0.25), 99)
@@ -2214,11 +2214,11 @@ async def test_request_falls_back_to_id_when_request_id_is_null():
     art = make_art()
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             AsyncMock(return_value=ws),
         ),
         patch(
-            "custom_components.samsungtv_frame.frame_art.ART_REQUEST_DEADLINE",
+            "custom_components.samsung_tv_frame.frame_art.ART_REQUEST_DEADLINE",
             0.01,
         ),
     ):
@@ -2241,7 +2241,7 @@ async def test_request_correlates_uuidless_expected_sub_event():
     ws = FakeWebSocket(handshake_frames())
     art = make_art()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         await art.start_listening()
@@ -2269,7 +2269,7 @@ async def test_request_translates_error_payload():
     ws = FakeWebSocket(handshake_frames())
     art = make_art()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         await art.start_listening()
@@ -2306,7 +2306,7 @@ async def test_push_and_request_response_coexist():
     ws = FakeWebSocket(handshake_frames())
     art = make_art(callback=callback)
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         await art.start_listening()
@@ -2359,7 +2359,7 @@ async def test_callback_exception_does_not_interrupt_pending_request(
     ws = FakeWebSocket(handshake_frames())
     art = make_art(callback=callback)
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         await art.start_listening()
@@ -2407,7 +2407,7 @@ async def test_receiver_and_callback_failures_do_not_log_private_data(caplog):
     caplog.set_level(logging.DEBUG, logger="samsungtvws")
 
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         await art.start_listening()
@@ -2447,7 +2447,7 @@ async def test_receiver_disconnect_fails_pending_request():
     ws = FakeWebSocket(handshake_frames())
     art = make_art()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         await art.start_listening()
@@ -2464,7 +2464,7 @@ async def test_request_cancellation_removes_pending_registration():
     ws = FakeWebSocket(handshake_frames())
     art = make_art()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         await art.start_listening()
@@ -2501,10 +2501,10 @@ async def test_request_timeout_closes_transport():
     art = make_art()
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             AsyncMock(return_value=ws),
         ),
-        patch("custom_components.samsungtv_frame.frame_art.ART_REQUEST_DEADLINE", 0.01),
+        patch("custom_components.samsung_tv_frame.frame_art.ART_REQUEST_DEADLINE", 0.01),
         pytest.raises(TimeoutError),
     ):
         await art.start_listening()
@@ -2526,11 +2526,11 @@ async def test_probe_timeout_preserves_transport_and_owns_only_its_waiter():
     art = make_art()
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             AsyncMock(return_value=ws),
         ),
         patch(
-            "custom_components.samsungtv_frame.frame_art.ART_PROBE_DEADLINE",
+            "custom_components.samsung_tv_frame.frame_art.ART_PROBE_DEADLINE",
             0.01,
         ),
     ):
@@ -2584,7 +2584,7 @@ async def test_probe_deadline_includes_blocked_websocket_send():
     with (
         patch.object(art, "_send_command", side_effect=blocked_send),
         patch(
-            "custom_components.samsungtv_frame.frame_art.ART_PROBE_DEADLINE",
+            "custom_components.samsung_tv_frame.frame_art.ART_PROBE_DEADLINE",
             0.01,
         ),
         pytest.raises(ArtProbeTimeout),
@@ -2612,7 +2612,7 @@ async def test_request_deadline_includes_blocked_websocket_send():
         patch.object(art, "is_alive", return_value=True),
         patch.object(art, "_send_command", side_effect=blocked_send),
         patch(
-            "custom_components.samsungtv_frame.frame_art.ART_REQUEST_DEADLINE",
+            "custom_components.samsung_tv_frame.frame_art.ART_REQUEST_DEADLINE",
             0.01,
         ),
         pytest.raises(TimeoutError),
@@ -2682,7 +2682,7 @@ async def test_close_is_idempotent():
     ws = FakeWebSocket(handshake_frames())
     art = make_art()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         await art.start_listening()
@@ -2721,7 +2721,7 @@ async def test_close_deadline_force_aborts_and_drains_close_task():
     art.connection = ws
 
     with patch(
-        "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+        "custom_components.samsung_tv_frame.frame_art.ART_CLOSE_DEADLINE",
         0.01,
     ):
         await art.close()
@@ -2732,7 +2732,7 @@ async def test_close_deadline_force_aborts_and_drains_close_task():
     assert not [
         task
         for task in asyncio.all_tasks()
-        if task.get_name() == "samsungtv_frame-art-socket-close"
+        if task.get_name() == "samsung_tv_frame-art-socket-close"
     ]
 
 
@@ -2782,7 +2782,7 @@ def assert_no_art_close_tasks():
         in {
             "test-blocking-art-transfer",
             "test-blocking-art-receiver",
-            "samsungtv_frame-art-socket-close",
+            "samsung_tv_frame-art-socket-close",
         }
     ]
 
@@ -2934,7 +2934,7 @@ async def test_close_retains_transfer_that_outlives_drain_deadline(
     art._transfer_tasks.add(transfer)
     await transfer_started.wait()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+        "custom_components.samsung_tv_frame.frame_art.ART_CLOSE_DEADLINE",
         0.01,
     ):
         first_close = asyncio.create_task(art.close())
@@ -2997,7 +2997,7 @@ async def test_close_retains_receiver_that_outlives_drain_deadline(
     art._recv_loop = receiver
     await recv_started.wait()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+        "custom_components.samsung_tv_frame.frame_art.ART_CLOSE_DEADLINE",
         0.01,
     ):
         first_close = asyncio.create_task(art.close())
@@ -3056,7 +3056,7 @@ async def test_open_fences_retained_receiver_until_its_finally_completes():
     art._receiver_connection = old_websocket
     await recv_started.wait()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.ART_CLOSE_DEADLINE",
+        "custom_components.samsung_tv_frame.frame_art.ART_CLOSE_DEADLINE",
         0.01,
     ):
         result = (
@@ -3076,7 +3076,7 @@ async def test_open_fences_retained_receiver_until_its_finally_completes():
         assert live_children()
         with (
             patch(
-                "custom_components.samsungtv_frame.frame_art.connect",
+                "custom_components.samsung_tv_frame.frame_art.connect",
                 connect_mock,
             ),
             pytest.raises(
@@ -3096,7 +3096,7 @@ async def test_open_fences_retained_receiver_until_its_finally_completes():
         assert art._receiver_connection is None
 
         with patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             connect_mock,
         ):
             assert await art.open() is new_websocket
@@ -3144,7 +3144,7 @@ async def test_open_fences_current_transfer_until_outer_finally_untracks():
         assert art.has_live_children()
         with (
             patch(
-                "custom_components.samsungtv_frame.frame_art.connect",
+                "custom_components.samsung_tv_frame.frame_art.connect",
                 connect_mock,
             ),
             pytest.raises(
@@ -3160,7 +3160,7 @@ async def test_open_fences_current_transfer_until_outer_finally_untracks():
         await transfer
         assert not art.has_live_children()
         with patch(
-            "custom_components.samsungtv_frame.frame_art.connect",
+            "custom_components.samsung_tv_frame.frame_art.connect",
             connect_mock,
         ):
             assert await art.open() is new_websocket
@@ -3187,7 +3187,7 @@ async def test_close_serializes_with_in_progress_open():
     ws = FakeWebSocket([])
     art = make_art()
     with patch(
-        "custom_components.samsungtv_frame.frame_art.connect",
+        "custom_components.samsung_tv_frame.frame_art.connect",
         AsyncMock(return_value=ws),
     ):
         open_task = asyncio.create_task(art.open())

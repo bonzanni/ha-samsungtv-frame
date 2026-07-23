@@ -1,7 +1,7 @@
 send_key:
   target:
     entity:
-      integration: samsungtv_frame
+      integration: samsung_tv_frame
       domain: media_player
   fields:
     key:
@@ -13,7 +13,7 @@ send_key:
 set_art_mode:
   target:
     entity:
-      integration: samsungtv_frame
+      integration: samsung_tv_frame
       domain: media_player
   fields:
     enabled:
@@ -24,7 +24,7 @@ set_art_mode:
 select_art:
   target:
     entity:
-      integration: samsungtv_frame
+      integration: samsung_tv_frame
       domain: media_player
   fields:
     content_id:
@@ -41,7 +41,7 @@ select_art:
 upload_art:
   target:
     entity:
-      integration: samsungtv_frame
+      integration: samsung_tv_frame
       domain: media_player
   fields:
     path:
@@ -64,7 +64,7 @@ upload_art:
 delete_art:
   target:
     entity:
-      integration: samsungtv_frame
+      integration: samsung_tv_frame
       domain: media_player
   fields:
     content_id:
@@ -76,7 +76,7 @@ delete_art:
 set_slideshow:
   target:
     entity:
-      integration: samsungtv_frame
+      integration: samsung_tv_frame
       domain: media_player
   fields:
     duration_minutes:
@@ -102,7 +102,7 @@ set_slideshow:
 change_matte:
   target:
     entity:
-      integration: samsungtv_frame
+      integration: samsung_tv_frame
       domain: media_player
   fields:
     matte_id:
@@ -119,7 +119,7 @@ change_matte:
 set_photo_filter:
   target:
     entity:
-      integration: samsungtv_frame
+      integration: samsung_tv_frame
       domain: media_player
   fields:
     filter_id:
@@ -136,7 +136,7 @@ set_photo_filter:
 set_favourite:
   target:
     entity:
-      integration: samsungtv_frame
+      integration: samsung_tv_frame
       domain: media_player
   fields:
     favourite:

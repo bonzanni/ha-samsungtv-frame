@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.samsungtv_frame.art_session import ArtSessionState
-from custom_components.samsungtv_frame.const import (
+from custom_components.samsung_tv_frame.art_session import ArtSessionState
+from custom_components.samsung_tv_frame.const import (
     CONF_HOST,
     CONF_MAC,
     CONF_MODEL,
@@ -15,11 +15,11 @@ from custom_components.samsungtv_frame.const import (
     DOMAIN,
     OPT_HEARTBEAT,
 )
-from custom_components.samsungtv_frame.coordinator import FrameCoordinator
-from custom_components.samsungtv_frame.diagnostics import (
+from custom_components.samsung_tv_frame.coordinator import FrameCoordinator
+from custom_components.samsung_tv_frame.diagnostics import (
     async_get_config_entry_diagnostics,
 )
-from custom_components.samsungtv_frame.models import (
+from custom_components.samsung_tv_frame.models import (
     ArtSettingKey,
     ArtSettingsSnapshot,
     FrameData,

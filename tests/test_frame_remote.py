@@ -13,8 +13,8 @@ from samsungtvws.exceptions import ConnectionFailure, UnauthorizedError
 from samsungtvws.remote import ChannelEmitCommand
 from websockets.protocol import State
 
-from custom_components.samsungtv_frame import frame_remote as frame_remote_module
-from custom_components.samsungtv_frame.frame_remote import (
+from custom_components.samsung_tv_frame import frame_remote as frame_remote_module
+from custom_components.samsung_tv_frame.frame_remote import (
     FrameRemote,
     RemotePairingRequired,
 )
@@ -70,7 +70,7 @@ async def test_open_captures_token_after_ignored_broadcasts():
     )
     remote = make_remote()
     with patch(
-        "custom_components.samsungtv_frame.frame_remote.connect",
+        "custom_components.samsung_tv_frame.frame_remote.connect",
         AsyncMock(return_value=ws),
     ):
         assert await remote.open() is ws
@@ -96,7 +96,7 @@ async def test_open_does_not_log_handshake_token_or_client_data(caplog):
     caplog.set_level(logging.DEBUG, logger="samsungtvws")
 
     with patch(
-        "custom_components.samsungtv_frame.frame_remote.connect",
+        "custom_components.samsung_tv_frame.frame_remote.connect",
         AsyncMock(return_value=ws),
     ):
         await remote.open()
@@ -118,7 +118,7 @@ async def test_open_uses_permanently_quiet_connection_logger(caplog):
         return ws
 
     with patch(
-        "custom_components.samsungtv_frame.frame_remote.connect",
+        "custom_components.samsung_tv_frame.frame_remote.connect",
         AsyncMock(side_effect=_connect),
     ) as connect_mock:
         await remote.open()
@@ -200,7 +200,7 @@ async def test_timeout_event_requires_reauth_and_closes_local_socket():
     remote = make_remote()
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_remote.connect",
+            "custom_components.samsung_tv_frame.frame_remote.connect",
             AsyncMock(return_value=ws),
         ),
         pytest.raises(RemotePairingRequired),
@@ -215,7 +215,7 @@ async def test_timeout_event_preserves_existing_token():
     remote = make_remote()
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_remote.connect",
+            "custom_components.samsung_tv_frame.frame_remote.connect",
             AsyncMock(return_value=ws),
         ),
         pytest.raises(RemotePairingRequired),
@@ -237,7 +237,7 @@ async def test_open_failure_closes_local_socket(event, expected_error):
     remote = make_remote()
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_remote.connect",
+            "custom_components.samsung_tv_frame.frame_remote.connect",
             AsyncMock(return_value=ws),
         ),
         pytest.raises(expected_error),
@@ -266,7 +266,7 @@ async def test_open_failure_does_not_expose_raw_handshake(
     remote = make_remote()
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_remote.connect",
+            "custom_components.samsung_tv_frame.frame_remote.connect",
             AsyncMock(return_value=ws),
         ),
         pytest.raises(expected_error) as raised,
@@ -283,7 +283,7 @@ async def test_generic_open_failure_is_sanitized():
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_remote.connect",
+            "custom_components.samsung_tv_frame.frame_remote.connect",
             AsyncMock(side_effect=OSError(secret)),
         ),
         pytest.raises(ConnectionFailure) as raised,
@@ -299,7 +299,7 @@ async def test_open_cancellation_closes_local_socket():
     ws = FakeWebSocket([])
     remote = make_remote()
     with patch(
-        "custom_components.samsungtv_frame.frame_remote.connect",
+        "custom_components.samsung_tv_frame.frame_remote.connect",
         AsyncMock(return_value=ws),
     ):
         open_task = asyncio.create_task(remote.open())
@@ -324,7 +324,7 @@ async def test_cancellation_during_failed_handshake_cleanup_wins_and_aborts():
     ws.close = _close
     remote = make_remote()
     with patch(
-        "custom_components.samsungtv_frame.frame_remote.connect",
+        "custom_components.samsung_tv_frame.frame_remote.connect",
         AsyncMock(return_value=ws),
     ):
         open_task = asyncio.create_task(remote.open())
@@ -354,7 +354,7 @@ async def test_repeated_cancellation_during_failed_handshake_cleanup_wins():
     ws.close = _cancellation_resistant_close
     remote = make_remote()
     with patch(
-        "custom_components.samsungtv_frame.frame_remote.connect",
+        "custom_components.samsung_tv_frame.frame_remote.connect",
         AsyncMock(return_value=ws),
     ):
         open_task = asyncio.create_task(remote.open())
@@ -376,7 +376,7 @@ async def test_open_timeout_closes_local_socket():
     remote = make_remote(timeout=0.01)
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_remote.connect",
+            "custom_components.samsung_tv_frame.frame_remote.connect",
             AsyncMock(return_value=ws),
         ),
         pytest.raises(TimeoutError),
@@ -406,7 +406,7 @@ async def test_open_tolerates_startup_broadcasts(broadcast_event):
     )
     remote = make_remote()
     with patch(
-        "custom_components.samsungtv_frame.frame_remote.connect",
+        "custom_components.samsung_tv_frame.frame_remote.connect",
         AsyncMock(return_value=ws),
     ):
         assert await remote.open() is ws
@@ -422,7 +422,7 @@ async def test_open_passes_injected_ssl_context_and_timeout_to_connect():
     )
     connect_mock = AsyncMock(return_value=ws)
     with patch(
-        "custom_components.samsungtv_frame.frame_remote.connect",
+        "custom_components.samsung_tv_frame.frame_remote.connect",
         connect_mock,
     ):
         assert await remote.open() is ws
@@ -440,7 +440,7 @@ async def test_close_closes_successful_websocket():
     ws = FakeWebSocket([{"event": "ms.channel.connect"}])
     remote = make_remote()
     with patch(
-        "custom_components.samsungtv_frame.frame_remote.connect",
+        "custom_components.samsung_tv_frame.frame_remote.connect",
         AsyncMock(return_value=ws),
     ):
         await remote.open()
@@ -458,7 +458,7 @@ async def test_concurrent_open_calls_share_one_connect():
     remote = make_remote()
     connect_mock = AsyncMock(return_value=ws)
     with patch(
-        "custom_components.samsungtv_frame.frame_remote.connect",
+        "custom_components.samsung_tv_frame.frame_remote.connect",
         connect_mock,
     ):
         first, second = await asyncio.gather(remote.open(), remote.open())
@@ -492,7 +492,7 @@ async def test_close_timeout_retains_connection_ownership():
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_remote.REMOTE_CLOSE_DEADLINE",
+            "custom_components.samsung_tv_frame.frame_remote.REMOTE_CLOSE_DEADLINE",
             0.01,
         ),
         pytest.raises(TimeoutError),
@@ -529,7 +529,7 @@ async def test_stop_during_open_cannot_publish_socket_or_token():
     ws.recv = _recv
     remote = make_remote()
     with patch(
-        "custom_components.samsungtv_frame.frame_remote.connect",
+        "custom_components.samsung_tv_frame.frame_remote.connect",
         AsyncMock(return_value=ws),
     ):
         open_task = asyncio.create_task(remote.open())
@@ -554,7 +554,7 @@ async def test_open_after_stop_refuses_without_network():
 
     with (
         patch(
-            "custom_components.samsungtv_frame.frame_remote.connect",
+            "custom_components.samsung_tv_frame.frame_remote.connect",
             connect_mock,
         ),
         pytest.raises(ConnectionFailure, match="Remote transport is stopped"),
@@ -595,7 +595,7 @@ async def test_terminal_stop_bounds_lifecycle_lock_wait_and_aborts():
     remote.connection = ws
 
     with patch(
-        "custom_components.samsungtv_frame.frame_remote.REMOTE_CLOSE_DEADLINE",
+        "custom_components.samsung_tv_frame.frame_remote.REMOTE_CLOSE_DEADLINE",
         0.01,
     ):
         ordinary_close = asyncio.create_task(remote.close())

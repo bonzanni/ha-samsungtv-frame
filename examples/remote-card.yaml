@@ -51,7 +51,7 @@ cards:
         icon: mdi:home
         tap_action:
           action: perform-action
-          perform_action: samsungtv_frame.send_key
+          perform_action: samsung_tv_frame.send_key
           target: {entity_id: media_player.living_room_tv_2}
           data: {key: KEY_HOME}
       - type: button
@@ -59,7 +59,7 @@ cards:
         icon: mdi:arrow-left
         tap_action:
           action: perform-action
-          perform_action: samsungtv_frame.send_key
+          perform_action: samsung_tv_frame.send_key
           target: {entity_id: media_player.living_room_tv_2}
           data: {key: KEY_RETURN}
   - type: horizontal-stack
@@ -72,7 +72,7 @@ cards:
         icon: mdi:chevron-up
         tap_action:
           action: perform-action
-          perform_action: samsungtv_frame.send_key
+          perform_action: samsung_tv_frame.send_key
           target: {entity_id: media_player.living_room_tv_2}
           data: {key: KEY_UP}
       - type: button
@@ -85,7 +85,7 @@ cards:
         icon: mdi:chevron-left
         tap_action:
           action: perform-action
-          perform_action: samsungtv_frame.send_key
+          perform_action: samsung_tv_frame.send_key
           target: {entity_id: media_player.living_room_tv_2}
           data: {key: KEY_LEFT}
       - type: button
@@ -93,7 +93,7 @@ cards:
         icon: mdi:circle-outline
         tap_action:
           action: perform-action
-          perform_action: samsungtv_frame.send_key
+          perform_action: samsung_tv_frame.send_key
           target: {entity_id: media_player.living_room_tv_2}
           data: {key: KEY_ENTER}
       - type: button
@@ -101,7 +101,7 @@ cards:
         icon: mdi:chevron-right
         tap_action:
           action: perform-action
-          perform_action: samsungtv_frame.send_key
+          perform_action: samsung_tv_frame.send_key
           target: {entity_id: media_player.living_room_tv_2}
           data: {key: KEY_RIGHT}
   - type: horizontal-stack
@@ -111,7 +111,7 @@ cards:
         icon: mdi:chevron-double-down
         tap_action:
           action: perform-action
-          perform_action: samsungtv_frame.send_key
+          perform_action: samsung_tv_frame.send_key
           target: {entity_id: media_player.living_room_tv_2}
           data: {key: KEY_CHDOWN}
       - type: button
@@ -119,7 +119,7 @@ cards:
         icon: mdi:chevron-down
         tap_action:
           action: perform-action
-          perform_action: samsungtv_frame.send_key
+          perform_action: samsung_tv_frame.send_key
           target: {entity_id: media_player.living_room_tv_2}
           data: {key: KEY_DOWN}
       - type: button
@@ -127,7 +127,7 @@ cards:
         icon: mdi:chevron-double-up
         tap_action:
           action: perform-action
-          perform_action: samsungtv_frame.send_key
+          perform_action: samsung_tv_frame.send_key
           target: {entity_id: media_player.living_room_tv_2}
           data: {key: KEY_CHUP}
   - type: picture-entity
